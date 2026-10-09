@@ -453,7 +453,7 @@ Start it with `npm start`, or import it: `const host = await openHost({ port: 0 
 | 2 | Link | WebSocket wrapper with handlers and reconnect |
 | 3 | Pads | Keyboard, gamepad and touch → the nine keys |
 | 4 | Sparks | The GPU particle system |
-| 5 | Rings | Pooled flat shockwave rings |
+| 5 | Rings | Pooled floor shockwave rings and camera-facing ribbon bolts |
 | 6 | Looks | Particle recipes and status looks |
 | 7 | Figure | One mage: model, motion and status visuals |
 | 8 | Flight | One spell in the air |
@@ -466,12 +466,25 @@ Start it with `npm start`, or import it: `const host = await openHost({ port: 0 
 
 ### Rendering
 
-- Three.js with ACES tone mapping and an Unreal bloom pass.
+- Three.js with ACES tone mapping and an Unreal bloom pass. The scene renders into a multisampled half-float buffer (MSAA), bloom runs at CSS-pixel size so it spreads the same on every screen, and the output pass adds a faint dither so dark gradients do not band.
 - The sky is a procedural nebula shader, baked once into a cube map.
-- The floor shader draws team-tinted grids, rotating rune rings and the glowing rift line. A translucent curtain marks the rift itself.
-- Pillars with floating crystals ring the arena; dark shards drift in the distance.
-- Each mage is built from simple shapes: a lathed robe, hat, glowing eyes, a staff with a gem and an orbiting ring, and a hexagonal pedestal in team colors.
-- A quality governor lowers the pixel ratio (to no less than 0.6) when frames stay slow.
+- The floor shader draws team-tinted grids, rotating rune rings and the glowing rift line. Its lines are filtered by their size on screen (`fwidth`), so distant grid lines fade instead of shimmering. A translucent curtain marks the rift itself.
+- Turned pillars with glowing bands and floating crystals ring the arena; craggy rocks drift in the distance.
+- Each mage is built from smooth shapes: a lathed robe and a hat whose tip droops (both welded for smooth normals), glowing eyes, a staff with a gem and an orbiting ring, and a chamfered hexagonal pedestal in team colors. Robes and hats get a soft rim light in the team color.
+- Static parts that share a material are merged (brim and crown, both eyes), and the world shares geometry and materials, so a mage costs about twenty draw calls.
+
+### Quality
+
+| Tier | Pixel ratio cap | MSAA | Small particles |
+|---|---|---|---|
+| low | 0.85 | off | half |
+| medium | 1 | 2× | three quarters |
+| high | 1.5 | 4× | all |
+| ultra | 2 | 4× | all |
+
+- The start tier is a guess: software renderers start low, small devices (≤ 4 cores or ≤ 3 GB) medium, touch devices high, others ultra. `?quality=low|medium|high|ultra` pins a tier.
+- The governor drops a tier when frames stay slower than 40 per second for 1.5 seconds. If the drop does not speed frames up (a capped display or a busy CPU), it is undone and that tier becomes the floor. After 10 seconds of fast frames it climbs back, never above a tier that just failed.
+- Points under two pixels are drawn two pixels wide and fainter, so tiny sparks do not flicker.
 
 ### Sparks
 
@@ -494,7 +507,7 @@ Shapes are drawn in the fragment shader: glow, star, ring, shard, smoke, leaf, r
 
 ### Looks
 
-Recipes (`burst`, `smoke`, `ground`, `pillar`, `spiral`, `implode`, `trail`, `stream`, `lightning`, `mend`, `shatter`, `puff`, `confetti`) take a point and a school. Schools set three colors, a body shape, a bit shape and a lift (fire rises, frost falls).
+Recipes (`burst`, `smoke`, `ground`, `pillar`, `spiral`, `implode`, `trail`, `stream`, `beam`, `lightning`, `mend`, `shatter`, `puff`, `confetti`) take a point and a school. `lightning` and `beam` draw **bolts**: polylines expanded into camera-facing strips in the vertex shader, with a hot core and soft edges. Lightning forks and flickers; beams ripple. Flights lay trails at a fixed rate along the stretch flown since the last frame, so they look the same at any frame rate. Schools set three colors, a body shape, a bit shape and a lift (fire rises, frost falls).
 
 Status looks (`STATUS_LOOK`) are rows of data: emission rate, shape, color, anchor (head, chest, body, feet) and motion (rise, fall, drift, orbit, burst, still). Some looks also switch meshes on the figure: shield bubble, ice block, sheep, stone or gold tint, and a ghostly body when banished.
 
@@ -505,7 +518,8 @@ Status looks (`STATUS_LOOK`) are rows of data: emission rate, shape, color, anch
 | `cast` | Magic circle under the caster in the school color, gem glow, particles drawn into the gem |
 | `fire` | Gem flash and a `Flight` timed to land on the `land` tick |
 | `land` | Impact by role: burst and shockwave (damage), rising motes and pillar (heal), spiral (boon), implosion (bane) |
-| `hit` | Flinch, small burst, damage number in the school color; red vignette when you are hit hard |
+| `hit` | Flinch and a brief white flash (faint for damage over time), small burst, damage number in the school color; red vignette when you are hit hard |
+| `jump` | A forked lightning bolt between the two mages |
 | `mend` | Green number |
 | `void` | "Immune", "Dodged", "Reflected", "Resisted" |
 | `fade` (break) | Shield shatters into shards |
@@ -513,6 +527,8 @@ Status looks (`STATUS_LOOK`) are rows of data: emission rate, shape, color, anch
 | `rise` | Golden pillar |
 | `surge` | Rift and floor glow brighter, small shake |
 | `over` | Confetti over the winners, then the results card |
+
+A hidden tab draws nothing, so it skips effects and applies only events that leave lasting state (`fizzle`, `surge`, `over`); otherwise every effect from the time away would burst out at once on return.
 
 ### Camera and HUD
 
@@ -558,7 +574,7 @@ Screenshots in `shots/`:
 | `14-phone-fight.png` | Touch pads in a fight |
 | `15-watching.png` | Watching the phone's duel |
 
-The browser test uses software WebGL, so it keeps at most two pages open and freezes the one it is not driving.
+The browser test uses software WebGL, so it keeps at most two pages open and freezes the one it is not driving. Pages play at the low tier; each screenshot is drawn at the top tier.
 
 ---
 
