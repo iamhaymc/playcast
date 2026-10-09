@@ -1126,9 +1126,9 @@ function shapes() {
         [0.14, 1.64],
         [0.001, 1.66],
       ],
-      48,
+      32,
     ),
-    40,
+    32,
   )
   const heights = robe.attributes.position
   const shade = new Float32Array(heights.count * 3)
@@ -1139,32 +1139,32 @@ function shapes() {
   robe.setAttribute('color', new THREE.BufferAttribute(shade, 3))
 
   // One hat: a tilted brim and a tall cone whose tip droops to the side.
-  const brim = new THREE.CylinderGeometry(0.62, 0.66, 0.05, 48).rotateX(0.08).rotateZ(0.05).translate(0, SEAT_Y + 2.0, 0)
-  const cone = Array.from({ length: 24 }, (_, i) => {
-    const t = i / 23
+  const brim = new THREE.CylinderGeometry(0.62, 0.66, 0.05, 40).rotateX(0.08).rotateZ(0.05).translate(0, SEAT_Y + 2.0, 0)
+  const cone = Array.from({ length: 20 }, (_, i) => {
+    const t = i / 19
     return new THREE.Vector2(Math.max(0.001, 0.38 * Math.pow(1 - t, 1.3)), t * 1.02)
   })
-  const crown = lathe(cone, 32, (v) => {
+  const crown = lathe(cone, 28, (v) => {
     const t = v.y / 1.02
     return v.set(v.x + 0.34 * Math.pow(t, 2.6), v.y - 0.12 * Math.pow(t, 4), v.z - 0.04 * Math.pow(t, 2))
   }).translate(0, SEAT_Y + 1.99, 0)
   brim.deleteAttribute('uv')
 
-  const eye = (x) => new THREE.SphereGeometry(0.038, 12, 8).translate(x, SEAT_Y + 1.85, 0.17)
+  const eye = (x) => new THREE.SphereGeometry(0.038, 10, 6).translate(x, SEAT_Y + 1.85, 0.17)
 
   Object.assign(GEOMETRY, {
     robe,
-    head: new THREE.SphereGeometry(0.21, 28, 18),
+    head: new THREE.SphereGeometry(0.21, 24, 16),
     hat: mergeGeometries([brim, crown]),
-    band: new THREE.TorusGeometry(0.355, 0.035, 10, 48),
+    band: new THREE.TorusGeometry(0.355, 0.035, 8, 40),
     eyes: mergeGeometries([eye(-0.075), eye(0.075)]),
     staff: new THREE.CylinderGeometry(0.035, 0.05, 2.5, 12),
-    knob: new THREE.TorusGeometry(0.06, 0.03, 8, 16),
+    knob: new THREE.TorusGeometry(0.06, 0.03, 6, 12),
     gem: new THREE.OctahedronGeometry(0.18, 0).scale(1, 1.25, 1),
-    orbit: new THREE.TorusGeometry(0.3, 0.018, 8, 48),
-    mote: new THREE.IcosahedronGeometry(0.06, 2),
-    collar: new THREE.TorusGeometry(0.3, 0.05, 12, 36),
-    belt: new THREE.TorusGeometry(0.44, 0.035, 8, 44),
+    orbit: new THREE.TorusGeometry(0.3, 0.018, 6, 40),
+    mote: new THREE.IcosahedronGeometry(0.06, 1),
+    collar: new THREE.TorusGeometry(0.3, 0.05, 8, 32),
+    belt: new THREE.TorusGeometry(0.44, 0.035, 6, 40),
     arm: new THREE.CylinderGeometry(0.07, 0.14, 0.75, 16),
     base: hexPrism(1.0, 0.24, 0.045),
     rim: new THREE.TorusGeometry(1.0, 0.03, 8, 6),
@@ -1848,9 +1848,9 @@ class Stage {
           [0.56, 4.14],
           [0.001, 4.2],
         ],
-        64,
+        40,
       ),
-      28,
+      24,
     )
     const ringGeometry = new THREE.TorusGeometry(0.58, 0.035, 8, 48).rotateX(Math.PI / 2)
     const crystalGeometry = new THREE.OctahedronGeometry(0.6, 0)
