@@ -41,21 +41,24 @@
   --flame: #ff5a4d;
   --leaf: #4dff9a;
 
-  --fire: #ff8a3d;
-  --frost: #8fe8ff;
-  --storm: #b9a2ff;
-  --nature: #7dff6a;
-  --shadow: #c06bff;
-  --holy: #ffe57a;
-  --arcane: #ff7ae0;
+  /* School colors match SCHOOL_LOOK in page.mjs, a touch lighter for text on glass. */
+  --fire: #ff7a2e;
+  --frost: #6fd0ff;
+  --storm: #7d9bff;
+  --nature: #4ee66a;
+  --shadow: #b064ff;
+  --holy: #ffcf3d;
+  --arcane: #ff5ad6;
 
   --radius: 16px;
   --radius-sm: 10px;
-  --shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+  --elevation: 0 24px 70px rgba(0, 0, 0, 0.5);
   --font: 'Inter', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Roboto, sans-serif;
   --mono: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   --gutter: max(16px, env(safe-area-inset-left));
+  --control: 38px;
+  --top: max(12px, env(safe-area-inset-top));
 }
 
 /* ─── 2 · Base ───────────────────────────────────────────────────────────── */
@@ -100,10 +103,11 @@ body {
   transition: background 0.4s;
 }
 
+/* Menus sit centered: darken the middle behind the card, leave the duel at the sides clear. */
 body[data-view='home'] #veil,
 body[data-view='lobby'] #veil,
 body[data-view='result'] #veil {
-  background: linear-gradient(90deg, rgba(6, 4, 22, 0.78) 0%, rgba(6, 4, 22, 0.25) 55%, rgba(6, 4, 22, 0.1) 100%);
+  background: radial-gradient(42% 70% at 50% 50%, rgba(6, 4, 22, 0.6) 0%, rgba(6, 4, 22, 0.2) 70%, rgba(6, 4, 22, 0.35) 100%);
 }
 
 body.hurt #veil {
@@ -159,7 +163,7 @@ input {
   -webkit-backdrop-filter: blur(18px) saturate(150%);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  box-shadow: var(--elevation), inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .btn {
@@ -222,8 +226,8 @@ input {
   appearance: none;
   display: grid;
   place-items: center;
-  width: 38px;
-  height: 38px;
+  width: var(--control);
+  height: var(--control);
   border-radius: 12px;
   border: 1px solid var(--line);
   background: var(--glass);
@@ -256,7 +260,8 @@ input {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
+  height: var(--control);
+  padding: 0 14px;
   border-radius: 999px;
   border: 1px solid var(--line);
   background: var(--glass);
@@ -430,16 +435,22 @@ body[data-input='touch'] .key[data-label]::after {
 
 /* ─── 4 · Home ───────────────────────────────────────────────────────────── */
 
-#home {
+/* One card in the middle; the demo duel plays on both sides of it. */
+#home,
+#lobby {
   overflow-y: auto;
+  padding: 24px var(--gutter);
+}
+
+/* Flex with auto margins centers the card and still scrolls when it is taller than the screen. */
+body[data-view='home'] #home,
+body[data-view='lobby'] #lobby {
+  display: flex;
 }
 
 .hero {
-  position: absolute;
-  left: max(6vw, var(--gutter));
-  top: 50%;
-  transform: translateY(-50%);
-  width: min(440px, calc(100vw - 32px));
+  margin: auto;
+  width: min(440px, 100%);
   padding: 32px;
   display: grid;
   gap: 20px;
@@ -449,6 +460,7 @@ body[data-input='touch'] .key[data-label]::after {
 .brand {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 12px;
 }
 
@@ -472,6 +484,41 @@ body[data-input='touch'] .key[data-label]::after {
 .lede {
   margin: -6px 0 0;
   color: var(--dim);
+  text-align: center;
+  text-wrap: balance;
+}
+
+.anatomy {
+  margin: 0;
+  padding: 14px 16px;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: rgba(5, 4, 20, 0.35);
+}
+
+.anatomy-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.anatomy .plus {
+  color: var(--mute);
+  margin: 0 4px;
+}
+
+.anatomy figcaption {
+  font-size: 13px;
+  color: var(--dim);
+  text-align: center;
+  text-wrap: balance;
+}
+
+.anatomy b {
+  color: var(--ink);
 }
 
 .stack {
@@ -487,6 +534,7 @@ body[data-input='touch'] .key[data-label]::after {
 
 .split .btn {
   flex: 1;
+  white-space: nowrap;
 }
 
 .join {
@@ -496,6 +544,7 @@ body[data-input='touch'] .key[data-label]::after {
 
 .join input {
   flex: 1;
+  min-width: 0;
   font: 700 18px var(--mono);
   letter-spacing: 0.4em;
   text-transform: uppercase;
@@ -524,44 +573,11 @@ body[data-input='touch'] .key[data-label]::after {
   color: var(--dim);
 }
 
-.anatomy {
-  position: absolute;
-  right: max(5vw, var(--gutter));
-  bottom: max(5vh, 24px);
-  width: 300px;
-  padding: 18px 20px;
-  display: grid;
-  gap: 10px;
-  animation: rise 0.8s 0.15s var(--ease) both;
-}
-
-.anatomy-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.anatomy .plus {
-  color: var(--mute);
-  margin: 0 4px;
-}
-
-.anatomy p {
-  margin: 0;
-  font-size: 13px;
-  color: var(--dim);
-}
-
 /* ─── 5 · Lobby ──────────────────────────────────────────────────────────── */
-
-#lobby {
-  overflow-y: auto;
-  padding: 24px var(--gutter);
-}
 
 .lobby {
   width: min(960px, 100%);
-  margin: max(4vh, 12px) auto;
+  margin: auto;
   padding: 28px;
   display: grid;
   gap: 24px;
@@ -569,17 +585,27 @@ body[data-input='touch'] .key[data-label]::after {
 }
 
 .lobby-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-end;
-  gap: 16px;
-  flex-wrap: wrap;
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  text-align: center;
 }
 
+/* The code sits dead center; the copy button hangs to its right without pushing it. */
 .code-row {
-  display: flex;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
   gap: 14px;
+}
+
+.code-row .code {
+  grid-column: 2;
+}
+
+.code-row .btn {
+  justify-self: start;
 }
 
 .code {
@@ -610,6 +636,7 @@ body[data-input='touch'] .key[data-label]::after {
 .team h2 {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
   font-size: 15px;
   text-transform: uppercase;
@@ -707,25 +734,27 @@ body[data-input='touch'] .key[data-label]::after {
   flex: none;
 }
 
+/* Each rule is a label over its control, centered in its cell, so the rows line up as columns. */
 .rules {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 12px 24px;
-  padding-top: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 18px 24px;
+  padding-top: 22px;
   border-top: 1px solid var(--line);
 }
 
 .rule {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  display: grid;
+  justify-items: center;
+  gap: 8px;
 }
 
 .rule > span {
   color: var(--dim);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
 }
 
 .rules.locked {
@@ -735,7 +764,7 @@ body[data-input='touch'] .key[data-label]::after {
 
 .lobby-foot {
   display: flex;
-  justify-content: space-between;
+  justify-content: center;
   align-items: center;
   gap: 12px;
 }
@@ -747,7 +776,7 @@ body[data-input='touch'] .key[data-label]::after {
 }
 
 #match button,
-#match .book,
+#match .page,
 #match .pads {
   pointer-events: auto;
 }
@@ -758,16 +787,16 @@ body[data-input='touch'] .key[data-label]::after {
   overflow: hidden;
 }
 
-/* Top bar */
+/* Top bar: three columns of equal sides, so the clock is always dead center. */
 
 .topbar {
   position: absolute;
-  top: max(12px, env(safe-area-inset-top));
+  top: var(--top);
   left: var(--gutter);
   right: var(--gutter);
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
   gap: 12px;
 }
 
@@ -775,6 +804,7 @@ body[data-input='touch'] .key[data-label]::after {
   display: flex;
   gap: 8px;
   align-items: center;
+  min-width: 0;
 }
 
 .topbar-side.right {
@@ -788,6 +818,7 @@ body[data-input='touch'] .key[data-label]::after {
 
 .score b {
   font-size: 15px;
+  font-variant-numeric: tabular-nums;
 }
 
 .score span {
@@ -806,9 +837,9 @@ body[data-input='touch'] .key[data-label]::after {
 .clock {
   display: grid;
   justify-items: center;
-  padding: 6px 18px 7px;
+  width: 140px;
+  padding: 6px 0 7px;
   border-radius: 14px;
-  min-width: 128px;
 }
 
 .clock span {
@@ -838,6 +869,12 @@ body[data-phase='surge'] .clock #phase-label {
   color: var(--bad);
 }
 
+/* The results card carries its own title and time. */
+body[data-view='result'] .clock,
+body[data-view='result'] .banner {
+  visibility: hidden;
+}
+
 /* Banner */
 
 .banner {
@@ -865,6 +902,8 @@ body[data-phase='surge'] .clock #phase-label {
 }
 
 .banner span {
+  max-width: calc(100vw - 32px);
+  text-wrap: balance;
   color: var(--ink);
   font-weight: 600;
   text-shadow: 0 2px 12px rgba(0, 0, 0, 0.8);
@@ -880,6 +919,15 @@ body[data-phase='surge'] .clock #phase-label {
 }
 
 /* Nameplates */
+
+/* While you study, the book owns the middle of the screen. */
+body[data-phase='ready'] #plates {
+  opacity: 0;
+}
+
+#plates {
+  transition: opacity 0.3s;
+}
 
 .plate {
   position: absolute;
@@ -898,6 +946,7 @@ body[data-phase='surge'] .clock #phase-label {
   transform-origin: 50% 100%;
   transition: opacity 0.3s, border-color 0.2s, box-shadow 0.2s;
   will-change: transform;
+  --cast: var(--gold);
 }
 
 .plate.team-0 {
@@ -909,6 +958,11 @@ body[data-phase='surge'] .clock #phase-label {
 
 .plate.me {
   border-color: rgba(255, 255, 255, 0.35);
+}
+
+/* A casting mage's plate edges in the school color, matching the circle at its feet. */
+.plate.casting {
+  border-color: color-mix(in srgb, var(--cast) 75%, transparent);
 }
 
 .plate.aimed {
@@ -1030,7 +1084,7 @@ body[data-phase='surge'] .clock #phase-label {
   position: absolute;
   inset: 0 auto 0 0;
   width: 0;
-  background: linear-gradient(90deg, rgba(255, 209, 102, 0.35), rgba(255, 209, 102, 0.85));
+  background: linear-gradient(90deg, color-mix(in srgb, var(--cast) 30%, transparent), color-mix(in srgb, var(--cast) 85%, transparent));
 }
 
 .plate-cast span {
@@ -1082,7 +1136,7 @@ body[data-phase='surge'] .clock #phase-label {
   font-weight: 800;
   letter-spacing: 0.02em;
   overflow: hidden;
-  background: rgba(255, 255, 255, 0.08);
+  background: color-mix(in srgb, currentColor 16%, rgba(10, 8, 30, 0.6));
 }
 
 .aura.boon {
@@ -1164,104 +1218,108 @@ body[data-phase='surge'] .clock #phase-label {
   color: var(--arcane);
 }
 
-/* Book */
+/* Book: offense pinned to the left edge and defense to the right, both
+   centered in the band between the top bar and the tray, so the arena stays
+   centered between them. While you study they meet side by side in the middle. */
 
 .book {
   position: absolute;
-  right: var(--gutter);
-  top: 76px;
-  width: 310px;
-  max-height: calc(100% - 210px);
+  inset: 84px var(--gutter) 128px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  align-content: center;
+  gap: 16px 18px;
+}
+
+.book-intro {
+  display: none;
+  flex-basis: 100%;
+  text-align: center;
+}
+
+.book-intro h3 {
+  font-size: 24px;
+  letter-spacing: -0.01em;
+}
+
+.book-intro p {
+  margin: 4px 0 0;
+  color: var(--dim);
+  font-size: 14px;
+  text-wrap: balance;
+}
+
+.page {
+  width: 288px;
+  max-height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 14px 14px 10px;
+  padding: 14px 12px 10px;
   transition: transform 0.35s var(--ease), opacity 0.35s;
 }
 
-body.book-closed .book {
-  transform: translateX(calc(100% + 40px));
+body.book-closed .page {
   opacity: 0;
+}
+
+body.book-closed #match .page {
   pointer-events: none;
 }
 
-.book-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
+body.book-closed .page.offense {
+  transform: translateX(calc(-100% - 40px));
 }
 
-.book-head h3 {
-  font-size: 13px;
-  letter-spacing: 0.16em;
+body.book-closed .page.defense {
+  transform: translateX(calc(100% + 40px));
+}
+
+.page-head {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  margin-bottom: 10px;
+  text-align: center;
+}
+
+.page-head h4 {
+  font-size: 12px;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
 }
 
-.study-note {
-  display: none;
-  margin-top: 4px;
-  font-size: 13px;
-  font-weight: 500;
-  letter-spacing: 0;
-  text-transform: none;
-  color: var(--dim);
-}
-
-body[data-phase='ready'] .study-note {
-  display: block;
-}
-
-body[data-phase='ready'] .book-head h3 {
-  font-size: 22px;
-  letter-spacing: -0.01em;
-  text-transform: none;
-}
-
-.legend {
-  display: flex;
-  gap: 6px;
-}
-
-.legend .key {
-  width: 24px;
-  height: 24px;
-  font-size: 13px;
-}
-
-.book-body {
-  overflow-y: auto;
-  margin: 0 -6px;
-  padding: 0 6px;
-  scrollbar-width: thin;
-}
-
-.book-body h4 {
-  margin: 8px 0 6px;
-  font-size: 10px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-}
-
-h4.offense {
+.page.offense h4 {
   color: #ff8f8f;
 }
 
-h4.defense {
+.page.defense h4 {
   color: #8fffd0;
+}
+
+.page-head span {
+  font-size: 11px;
+  color: var(--mute);
 }
 
 .spells {
   list-style: none;
-  margin: 0;
-  padding: 0;
+  margin: 0 -4px;
+  padding: 0 4px;
   display: grid;
+  align-content: start;
   gap: 4px;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 
+/* A fixed rune column (room for four) keeps every spell name on one line. */
 .spell {
   position: relative;
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: 82px 1fr auto;
   align-items: center;
   gap: 10px;
   padding: 6px 8px;
@@ -1344,7 +1402,7 @@ h4.defense {
   left: 0;
   top: 6px;
   bottom: 6px;
-  width: 2px;
+  width: 3px;
   border-radius: 2px;
 }
 
@@ -1355,43 +1413,55 @@ h4.defense {
   font-size: 12px;
   color: var(--dim);
   min-height: 46px;
+  text-align: center;
+  text-wrap: balance;
 }
 
 .detail b {
   color: var(--ink);
 }
 
-/* The book opens wide during the study countdown. */
-body[data-phase='ready'] #book {
-  top: 50%;
-  right: 50%;
-  transform: translate(50%, -46%);
-  width: min(760px, calc(100vw - 32px));
-  max-height: 72vh;
-  padding: 20px 22px 14px;
+body[data-phase='ready'] .book {
+  justify-content: center;
+}
+
+body[data-phase='ready'] .book-intro {
+  display: block;
+}
+
+body[data-phase='ready'] .page {
+  width: min(372px, calc(50% - 9px));
+  max-height: calc(100% - 84px);
+  transform: none;
   opacity: 1;
+  animation: rise 0.4s var(--ease) both;
+}
+
+body[data-phase='ready'] #match .page {
   pointer-events: auto;
-  bottom: auto;
 }
 
-body[data-phase='ready'] #book .book-body {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  grid-template-rows: auto 1fr;
-  grid-auto-flow: column;
-  column-gap: 18px;
-}
-
-body[data-phase='ready'] #book .spell .name small {
+body[data-phase='ready'] .spell .name small {
   white-space: normal;
 }
 
-/* Chord tray */
+/* When the fight starts the pages part to their edges. */
+body[data-phase='fight'] .page.offense,
+body[data-phase='surge'] .page.offense {
+  animation: from-left 0.45s var(--ease) backwards;
+}
+
+body[data-phase='fight'] .page.defense,
+body[data-phase='surge'] .page.defense {
+  animation: from-right 0.45s var(--ease) backwards;
+}
+
+/* Chord tray: target on the left, the keys typed dead center, matching spells on the right. */
 
 .tray {
   position: absolute;
   left: 50%;
-  bottom: max(16px, env(safe-area-inset-bottom));
+  bottom: max(14px, env(safe-area-inset-bottom));
   transform: translateX(-50%);
   display: grid;
   justify-items: center;
@@ -1407,7 +1477,8 @@ body.watching .pads {
 .chord {
   width: 100%;
   min-height: 58px;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   gap: 12px;
   padding: 10px 14px;
@@ -1422,18 +1493,18 @@ body.watching .pads {
 
 .chord.cast {
   border-color: rgba(255, 209, 102, 0.7);
-  box-shadow: var(--shadow), 0 0 30px rgba(255, 209, 102, 0.3);
+  box-shadow: var(--elevation), 0 0 30px rgba(255, 209, 102, 0.3);
 }
 
 .target-chip {
-  flex: none;
+  justify-self: start;
+  max-width: 100%;
   padding: 6px 12px;
   border-radius: 999px;
   font-size: 13px;
   font-weight: 700;
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid var(--line-hi);
-  max-width: 140px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1450,7 +1521,6 @@ body.watching .pads {
 }
 
 .tray-keys {
-  flex: none;
   display: flex;
   gap: 5px;
   min-height: 34px;
@@ -1466,8 +1536,8 @@ body.watching .pads {
 }
 
 .tray-hint {
-  flex: 1;
-  min-width: 0;
+  justify-self: end;
+  max-width: 100%;
   text-align: right;
   font-size: 13px;
   color: var(--dim);
@@ -1478,6 +1548,47 @@ body.watching .pads {
 
 .tray-hint b {
   color: var(--ink);
+}
+
+.legend {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--mute);
+}
+
+.legend-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend .key {
+  width: 22px;
+  height: 22px;
+  font-size: 12px;
+}
+
+.legend kbd {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  border: 1px solid var(--line-hi);
+  background: rgba(13, 11, 38, 0.7);
+  color: var(--dim);
+  font: 700 11px/16px var(--mono);
+  text-align: center;
+}
+
+.legend-key.clear {
+  padding-left: 14px;
+  border-left: 1px solid var(--line);
+}
+
+body[data-input='touch'] .legend {
+  display: none;
 }
 
 /* Touch pads */
@@ -1583,12 +1694,17 @@ body[data-input='touch'] .tray {
 #result {
   overflow-y: auto;
   z-index: 2;
+  padding: 72px var(--gutter) 24px;
   background: rgba(5, 3, 18, 0.35);
 }
 
+body[data-view='result'] #result {
+  display: flex;
+}
+
 .result {
-  width: min(720px, calc(100% - 32px));
-  margin: max(8vh, 20px) auto;
+  width: min(720px, 100%);
+  margin: auto;
   padding: 30px;
   display: grid;
   gap: 18px;
@@ -1611,7 +1727,10 @@ body[data-input='touch'] .tray {
 }
 
 .result.lose h2 {
-  color: #c7cbe8;
+  background: linear-gradient(100deg, #e4e6ff, #b59bff 55%, var(--dusk));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 .stats {
@@ -1795,6 +1914,20 @@ body[data-input='touch'] .tray {
   }
 }
 
+@keyframes from-left {
+  from {
+    opacity: 0;
+    translate: -24px 0;
+  }
+}
+
+@keyframes from-right {
+  from {
+    opacity: 0;
+    translate: 24px 0;
+  }
+}
+
 @keyframes banner {
   0% {
     opacity: 0;
@@ -1841,14 +1974,25 @@ body[data-input='touch'] .tray {
 
 /* ─── 9 · Small screens ──────────────────────────────────────────────────── */
 
-@media (max-width: 860px) {
-  .anatomy {
-    display: none;
+@media (max-width: 1100px) {
+  .page {
+    width: 244px;
   }
 
+  .spell {
+    grid-template-columns: 74px 1fr auto;
+    gap: 8px;
+  }
+
+  .spell .sigil [data-glyph] {
+    width: 17px;
+    height: 17px;
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 860px) {
   .hero {
-    left: 50%;
-    transform: translate(-50%, -50%);
     padding: 24px;
   }
 
@@ -1864,22 +2008,82 @@ body[data-input='touch'] .tray {
     justify-self: center;
   }
 
+  /* One centered sheet above the tray: offense, then defense. */
   .book {
-    top: auto;
-    bottom: 196px;
-    right: 50%;
-    transform: translateX(50%);
+    inset: auto var(--gutter) 128px;
     width: min(420px, calc(100vw - 32px));
+    margin: 0 auto;
+    display: block;
     max-height: 42vh;
+    overflow-y: auto;
+    padding: 12px;
+    border-radius: var(--radius);
+    border: 1px solid var(--line);
+    background: var(--glass);
+    backdrop-filter: blur(18px) saturate(150%);
+    -webkit-backdrop-filter: blur(18px) saturate(150%);
+    box-shadow: var(--elevation);
+    transition: transform 0.35s var(--ease), opacity 0.35s;
+  }
+
+  #match .book {
+    pointer-events: auto;
+  }
+
+  .page,
+  body[data-phase] .page {
+    width: auto;
+    max-height: none;
+    padding: 0;
+    background: none;
+    border: 0;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    animation: none;
+  }
+
+  .page + .page {
+    margin-top: 14px;
+  }
+
+  .spells {
+    overflow: visible;
   }
 
   body.book-closed .book {
-    transform: translate(50%, 30px);
+    transform: translateY(30px);
+    opacity: 0;
+  }
+
+  body.book-closed #match .book {
+    pointer-events: none;
+  }
+
+  body.book-closed .page.offense,
+  body.book-closed .page.defense {
+    transform: none;
+    opacity: 1;
   }
 
   body[data-input='touch'] .book {
     bottom: 300px;
     max-height: calc(100% - 380px);
+  }
+
+  body[data-phase='ready'] .book {
+    top: 84px;
+    max-height: none;
+    transform: none;
+    opacity: 1;
+  }
+
+  body[data-phase='ready'] #match .book {
+    pointer-events: auto;
+  }
+
+  body[data-phase='ready'] .book-intro {
+    margin-bottom: 12px;
   }
 
   .plate {
@@ -1894,8 +2098,21 @@ body[data-input='touch'] .tray {
 }
 
 @media (max-width: 520px) {
+  :root {
+    --control: 34px;
+  }
+
   .brand h1 {
     font-size: 32px;
+  }
+
+  .split {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .split .segmented button {
+    flex: 1;
   }
 
   .code {
@@ -1907,7 +2124,11 @@ body[data-input='touch'] .tray {
   }
 
   .topbar {
-    grid-template-columns: auto 1fr auto;
+    gap: 8px;
+  }
+
+  .topbar-side {
+    gap: 6px;
   }
 
   .score {
@@ -1915,8 +2136,11 @@ body[data-input='touch'] .tray {
   }
 
   .clock {
-    min-width: 0;
-    justify-self: center;
+    width: 104px;
+  }
+
+  .clock strong {
+    font-size: 20px;
   }
 
   .stats th:nth-child(4),
@@ -1950,12 +2174,13 @@ body[data-input='touch'] .tray {
     bottom: 176px;
   }
 
+  body[data-input='touch'] .book {
+    bottom: 248px;
+    max-height: calc(100% - 330px);
+  }
+
   .chord {
     min-height: 50px;
     padding: 8px 10px;
-  }
-
-  .tray-hint {
-    display: none;
   }
 }

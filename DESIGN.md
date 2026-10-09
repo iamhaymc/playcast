@@ -452,7 +452,7 @@ Start it with `npm start`, or import it: `const host = await openHost({ port: 0 
 | 1 | Kit | DOM helpers, SVG glyphs, key labels, palettes, canvas textures |
 | 2 | Link | WebSocket wrapper with handlers and reconnect |
 | 3 | Pads | Keyboard, gamepad and touch → the nine keys |
-| 4 | Sparks | The GPU particle system |
+| 4 | Sparks | The GPU particle system and per-frame marks |
 | 5 | Rings | Pooled floor shockwave rings and camera-facing ribbon bolts |
 | 6 | Looks | Particle recipes and status looks |
 | 7 | Figure | One mage: model, motion and status visuals |
@@ -466,7 +466,8 @@ Start it with `npm start`, or import it: `const host = await openHost({ port: 0 
 
 ### Rendering
 
-- Three.js with ACES tone mapping and an Unreal bloom pass. The scene renders into a multisampled half-float buffer (MSAA), bloom runs at CSS-pixel size so it spreads the same on every screen, and the output pass adds a faint dither so dark gradients do not band.
+- Three.js with Neutral tone mapping, which keeps hues and saturation where ACES bleaches bright colors toward white. The scene renders into a multisampled half-float buffer (MSAA) and the output pass adds a faint dither so dark gradients do not band.
+- Bloom is selective. Its bright pass measures the brightest channel instead of luminance, so a saturated red or blue glows as readily as white, and only the part above a high threshold (0.9, with a soft knee) blooms. Spell cores, gems while casting and the pillar crystals glow; trims, floor lines, robes and the HUD stay crisp. Bloom runs at CSS-pixel size so it spreads the same on every screen.
 - The sky is a procedural nebula shader, baked once into a cube map.
 - The floor shader draws team-tinted grids, rotating rune rings and the glowing rift line. Its lines are filtered by their size on screen (`fwidth`), so distant grid lines fade instead of shimmering. A translucent curtain marks the rift itself.
 - Turned pillars with glowing bands and floating crystals ring the arena; craggy rocks drift in the distance.
@@ -488,7 +489,7 @@ Start it with `npm start`, or import it: `const host = await openHost({ port: 0 
 
 ### Sparks
 
-One ring buffer of particles per blend mode: **glow** (additive, 24,000) and **haze** (alpha, 6,000). The CPU writes a particle once, at birth. The vertex shader computes its position from its age:
+One ring buffer of particles per blend mode: **glow** (additive, 24,000) and **solid** (alpha, 12,000). Smoke and leaves go to the solid layer, so clouds of them stay dark or green instead of adding up to white. The CPU writes a particle once, at birth. The vertex shader computes its position from its age:
 
 ```
 position = pivot + rotateY(offset + drift(velocity, drag, t), swirl · t) + ½ · gravity · t²
@@ -503,21 +504,42 @@ position = pivot + rotateY(offset + drift(velocity, drag, t), swirl · t) + ½ �
 | `aLife` | Birth time, life, size, shape |
 | `aForce` | Gravity, drag, swirl, growth |
 
-Shapes are drawn in the fragment shader: glow, star, ring, shard, smoke, leaf, rune, flake, spark (stretched along its motion) and bubble. Each frame uploads only the slots written that frame.
+Shapes are drawn in the fragment shader: glow, star, ring, shard, smoke, leaf, rune, flake, spark, bubble, flame, cross (healing), chevron (boons rise, banes sink), Z (sleep), no-sign (silence) and target (exposed). Sparks, flames and chevrons turn to follow their motion on screen; the symbols stay upright. Cores run lighter but keep their hue. Each frame uploads only the slots written that frame.
+
+**Marks** are points drawn fresh every frame and never kept, with the same shapes: the heads of spells in flight and the symbols that sit on a mage while a status lasts. Unlike a trail of short-lived sparks they look the same at any frame rate.
 
 ### Looks
 
-Recipes (`burst`, `smoke`, `ground`, `pillar`, `spiral`, `implode`, `trail`, `stream`, `beam`, `lightning`, `mend`, `shatter`, `puff`, `confetti`) take a point and a school. `lightning` and `beam` draw **bolts**: polylines expanded into camera-facing strips in the vertex shader, with a hot core and soft edges. Lightning forks and flickers; beams ripple. Flights lay trails at a fixed rate along the stretch flown since the last frame, so they look the same at any frame rate. Schools set three colors, a body shape, a bit shape and a lift (fire rises, frost falls).
+Every school owns a hue around the color wheel, and its spells carry it from the cast to the landing:
 
-Status looks (`STATUS_LOOK`) are rows of data: emission rate, shape, color, anchor (head, chest, body, feet) and motion (rise, fall, drift, orbit, burst, still). Some looks also switch meshes on the figure: shield bubble, ice block, sheep, stone or gold tint, and a ghostly body when banished.
+| School | Colors | Shapes | Casting sigil | In flight | On a hit |
+|---|---|---|---|---|---|
+| fire | orange, gold, red | flames, embers, smoke | triangles | a comet trailing its flame | flames lick up from the feet, smoke rolls |
+| frost | ice blue, deep blue | shards, flakes, mist | snowflake | an ice lance pointing ahead | shards fly, mist sinks, a frost ring |
+| storm | electric blue, cyan | sparks | lightning zigzag | a crackling ball | lightning forks out |
+| nature | green, lime | leaves, spores | five petals | a ball with circling leaves | leaves burst outward |
+| shadow | violet, black | dark smoke | crescent | a black orb with a violet ring | dark smoke rings out and falls in |
+| holy | gold | stars, rings | sun rays | a turning star | a shaft of light from the sky |
+| arcane | magenta, violet | runes, stars | pentagram | a spinning rune | runes ring outward |
+
+Recipes (`burst`, `flourish`, `smoke`, `mist`, `ground`, `pillar`, `arrows`, `spiral`, `implode`, `trail`, `head`, `stream`, `beam`, `lightning`, `mend`, `shatter`, `puff`, `confetti`) take a point and a school. `HEADS`, `FLOURISH` and `SIGILS` hold each school's head, hit signature and casting circle. `lightning` and `beam` draw **bolts**: polylines expanded into camera-facing strips in the vertex shader, with a hot core and soft edges. Lightning forks and flickers; beams ripple. Flights lay trails at a fixed rate along the stretch flown since the last frame, so they look the same at any frame rate.
+
+Landings read by role first: damage bursts with the school's signature, healing raises crosses (gold for holy, green for the rest), boons spiral up with rising chevrons, banes fall in with sinking ones.
+
+Status looks (`STATUS_LOOK`) are rows of data: emission rate, shape, color, anchor (crown, chest, body, feet) and motion (rise, fall, drift, orbit, burst, still, doze, dash, climb, sink). Two more fields make a status readable at a glance:
+
+- `tint` recolors the mage's rim light and gives the robe a faint pulsing glow: orange while burning, blue while slowed, green while blighted, red under doom. Banes win over boons.
+- `mark` draws a symbol for exactly as long as the status lasts: stars circling the hat when stunned, a no-sign when silenced, a red reticle when exposed, a doom rune and a living bomb that beat faster as they run out, one cross per charge of Prayer of Mending, mirror shards circling the chest.
+
+Some looks also switch meshes on the figure: shield bubble (blue, gold when immune, stone for Stoneskin), ice block, sheep, a golden halo over the hat for Death Ward, stone or gold tint, a shiver when feared, and a ghostly body when banished.
 
 ### Events → visuals
 
 | Event | Visual |
 |---|---|
-| `cast` | Magic circle under the caster in the school color, gem glow, particles drawn into the gem |
+| `cast` | The school's sigil circle under the caster, growing with the cast; gem, gem glow and the plate's cast bar in the school color; school shapes rise from the circle and are drawn into the gem |
 | `fire` | Gem flash and a `Flight` timed to land on the `land` tick |
-| `land` | Impact by role: burst and shockwave (damage), rising motes and pillar (heal), spiral (boon), implosion (bane) |
+| `land` | Impact by role: burst, school signature and shockwave (damage), rising crosses and pillar (heal), spiral and rising chevrons (boon), implosion and sinking chevrons (bane) |
 | `hit` | Flinch and a brief white flash (faint for damage over time), small burst, damage number in the school color; red vignette when you are hit hard |
 | `jump` | A forked lightning bolt between the two mages |
 | `mend` | Green number |
@@ -532,11 +554,15 @@ A hidden tab draws nothing, so it skips effects and applies only events that lea
 
 ### Camera and HUD
 
-- Match camera: behind your row, pitched so your row sits low and the foe row high. It backs off to fit the widest row and shifts into the free band between the top bar and the tray or touch pads.
-- Menus: a slow orbit around a silent demo duel, shifted right on wide screens so the cards don't cover it.
-- Nameplates: under the feet for your row, above the hats for the foe row; shrunk when neighbours would overlap. They show name, life with shield stripes, mana, cast bar, the runes being typed and aura chips with a time bar.
-- Chord tray: target name, the keys typed (pending keys are dimmed until the host confirms them) and the spells that still match.
-- Book: offense and defense lists with chords, cost, target and a cooldown sweep. Rows that no longer match the typed runes dim.
+The HUD is laid out symmetrically around the arena:
+
+- Top bar: three columns with equal sides, so the clock is always dead center (code and score on the left, book, help and leave on the right).
+- Book: offense pinned to the left edge and defense to the right, both centered in the band between the top bar and the tray. While you study they meet side by side in the middle under a title, then part to their edges when the fight starts. Each page has its own detail line. On narrow screens the two pages stack in one centered sheet above the tray.
+- Chord tray: centered at the bottom. The target sits on the left, the keys typed dead center (pending keys are dimmed until the host confirms them) and the spells that still match on the right. Under it, a legend shows which key types each rune and how to clear.
+- Match camera: behind your row, pitched so your row sits low and the foe row high. It backs off until the widest row fits between the book's pages and centers the picture in the free band between the top bar and the tray or touch pads, easing when the book opens or closes.
+- Menus: one centered card (home, lobby, results) over a silent demo duel seen side-on, one team to each side of the card.
+- Nameplates: under the feet for your row, above the halo line for the foe row; shrunk when neighbours would overlap. They show name, life with shield stripes, mana, a cast bar in the spell's school color, the runes being typed and aura chips tinted by school with a time bar.
+- Book rows: chords in a fixed column so names line up, cost, target and a cooldown sweep. Rows that no longer match the typed runes dim.
 
 ### Local echo
 
@@ -586,9 +612,9 @@ The browser test uses software WebGL, so it keeps at most two pages open and fre
 
 **Add an aura rule.** Read it in `Match.hurt`, `mend`, `tendAuras` or `factor`; describe it in `describeAura`; weigh it in `auraGain`.
 
-**Add a status look.** Add a row to `STATUS_LOOK` in `page.mjs`. For a mesh, toggle it in `Figure.update`.
+**Add a status look.** Add a row to `STATUS_LOOK` in `page.mjs`, with a `tint` and a `mark` if it should read at a glance. For a mesh, toggle it in `Figure.update`.
 
-**Add a school.** Add it to `SCHOOLS` (core), `SCHOOL_LOOK` (page) and a `--school` color (CSS).
+**Add a school.** Add it to `SCHOOLS` (core); `SCHOOL_LOOK`, `HEADS`, `FLOURISH` and `SIGILS` (page); and a `--school` color (CSS).
 
 **Add a flight.** Add its seconds to `FLIGHTS` (core) and a branch in `Flight.update` (page).
 

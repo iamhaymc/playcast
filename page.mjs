@@ -108,6 +108,7 @@ const LABELS = {
 }
 
 let inputMode = 'keys'
+const CLEAR_KEY = { keys: 'Space', pad: 'LB' }
 
 /** A key chip: a rune or a move glyph, labeled for the current input mode. */
 function keyChip(key, extra = '') {
@@ -119,19 +120,27 @@ function keyChip(key, extra = '') {
 const TEAM_GLOW = ['#3ee6ff', '#ff4fb8']
 const TEAM_ROBE = ['#16607e', '#7c1d5c']
 
-/** Particle palettes per school: hot core, main, deep, plus body and bit shapes. */
+/**
+ * Spell schools. Each owns a hue around the color wheel (hot core, main and
+ * deep shade, never plain white), the shapes its particles take and which
+ * way they drift (lift: fire rises, frost falls), so a spell's school reads
+ * from color, shape and motion alike. HEADS, FLOURISH and SIGILS add its
+ * head in flight, its mark on a hit and its casting circle. `smoke` and
+ * `mist` are drawn with normal blending, so they stay dark or pale instead
+ * of adding up to white.
+ */
 const SCHOOL_LOOK = {
-  fire: { hot: '#fff1b8', main: '#ff8a2a', deep: '#ff2a0e', smoke: '#1e0b06', body: 'glow', bit: 'star', lift: 2.6 },
-  frost: { hot: '#ffffff', main: '#a4f1ff', deep: '#3a9dff', body: 'shard', bit: 'flake', lift: -4 },
-  storm: { hot: '#ffffff', main: '#d6c8ff', deep: '#6f7bff', body: 'spark', bit: 'star', lift: -1 },
-  nature: { hot: '#f2ffc8', main: '#8cff5e', deep: '#16c46a', body: 'leaf', bit: 'glow', lift: -2.4 },
-  shadow: { hot: '#f3d4ff', main: '#b45cff', deep: '#5112a1', smoke: '#13041f', body: 'smoke', bit: 'glow', lift: 0.8 },
-  holy: { hot: '#ffffff', main: '#ffe680', deep: '#ffad2e', body: 'star', bit: 'ring', lift: 1.4 },
-  arcane: { hot: '#ffffff', main: '#ff7ae0', deep: '#7d5cff', body: 'rune', bit: 'star', lift: 0 },
+  fire: { hot: '#ffd25e', main: '#ff6414', deep: '#d81c04', smoke: '#2b0c04', body: 'flame', bit: 'spark', lift: 2.6 },
+  frost: { hot: '#d8f6ff', main: '#5cc8ff', deep: '#1f5cff', mist: '#7cc8ff', body: 'shard', bit: 'flake', lift: -4 },
+  storm: { hot: '#e4ecff', main: '#4f7bff', deep: '#3a22ff', arc: '#8ff4ff', body: 'spark', bit: 'spark', lift: -1 },
+  nature: { hot: '#e9ff7a', main: '#36dd52', deep: '#0b8a3e', body: 'leaf', bit: 'glow', lift: -2.4 },
+  shadow: { hot: '#dd9cff', main: '#9330ff', deep: '#43088f', smoke: '#0b0214', body: 'smoke', bit: 'glow', lift: 0.8 },
+  holy: { hot: '#fff1a6', main: '#ffc21f', deep: '#ff8400', body: 'star', bit: 'ring', lift: 1.4 },
+  arcane: { hot: '#ffc4f3', main: '#ff3ccf', deep: '#8a2bff', body: 'rune', bit: 'star', lift: 0 },
 }
 
 for (const look of Object.values(SCHOOL_LOOK)) {
-  for (const key of ['hot', 'main', 'deep', 'smoke']) if (look[key]) look[key] = new THREE.Color(look[key])
+  for (const key of ['hot', 'main', 'deep', 'smoke', 'mist', 'arc']) if (look[key]) look[key] = new THREE.Color(look[key])
 }
 
 const schoolLook = (school) => SCHOOL_LOOK[school] ?? SCHOOL_LOOK.arcane
@@ -158,50 +167,7 @@ function textures() {
     g.fillStyle = gradient
     g.fillRect(0, 0, s, s)
   })
-  TEXTURES.circle = canvasTexture(512, (g, s) => {
-    const c = s / 2
-    g.strokeStyle = '#fff'
-    g.fillStyle = '#fff'
-    g.shadowColor = '#fff'
-    g.shadowBlur = 10
-    const ring = (r, w) => {
-      g.lineWidth = w
-      g.beginPath()
-      g.arc(c, c, r, 0, Math.PI * 2)
-      g.stroke()
-    }
-    ring(c * 0.94, 5)
-    ring(c * 0.86, 2)
-    ring(c * 0.5, 3)
-    for (let i = 0; i < 2; i++) {
-      g.beginPath()
-      for (let k = 0; k < 3; k++) {
-        const a = (k / 3) * Math.PI * 2 + (i * Math.PI) / 3 - Math.PI / 2
-        const x = c + Math.cos(a) * c * 0.84
-        const y = c + Math.sin(a) * c * 0.84
-        k ? g.lineTo(x, y) : g.moveTo(x, y)
-      }
-      g.closePath()
-      g.lineWidth = 3
-      g.stroke()
-    }
-    for (let i = 0; i < 24; i++) {
-      const a = (i / 24) * Math.PI * 2
-      const r0 = c * 0.865
-      const r1 = c * (i % 3 ? 0.92 : 0.94)
-      g.lineWidth = i % 3 ? 2 : 4
-      g.beginPath()
-      g.moveTo(c + Math.cos(a) * r0, c + Math.sin(a) * r0)
-      g.lineTo(c + Math.cos(a) * r1, c + Math.sin(a) * r1)
-      g.stroke()
-    }
-    for (let i = 0; i < 6; i++) {
-      const a = (i / 6) * Math.PI * 2
-      g.beginPath()
-      g.arc(c + Math.cos(a) * c * 0.5, c + Math.sin(a) * c * 0.5, 9, 0, Math.PI * 2)
-      g.fill()
-    }
-  })
+  TEXTURES.sigils = {}
   TEXTURES.cursor = canvasTexture(256, (g, s) => {
     const c = s / 2
     g.strokeStyle = '#fff'
@@ -228,6 +194,147 @@ function textures() {
     }
   })
   return TEXTURES
+}
+
+/** A closed path through `count` points on a circle of radius r, from angle `start`. */
+function polygon(g, c, r, count, start = -Math.PI / 2, step = 1) {
+  g.beginPath()
+  for (let k = 0; k <= count; k++) {
+    const a = start + ((k * step) / count) * Math.PI * 2
+    k ? g.lineTo(c + Math.cos(a) * r, c + Math.sin(a) * r) : g.moveTo(c + Math.cos(a) * r, c + Math.sin(a) * r)
+  }
+  g.stroke()
+}
+
+function spokes(g, c, count, r0, r1, start = -Math.PI / 2) {
+  for (let i = 0; i < count; i++) {
+    const a = start + (i / count) * Math.PI * 2
+    g.beginPath()
+    g.moveTo(c + Math.cos(a) * r0, c + Math.sin(a) * r0)
+    g.lineTo(c + Math.cos(a) * r1, c + Math.sin(a) * r1)
+    g.stroke()
+  }
+}
+
+/** The inner figure of each school's casting circle, in a 512 canvas centered at c. */
+const SIGILS = {
+  fire(g, c) {
+    polygon(g, c, c * 0.8, 3)
+    polygon(g, c, c * 0.4, 3, Math.PI / 2)
+    for (let i = 0; i < 3; i++) {
+      const a = -Math.PI / 2 + (i / 3) * Math.PI * 2
+      g.beginPath()
+      g.arc(c + Math.cos(a) * c * 0.8, c + Math.sin(a) * c * 0.8, 12, 0, Math.PI * 2)
+      g.fill()
+    }
+  },
+  frost(g, c) {
+    polygon(g, c, c * 0.62, 6)
+    spokes(g, c, 6, c * 0.12, c * 0.8)
+    for (let i = 0; i < 6; i++) {
+      const a = -Math.PI / 2 + (i / 6) * Math.PI * 2
+      const [x, y] = [c + Math.cos(a) * c * 0.42, c + Math.sin(a) * c * 0.42]
+      for (const side of [-1, 1]) {
+        g.beginPath()
+        g.moveTo(x, y)
+        g.lineTo(x + Math.cos(a + side * 0.7) * c * 0.16, y + Math.sin(a + side * 0.7) * c * 0.16)
+        g.stroke()
+      }
+    }
+  },
+  storm(g, c) {
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2
+      g.beginPath()
+      g.arc(c, c, c * 0.62, a, a + 0.5)
+      g.stroke()
+    }
+    g.lineWidth = 7
+    g.beginPath()
+    for (const [x, y] of [[0.1, -0.78], [-0.22, 0.02], [0.18, -0.06], [-0.1, 0.78]]) g.lineTo(c + x * c, c + y * c)
+    g.stroke()
+  },
+  nature(g, c) {
+    for (let i = 0; i < 5; i++) {
+      const a = -Math.PI / 2 + (i / 5) * Math.PI * 2
+      g.save()
+      g.translate(c, c)
+      g.rotate(a)
+      g.beginPath()
+      g.moveTo(c * 0.16, 0)
+      g.quadraticCurveTo(c * 0.48, -c * 0.24, c * 0.8, 0)
+      g.quadraticCurveTo(c * 0.48, c * 0.24, c * 0.16, 0)
+      g.stroke()
+      g.restore()
+    }
+    g.beginPath()
+    g.arc(c, c, c * 0.14, 0, Math.PI * 2)
+    g.stroke()
+  },
+  shadow(g, c) {
+    g.beginPath()
+    g.arc(c, c, c * 0.46, Math.PI * 0.2, Math.PI * 1.8)
+    g.arc(c + c * 0.2, c, c * 0.36, Math.PI * 1.7, Math.PI * 0.3, true)
+    g.closePath()
+    g.fill()
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2
+      g.beginPath()
+      g.arc(c, c, c * 0.68, a, a + 0.22)
+      g.stroke()
+    }
+  },
+  holy(g, c) {
+    g.beginPath()
+    g.arc(c, c, c * 0.28, 0, Math.PI * 2)
+    g.stroke()
+    g.lineWidth = 6
+    spokes(g, c, 8, c * 0.36, c * 0.8)
+    g.lineWidth = 3
+    spokes(g, c, 8, c * 0.38, c * 0.6, -Math.PI / 2 + Math.PI / 8)
+  },
+  arcane(g, c) {
+    polygon(g, c, c * 0.8, 5, -Math.PI / 2, 2)
+    g.beginPath()
+    g.arc(c, c, c * 0.32, 0, Math.PI * 2)
+    g.stroke()
+    for (let i = 0; i < 5; i++) {
+      const a = Math.PI / 2 + (i / 5) * Math.PI * 2
+      g.beginPath()
+      g.arc(c + Math.cos(a) * c * 0.32, c + Math.sin(a) * c * 0.32, 8, 0, Math.PI * 2)
+      g.fill()
+    }
+  },
+}
+
+/** A school's casting circle: a shared ticked rim around the school's own figure, drawn once. */
+function sigilTexture(school) {
+  const cache = textures().sigils
+  if (cache[school]) return cache[school]
+  cache[school] = canvasTexture(512, (g, s) => {
+    const c = s / 2
+    g.strokeStyle = '#fff'
+    g.fillStyle = '#fff'
+    g.shadowColor = '#fff'
+    g.shadowBlur = 8
+    g.lineCap = g.lineJoin = 'round'
+    const ring = (r, w) => {
+      g.lineWidth = w
+      g.beginPath()
+      g.arc(c, c, r, 0, Math.PI * 2)
+      g.stroke()
+    }
+    ring(c * 0.94, 5)
+    ring(c * 0.86, 2)
+    for (let i = 0; i < 24; i++) {
+      g.lineWidth = i % 3 ? 2 : 4
+      spokes(g, c, 1, c * 0.865, c * (i % 3 ? 0.92 : 0.94), (i / 24) * Math.PI * 2)
+    }
+    g.lineWidth = 4
+    ;(SIGILS[school] ?? SIGILS.arcane)(g, c)
+  })
+  cache[school].anisotropy = textures().glow.anisotropy
+  return cache[school]
 }
 
 // ─── 2 · Link ───────────────────────────────────────────────────────────────
@@ -357,7 +464,23 @@ class Pads {
 // once, at birth; the vertex shader moves, grows and fades it from its start
 // state and age. Each frame uploads just the slots written that frame.
 
-const SHAPES = { glow: 0, star: 1, ring: 2, shard: 3, smoke: 4, leaf: 5, rune: 6, flake: 7, spark: 8, bubble: 9 }
+const SHAPES = { glow: 0, star: 1, ring: 2, shard: 3, smoke: 4, leaf: 5, rune: 6, flake: 7, spark: 8, bubble: 9, flame: 10, cross: 11, chevron: 12, zed: 13, nosign: 14, target: 15 }
+
+/** Shapes that point along their motion on screen, and shapes that stay upright to read as symbols. */
+const SHAPE_ROLES = /* glsl */ `
+  bool alongMotion(float shape) { return shape == 8.0 || shape == 10.0 || shape == 12.0; }
+  bool upright(float shape) { return shape == 11.0 || shape >= 13.0; }
+`
+
+/** Screen angle of a world direction at a view point, for shapes that follow motion. */
+const SCREEN_ANGLE = /* glsl */ `
+  float screenAngle(vec3 from, vec3 to, float aspect, float fallback) {
+    vec4 a = projectionMatrix * modelViewMatrix * vec4(from, 1.0);
+    vec4 b = projectionMatrix * modelViewMatrix * vec4(to, 1.0);
+    vec2 dir = (b.xy / b.w - a.xy / a.w) * vec2(aspect, 1.0);
+    return length(dir) > 1e-5 ? atan(dir.y, dir.x) : fallback;
+  }
+`
 
 const SPARK_VERTEX = /* glsl */ `
   uniform float uTime;
@@ -374,6 +497,8 @@ const SPARK_VERTEX = /* glsl */ `
   varying float vAngle;
   varying float vHeat;
   varying float vShrink;
+  ${SHAPE_ROLES}
+  ${SCREEN_ANGLE}
 
   vec3 travel(float t) {
     float k = aForce.y;
@@ -393,12 +518,13 @@ const SPARK_VERTEX = /* glsl */ `
       return;
     }
     float u = age / aLife.y;
-    vec4 view = modelViewMatrix * vec4(travel(age), 1.0);
+    vec3 at = travel(age);
+    vec4 view = modelViewMatrix * vec4(at, 1.0);
     gl_Position = projectionMatrix * view;
-    vec4 ahead = projectionMatrix * modelViewMatrix * vec4(travel(age + 0.03), 1.0);
-    vec2 dir = (ahead.xy / ahead.w - gl_Position.xy / gl_Position.w) * vec2(uAspect, 1.0);
     float seed = fract(sin(aLife.x * 91.7 + aOffset.x * 47.3 + aVelocity.z * 13.1) * 43758.5);
-    vAngle = aLife.w > 7.5 && aLife.w < 8.5 && length(dir) > 1e-5 ? atan(dir.y, dir.x) : seed * 6.2832 + age * (seed - 0.5) * 4.0;
+    float spin = seed * 6.2832 + age * (seed - 0.5) * 4.0;
+    // Still flames and arrows point up; upright symbols only rock a little.
+    vAngle = alongMotion(aLife.w) ? screenAngle(at, travel(age + 0.03), uAspect, 1.5708) : upright(aLife.w) ? (seed - 0.5) * 0.5 : spin;
     float size = aLife.z * max(0.0, 1.0 + aForce.w * u);
     // Points under two pixels shimmer as they cross pixel centers: keep them
     // two pixels wide and fade them by the area they lost instead.
@@ -413,6 +539,7 @@ const SPARK_VERTEX = /* glsl */ `
   }
 `
 
+/** Every particle shape, drawn from the point's local coordinates (p fixed, q turned by vAngle). */
 const SPARK_FRAGMENT = /* glsl */ `
   varying vec4 vColor;
   varying float vShape;
@@ -427,6 +554,12 @@ const SPARK_FRAGMENT = /* glsl */ `
     f = f * f * (3.0 - 2.0 * f);
     return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
   }
+  float segment(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a;
+    vec2 ba = b - a;
+    return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0));
+  }
+  float stroke(float d, float w) { return smoothstep(w, w * 0.55, d); }
 
   void main() {
     vec2 p = (gl_PointCoord * 2.0 - 1.0) * vShrink;
@@ -472,12 +605,44 @@ const SPARK_FRAGMENT = /* glsl */ `
     } else if (shape == 8) {
       alpha = exp(-abs(q.y) * 9.0) * smoothstep(1.0, 0.0, abs(q.x));
       core = exp(-abs(q.y) * 22.0) * smoothstep(0.6, 0.0, abs(q.x));
-    } else {
+    } else if (shape == 9) {
       alpha = smoothstep(1.0, 0.85, r) * (0.25 + 0.75 * smoothstep(0.55, 0.95, r));
+    } else if (shape == 10) {
+      // A flame tongue: a round belly behind, a tip pointing along the motion.
+      float t = clamp((q.x + 0.85) / 1.8, 0.0, 1.0);
+      float w = 0.95 * sqrt(t) * pow(1.0 - t, 0.75);
+      alpha = smoothstep(w, w * 0.45, abs(q.y)) * step(-0.85, q.x);
+      core = smoothstep(w * 0.55, 0.0, abs(q.y)) * smoothstep(0.05, 0.3, t) * smoothstep(0.75, 0.3, t);
+    } else if (shape == 11) {
+      // A healing cross with soft glow around it.
+      float d = max(abs(q.x), abs(q.y));
+      float n = min(abs(q.x), abs(q.y));
+      alpha = max(stroke(max(n - 0.1, d - 0.62), 0.16), exp(-r * r * 3.0) * 0.3);
+      core = stroke(max(n, d - 0.45), 0.1);
+    } else if (shape == 12) {
+      float d = min(segment(q, vec2(0.5, 0.0), vec2(-0.3, 0.62)), segment(q, vec2(0.5, 0.0), vec2(-0.3, -0.62)));
+      alpha = max(stroke(d, 0.2), exp(-r * r * 4.0) * 0.18);
+      core = stroke(d, 0.08);
+    } else if (shape == 13) {
+      float d = min(min(segment(q, vec2(-0.5, 0.55), vec2(0.5, 0.55)), segment(q, vec2(0.5, 0.55), vec2(-0.5, -0.55))), segment(q, vec2(-0.5, -0.55), vec2(0.5, -0.55)));
+      alpha = stroke(d, 0.16);
+      core = stroke(d, 0.06);
+    } else if (shape == 14) {
+      // No casting: a ring with a slash.
+      float d = min(abs(r - 0.66), segment(q, vec2(-0.46, 0.46), vec2(0.46, -0.46)));
+      alpha = max(stroke(d, 0.15), exp(-r * r * 3.0) * 0.2);
+      core = stroke(d, 0.05);
+    } else {
+      // A target reticle: a ring, four ticks and a dot.
+      float ticks = stroke(min(abs(q.x), abs(q.y)), 0.07) * step(0.5, r) * smoothstep(1.0, 0.9, r) * step(min(abs(q.x), abs(q.y)), 0.2);
+      alpha = max(max(stroke(abs(r - 0.6), 0.09), ticks), exp(-r * r * 45.0));
+      core = stroke(abs(r - 0.6), 0.03);
     }
     alpha *= vColor.a;
     if (alpha < 0.004) discard;
-    gl_FragColor = vec4(mix(vColor.rgb, vec3(1.0), core * 0.7 * vHeat), alpha);
+    // Cores run lighter but keep their hue, so stacked sparks do not wash out to white.
+    vec3 hot = vColor.rgb * 0.55 + vec3(0.45);
+    gl_FragColor = vec4(mix(vColor.rgb, hot, core * 0.8 * vHeat), alpha);
   }
 `
 
@@ -528,15 +693,23 @@ class SparkLayer {
 }
 
 const ZERO3 = [0, 0, 0]
+const ZERO = new THREE.Vector3()
 
-/** Glowing (additive) and hazy (alpha) particles. emit() takes one particle spec. */
+/** Shapes drawn with normal blending by default: they keep their own color where they overlap. */
+const SOLID_SHAPES = new Set(['smoke', 'leaf'])
+
+/**
+ * Glowing (additive) and solid (alpha) particles. emit() takes one particle
+ * spec. Smoke and leaves go to the solid layer unless `haze` says otherwise,
+ * so clouds of them stay dark or green instead of adding up to white.
+ */
 class Sparks {
   constructor(scene, capacity = 24000) {
     this.time = 0
     this.density = 1
     this.uniforms = { uTime: { value: 0 }, uScale: { value: 800 }, uAspect: { value: 1 }, uMaxPoint: { value: 600 } }
     this.glow = new SparkLayer(capacity, THREE.AdditiveBlending, this.uniforms)
-    this.haze = new SparkLayer(Math.floor(capacity / 4), THREE.NormalBlending, this.uniforms)
+    this.haze = new SparkLayer(Math.floor(capacity / 2), THREE.NormalBlending, this.uniforms)
     this.haze.points.renderOrder = 1
     this.glow.points.renderOrder = 2
     scene.add(this.haze.points, this.glow.points)
@@ -545,7 +718,7 @@ class Sparks {
   emit(p) {
     // Lower quality tiers thin out small bits; big flashes always draw.
     if (this.density < 1 && (p.size ?? 0.3) < 0.5 && Math.random() > this.density) return
-    ;(p.haze ? this.haze : this.glow).write(p, this.time)
+    ;((p.haze ?? SOLID_SHAPES.has(p.shape)) ? this.haze : this.glow).write(p, this.time)
   }
   update(time, scale, aspect) {
     this.time = time
@@ -554,6 +727,86 @@ class Sparks {
     this.uniforms.uAspect.value = aspect
     this.glow.flush()
     this.haze.flush()
+  }
+}
+
+const MARK_VERTEX = /* glsl */ `
+  uniform float uScale;
+  uniform float uAspect;
+  uniform float uMaxPoint;
+  attribute vec4 aColor;
+  attribute vec3 aDir;
+  attribute vec3 aMark; // size, shape, angle
+  varying vec4 vColor;
+  varying float vShape;
+  varying float vAngle;
+  varying float vHeat;
+  varying float vShrink;
+  ${SCREEN_ANGLE}
+  void main() {
+    vec4 view = modelViewMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * view;
+    gl_PointSize = clamp(aMark.x * uScale / -view.z, 2.0, uMaxPoint);
+    vAngle = aMark.z + (dot(aDir, aDir) > 0.0 ? screenAngle(position, position + aDir, uAspect, 0.0) : 0.0);
+    vColor = aColor;
+    vShape = aMark.y;
+    vHeat = 1.0;
+    vShrink = 1.0;
+  }
+`
+
+/**
+ * Points drawn fresh every frame and never kept: the heads of spells in
+ * flight and the symbols that sit on a mage while a status lasts. Unlike a
+ * trail of short-lived sparks they look the same at any frame rate. Solid
+ * marks draw after glowing ones, so a dark core sits on top of its halo.
+ */
+class Marks {
+  constructor(scene, uniforms, capacity = 800) {
+    this.capacity = capacity
+    this.layers = [THREE.AdditiveBlending, THREE.NormalBlending].map((blending, i) => {
+      const geometry = new THREE.BufferGeometry()
+      const attributes = {}
+      for (const [name, size] of Object.entries({ position: 3, aColor: 4, aDir: 3, aMark: 3 })) {
+        attributes[name] = new THREE.BufferAttribute(new Float32Array(capacity * size), size).setUsage(THREE.DynamicDrawUsage)
+        geometry.setAttribute(name, attributes[name])
+      }
+      const material = new THREE.ShaderMaterial({ uniforms, vertexShader: MARK_VERTEX, fragmentShader: SPARK_FRAGMENT, transparent: true, depthWrite: false, blending })
+      const points = new THREE.Points(geometry, material)
+      points.frustumCulled = false
+      points.renderOrder = 2.5 + i * 0.1
+      scene.add(points)
+      return { points, attributes, count: 0 }
+    })
+  }
+
+  /** m: { at: Vector3, color, alpha?, size?, shape?, angle?, dir?: Vector3 (turns the shape to follow it), solid? } */
+  draw(m) {
+    const layer = this.layers[m.solid ? 1 : 0]
+    const i = layer.count
+    if (i >= this.capacity) return
+    layer.count++
+    const { position, aColor, aDir, aMark } = layer.attributes
+    const dir = m.dir ?? ZERO
+    position.setXYZ(i, m.at.x, m.at.y, m.at.z)
+    aColor.setXYZW(i, m.color.r, m.color.g, m.color.b, m.alpha ?? 1)
+    aDir.setXYZ(i, dir.x, dir.y, dir.z)
+    aMark.setXYZ(i, m.size ?? 0.4, SHAPES[m.shape ?? 'glow'], m.angle ?? 0)
+  }
+
+  /** Upload this frame's marks and start the next frame empty. */
+  flush() {
+    for (const layer of this.layers) {
+      layer.points.geometry.setDrawRange(0, layer.count)
+      if (layer.count) {
+        for (const attribute of Object.values(layer.attributes)) {
+          attribute.clearUpdateRanges()
+          attribute.addUpdateRange(0, layer.count * attribute.itemSize)
+          attribute.needsUpdate = true
+        }
+      }
+      layer.count = 0
+    }
   }
 }
 
@@ -612,7 +865,7 @@ class Rings {
       ring.mesh.visible = u >= 0 && u < 1
       if (!ring.mesh.visible) continue
       ring.mesh.scale.setScalar(ring.radius * (0.12 + 0.88 * ease(u)))
-      ring.mesh.material.uniforms.uFade.value = (1 - u) * 1.6
+      ring.mesh.material.uniforms.uFade.value = (1 - u) * 1.15
     }
   }
 }
@@ -653,7 +906,7 @@ const BOLT_FRAGMENT = /* glsl */ `
     float glow = exp(-d * 4.0) - 0.018;
     float core = exp(-d * 36.0);
     float ends = smoothstep(0.0, 0.03, vAlong) * smoothstep(1.0, 0.97, vAlong);
-    gl_FragColor = vec4((uColor * max(glow, 0.0) + uHot * core * 1.6) * ends, uFade);
+    gl_FragColor = vec4((uColor * max(glow, 0.0) * 1.2 + uHot * core * 1.1) * ends, uFade);
   }
 `
 
@@ -771,10 +1024,13 @@ const mixColor = (a, b, t) => a.clone().lerp(b, t)
 const tint = (look) => mixColor(look.main, pickOne([look.hot, look.deep, look.main]), Math.random() * 0.8)
 const point = (v) => [v.x, v.y, v.z]
 
+const MEND_LIGHT = { holy: [new THREE.Color('#fff3b8'), new THREE.Color('#ffc21f')], life: [new THREE.Color('#d2ffe0'), new THREE.Color('#33e676')] }
+
 class Looks {
   constructor(stage) {
     this.stage = stage
     this.sparks = stage.sparks
+    this.marks = stage.marks
     this.rings = stage.rings
     this.bolts = stage.bolts
   }
@@ -783,17 +1039,20 @@ class Looks {
     this.sparks.emit({ at: point(at), color, size, life, alpha, shape: 'glow', grow: 0.6 })
   }
 
+  /** A burst of the school's shapes from a point: a tinted flash, a ring of light, bodies and bits. */
   burst(at, school, power = 1) {
     const look = schoolLook(school)
-    this.flash(at, mixColor(look.hot, look.main, 0.45), 1.1 * Math.sqrt(power), 0.2, 0.6)
-    this.sparks.emit({ at: point(at), color: look.main, alpha: 0.7, size: 0.55 * power, life: 0.4, shape: 'ring', grow: 4 })
-    const count = Math.round(26 * power)
+    this.flash(at, look.main, 1.2 * Math.sqrt(power), 0.22, 0.45)
+    this.flash(at, look.hot, 0.5 * Math.sqrt(power), 0.12, 0.55)
+    this.sparks.emit({ at: point(at), color: look.main, alpha: 0.6, size: 0.55 * power, life: 0.4, shape: 'ring', grow: 4 })
+    const count = Math.round(22 * power)
     for (let i = 0; i < count; i++) {
       const dir = randomDirection()
       this.sparks.emit({
         at: point(at),
         velocity: point(dir.multiplyScalar(rand(2, 6.5) * power)),
         color: tint(look),
+        alpha: 0.85,
         size: rand(0.18, 0.42) * Math.sqrt(power),
         life: rand(0.45, 1),
         shape: look.body,
@@ -805,7 +1064,7 @@ class Looks {
       this.sparks.emit({
         at: point(at),
         velocity: point(randomDirection().multiplyScalar(rand(5, 10) * power)),
-        color: look.hot,
+        color: mixColor(look.hot, look.main, 0.35),
         size: rand(0.08, 0.18),
         life: rand(0.25, 0.55),
         shape: look.bit === 'ring' ? 'spark' : look.bit,
@@ -813,7 +1072,12 @@ class Looks {
         gravity: look.lift,
       })
     }
-    if (look.smoke) this.smoke(at, look.smoke, Math.round(6 * power))
+    if (look.smoke) this.smoke(at, look.smoke, Math.round(5 * power))
+  }
+
+  /** The school's own signature on a damaging hit, on top of the burst. */
+  flourish(at, feet, school, power = 1) {
+    FLOURISH[school]?.(this, at, feet, schoolLook(school), power)
   }
 
   smoke(at, color, count = 6) {
@@ -822,7 +1086,7 @@ class Looks {
         at: point(at),
         velocity: [rand(-0.8, 0.8), rand(0.3, 1.2), rand(-0.8, 0.8)],
         color,
-        alpha: 0.55,
+        alpha: 0.6,
         size: rand(0.8, 1.4),
         life: rand(0.9, 1.6),
         shape: 'smoke',
@@ -830,6 +1094,13 @@ class Looks {
         drag: 1.2,
         haze: true,
       })
+    }
+  }
+
+  /** Pale cold haze that sinks: frost's smoke. */
+  mist(at, color, count = 4) {
+    for (let i = 0; i < count; i++) {
+      this.sparks.emit({ at: point(at), velocity: [rand(-0.9, 0.9), rand(-0.6, 0.1), rand(-0.9, 0.9)], color, alpha: 0.22, size: rand(0.6, 1), life: rand(0.8, 1.3), shape: 'smoke', grow: 1.5, drag: 1.4, haze: true })
     }
   }
 
@@ -857,7 +1128,24 @@ class Looks {
         drag: 0.6,
       })
     }
-    this.sparks.emit({ at: [feet.x, feet.y + 1.2, feet.z], color: look.main, size: 1.6, life: 0.4, shape: 'glow', alpha: 0.35 })
+    this.sparks.emit({ at: [feet.x, feet.y + 1.2, feet.z], color: look.main, size: 1.6, life: 0.4, shape: 'glow', alpha: 0.3 })
+  }
+
+  /** Chevrons that rise (a boon lands) or sink (a bane lands) around a point. */
+  arrows(center, color, up = true, count = 4) {
+    for (let i = 0; i < count; i++) {
+      const a = (i / count) * Math.PI * 2 + rand(0, 0.6)
+      this.sparks.emit({
+        at: [center.x + Math.cos(a) * 0.6, center.y + (up ? -0.6 : 0.9), center.z + Math.sin(a) * 0.6],
+        velocity: [0, up ? rand(1.4, 2.2) : -rand(1.1, 1.6), 0],
+        color,
+        size: rand(0.34, 0.46),
+        life: rand(0.7, 0.9),
+        shape: 'chevron',
+        drag: 0.8,
+        delay: i * 0.07,
+      })
+    }
   }
 
   spiral(center, school, rising = true) {
@@ -876,6 +1164,7 @@ class Looks {
         delay: i * 0.008,
       })
     }
+    this.arrows(center, look.main, rising)
   }
 
   implode(center, school, count = 16, radius = 1.4) {
@@ -894,22 +1183,34 @@ class Looks {
     }
   }
 
+  /** What a spell sheds as it flies: the school's bodies and bits, plus smoke or mist. */
   trail(at, school, scale = 1) {
     const look = schoolLook(school)
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 2; i++) {
       this.sparks.emit({
         at: point(at),
         velocity: [rand(-0.6, 0.6), rand(-0.3, 0.8), rand(-0.6, 0.6)],
         color: tint(look),
-        size: rand(0.14, 0.32) * scale,
-        life: rand(0.25, 0.55),
-        shape: i ? look.body : look.bit,
+        alpha: 0.85,
+        size: rand(0.14, 0.3) * scale,
+        life: rand(0.25, 0.5),
+        shape: look.body,
         gravity: look.lift * 0.5,
         drag: 1.5,
       })
     }
-    this.sparks.emit({ at: point(at), color: look.main, size: 0.85 * scale, life: 0.09, shape: 'glow' })
-    if (look.smoke && Math.random() < 0.35) this.smoke(at, look.smoke, 1)
+    this.sparks.emit({ at: point(at), velocity: point(randomDirection().multiplyScalar(0.8)), color: mixColor(look.hot, look.main, 0.4), size: rand(0.08, 0.16) * scale, life: rand(0.2, 0.4), shape: look.bit === 'ring' ? 'star' : look.bit, drag: 2 })
+    if (look.smoke && Math.random() < 0.3) this.smoke(at, look.smoke, 1)
+    if (look.mist && Math.random() < 0.2) this.mist(at, look.mist, 1)
+  }
+
+  /** The head of a spell in flight, drawn this frame: a halo in the school color around the school's own core. */
+  head(at, school, scale = 1, dir = ZERO) {
+    const look = schoolLook(school)
+    const marks = this.marks
+    const t = this.sparks.time
+    marks.draw({ at, color: look.main, size: 1.3 * scale, alpha: 0.42 })
+    ;(HEADS[school] ?? HEADS.arcane)(marks, at, scale, look, t, dir)
   }
 
   /** Motes scattered along a line; `share` scales how many (rounded at random). */
@@ -925,7 +1226,7 @@ class Looks {
         color: tint(look),
         size: rand(0.12, 0.28),
         life: rand(0.12, 0.3),
-        shape: Math.random() < 0.6 ? 'glow' : look.bit,
+        shape: pickOne(['glow', look.bit, look.body]),
       })
     }
   }
@@ -954,28 +1255,42 @@ class Looks {
     for (let i = 0; i < 2; i++) {
       const at = points[Math.floor(rand(0.2, 0.75) * points.length)]
       const reach = randomDirection().multiplyScalar(rand(0.5, 1.2)).add(to.clone().sub(at).multiplyScalar(0.25))
-      this.bolts.spawn(jagged(at, at.clone().add(reach), 3, 0.3), { color: look.deep, hot: look.main, width: 0.07, life: 0.1, time })
+      this.bolts.spawn(jagged(at, at.clone().add(reach), 3, 0.3), { color: look.deep, hot: look.arc ?? look.main, width: 0.07, life: 0.1, time })
     }
     for (let i = 0; i < 3; i++) {
-      this.sparks.emit({ at: point(pickOne(points)), velocity: point(randomDirection().multiplyScalar(rand(1, 3))), color: look.hot, size: rand(0.06, 0.12), life: rand(0.15, 0.3), shape: 'spark', drag: 3 })
+      this.sparks.emit({ at: point(pickOne(points)), velocity: point(randomDirection().multiplyScalar(rand(1, 3))), color: look.arc ?? look.hot, size: rand(0.06, 0.12), life: rand(0.15, 0.3), shape: 'spark', drag: 3 })
     }
   }
 
+  /** Healing lands: rising crosses, gold for holy and green for the rest. */
   mend(center, school) {
-    const look = schoolLook(school === 'holy' || school === 'nature' ? school : 'nature')
-    for (let i = 0; i < 22; i++) {
+    const [light, color] = school === 'holy' ? MEND_LIGHT.holy : MEND_LIGHT.life
+    for (let i = 0; i < 11; i++) {
+      this.sparks.emit({
+        at: [center.x, center.y - 0.5, center.z],
+        offset: [rand(-0.65, 0.65), rand(-0.3, 0.7), rand(-0.65, 0.65)],
+        velocity: [0, rand(0.9, 1.7), 0],
+        color: mixColor(color, light, rand(0, 0.45)),
+        size: rand(0.26, 0.4),
+        life: rand(0.8, 1.2),
+        shape: 'cross',
+        drag: 0.5,
+        delay: i * 0.03,
+      })
+    }
+    for (let i = 0; i < 14; i++) {
       this.sparks.emit({
         at: [center.x, center.y - 0.6, center.z],
         offset: [rand(-0.6, 0.6), rand(-0.3, 0.9), rand(-0.6, 0.6)],
         velocity: [0, rand(0.8, 2), 0],
-        color: tint(look),
-        size: rand(0.12, 0.3),
+        color: light,
+        size: rand(0.08, 0.18),
         life: rand(0.6, 1.1),
-        shape: pickOne(['glow', 'star', look.body]),
+        shape: school === 'nature' ? pickOne(['glow', 'leaf']) : pickOne(['glow', 'star']),
         drag: 0.4,
       })
     }
-    this.flash(center, look.main, 1.1, 0.3, 0.7)
+    this.flash(center, color, 1.1, 0.3, 0.4)
   }
 
   shatter(center, color, count = 22) {
@@ -1017,46 +1332,149 @@ class Looks {
 }
 
 /**
- * Continuous status visuals, one row per aura look. `where` picks the anchor,
- * `motion` the path; 'school' as color means "use the aura's school".
+ * Each school's core for a spell in flight, inside the shared halo. `dir` is
+ * the way it flies, so a fireball trails its flame and an ice lance points ahead.
+ */
+const HEADS = {
+  fire(marks, at, s, look, t, dir) {
+    marks.draw({ at, color: look.main, size: 1.35 * s, shape: 'flame', dir: dir.clone().negate(), alpha: 0.95 })
+    marks.draw({ at, color: look.hot, size: 0.5 * s })
+  },
+  frost(marks, at, s, look, t, dir) {
+    marks.draw({ at, color: mixColor(look.hot, look.main, 0.35), size: 1.4 * s, shape: 'spark', dir })
+    marks.draw({ at, color: look.main, size: 0.7 * s, shape: 'flake', angle: t * 3 })
+  },
+  storm(marks, at, s, look, t) {
+    marks.draw({ at, color: look.hot, size: 0.55 * s })
+    for (let i = 0; i < 3; i++) marks.draw({ at, color: look.arc, size: rand(0.6, 1.1) * s, shape: 'spark', angle: Math.random() * Math.PI })
+  },
+  nature(marks, at, s, look, t) {
+    marks.draw({ at, color: look.hot, size: 0.45 * s })
+    for (let k = 0; k < 3; k++) {
+      const a = t * 9 + k * 2.1
+      const leaf = at.clone().add(new THREE.Vector3(Math.cos(a) * 0.3 * s, Math.sin(a * 1.3) * 0.15 * s, Math.sin(a) * 0.3 * s))
+      marks.draw({ at: leaf, color: k ? look.main : look.deep, size: 0.5 * s, shape: 'leaf', angle: a, solid: true })
+    }
+  },
+  shadow(marks, at, s, look) {
+    marks.draw({ at, color: look.main, size: 1.05 * s, shape: 'ring', alpha: 0.7 })
+    marks.draw({ at, color: look.smoke, size: 0.72 * s, alpha: 0.95, solid: true })
+  },
+  holy(marks, at, s, look, t) {
+    marks.draw({ at, color: look.hot, size: 1.35 * s, shape: 'star', angle: t * 1.5 })
+    marks.draw({ at, color: look.hot, size: 0.45 * s })
+  },
+  arcane(marks, at, s, look, t) {
+    marks.draw({ at, color: look.main, size: 1.05 * s, shape: 'rune', angle: t * 4 })
+    marks.draw({ at, color: look.hot, size: 0.5 * s, shape: 'star', angle: -t * 3 })
+  },
+}
+
+/** Each school's signature when it lands a damaging spell. */
+const FLOURISH = {
+  fire(looks, at, feet, look, power) {
+    for (let i = 0; i < 14 * power; i++) {
+      const a = Math.random() * Math.PI * 2
+      const r = rand(0.2, 0.75)
+      looks.sparks.emit({
+        at: [feet.x + Math.cos(a) * r, feet.y + 0.15, feet.z + Math.sin(a) * r],
+        velocity: [rand(-0.3, 0.3), rand(2, 4), rand(-0.3, 0.3)],
+        color: pickOne([look.main, look.deep, look.hot]),
+        size: rand(0.3, 0.55),
+        life: rand(0.45, 0.8),
+        shape: 'flame',
+        drag: 1.2,
+        delay: rand(0, 0.12),
+      })
+    }
+    looks.smoke(at.clone().setY(at.y + 0.6), look.smoke, Math.round(4 * power))
+  },
+  frost(looks, at, feet, look, power) {
+    looks.shatter(at, look.hot, Math.round(14 * power))
+    looks.mist(feet.clone().setY(feet.y + 0.4), look.mist, Math.round(6 * power))
+    looks.rings.spawn({ at: feet, radius: 1.8 * power, color: look.main, life: 0.9, thick: 0.14, time: looks.sparks.time })
+  },
+  storm(looks, at, feet, look, power) {
+    for (let i = 0; i < 2 + Math.round(power); i++) looks.lightning(at, at.clone().add(randomDirection().multiplyScalar(rand(1.2, 2)).setY(rand(-1.2, 0.4))), 'storm')
+  },
+  nature(looks, at, feet, look, power) {
+    for (let i = 0; i < 14 * power; i++) {
+      looks.sparks.emit({ at: point(at), velocity: point(randomDirection().multiplyScalar(rand(2, 4.5))), color: pickOne([look.main, look.deep, look.hot]), size: rand(0.22, 0.38), life: rand(0.7, 1.2), shape: 'leaf', gravity: -2.5, drag: 1.6, swirl: rand(-2, 2) })
+    }
+  },
+  shadow(looks, at, feet, look, power) {
+    for (let i = 0; i < 10; i++) {
+      const a = (i / 10) * Math.PI * 2
+      looks.sparks.emit({ at: point(at), velocity: [Math.cos(a) * 2.6, rand(-0.3, 0.3), Math.sin(a) * 2.6], color: look.smoke, alpha: 0.75, size: rand(0.8, 1.2) * power, life: rand(0.7, 1), shape: 'smoke', grow: 1, drag: 2, haze: true })
+    }
+    looks.implode(at, 'shadow', Math.round(16 * power), 1.5)
+  },
+  holy(looks, at, feet, look, power) {
+    const sky = feet.clone().setY(9)
+    const shaft = Array.from({ length: 8 }, (_, i) => sky.clone().lerp(feet, i / 7))
+    looks.bolts.spawn(shaft, { color: look.main, hot: look.hot, width: 0.32 * power, life: 0.4, time: looks.sparks.time })
+    looks.ground(feet, 'holy', 1.6 * power)
+  },
+  arcane(looks, at, feet, look, power) {
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2
+      looks.sparks.emit({ at: point(at), velocity: [Math.cos(a) * 3.2, rand(-0.2, 0.4), Math.sin(a) * 3.2], color: i % 2 ? look.main : look.deep, size: 0.34, life: 0.65, shape: 'rune', drag: 2.2 })
+    }
+  },
+}
+
+/**
+ * Continuous status visuals, one row per aura look. Particles: `rate` a
+ * second of `shape` in `color` at the `where` anchor, moving by `motion`
+ * ('school' as color means the aura's school). `tint` colors the mage's rim
+ * light while it lasts, so a burning or frozen mage reads at a glance.
+ * `mark` is a symbol drawn every frame for as long as the status lasts:
+ * `count` copies (or one per charge left) circling `radius` around the
+ * anchor at `spin` turns, `front` pulls it toward the camera, `pulse` beats
+ * it, and a 'fuse' pulse quickens as the aura runs out.
  */
 const STATUS_LOOK = {
-  dot: { rate: 14, shape: 'body', color: 'school', where: 'body', motion: 'rise' },
-  hot: { rate: 10, shape: 'glow', color: '#7dffa8', where: 'body', motion: 'rise' },
-  stun: { rate: 7, shape: 'star', color: '#ffe066', where: 'head', motion: 'orbit' },
-  sleep: { rate: 5, shape: 'glow', color: '#9d8cff', where: 'head', motion: 'drift' },
-  daze: { rate: 8, shape: 'star', color: '#ffd28c', where: 'head', motion: 'orbit' },
-  fear: { rate: 9, shape: 'smoke', color: '#4a1a7a', where: 'head', motion: 'drift', haze: true },
-  hush: { rate: 5, shape: 'rune', color: '#c77dff', where: 'head', motion: 'orbit' },
-  slow: { rate: 8, shape: 'flake', color: '#8fe8ff', where: 'feet', motion: 'drift' },
-  haste: { rate: 14, shape: 'spark', color: '#ffe680', where: 'body', motion: 'rise' },
-  expose: { rate: 6, shape: 'shard', color: '#ff5d73', where: 'chest', motion: 'orbit' },
-  weak: { rate: 6, shape: 'smoke', color: '#3a3550', where: 'body', motion: 'fall', haze: true },
-  power: { rate: 14, shape: 'glow', color: '#ffb347', where: 'body', motion: 'rise' },
-  armor: { rate: 3, shape: 'ring', color: '#bfe3ff', where: 'chest', motion: 'still' },
-  ward: { rate: 4, shape: 'star', color: '#e9f3ff', where: 'chest', motion: 'orbit' },
+  dot: { rate: 12, shape: 'body', color: 'school', where: 'body', motion: 'rise', tint: 'school' },
+  hot: { rate: 4, shape: 'cross', color: '#4dff8e', where: 'body', motion: 'rise', tint: '#4dff8e' },
+  stun: { rate: 3, shape: 'star', color: '#ffe14d', where: 'crown', motion: 'orbit', tint: '#ffd23d', mark: { shape: 'star', color: '#ffe14d', size: 0.46, count: 3, radius: 0.6, spin: 3.5 } },
+  sleep: { rate: 1.6, shape: 'zed', color: '#b9a8ff', where: 'crown', motion: 'doze', tint: '#8f7dff' },
+  daze: { rate: 3, shape: 'star', color: '#ffae4d', where: 'crown', motion: 'orbit', tint: '#ffae4d', mark: { shape: 'star', color: '#ffae4d', size: 0.4, count: 2, radius: 0.55, spin: -2.6 } },
+  fear: { rate: 8, shape: 'smoke', color: '#3a0f66', where: 'crown', motion: 'drift', haze: true, tint: '#a04dff', shiver: true },
+  hush: { rate: 2, shape: 'rune', color: '#ff6ad5', where: 'crown', motion: 'orbit', mark: { shape: 'nosign', color: '#ff4fa8', size: 0.6, radius: 0.62, spin: 1.2 } },
+  slow: { rate: 8, shape: 'flake', color: '#9fe6ff', where: 'feet', motion: 'drift', tint: '#5cc8ff' },
+  haste: { rate: 7, shape: 'chevron', color: '#fff06a', where: 'body', motion: 'dash', tint: '#ffe94d' },
+  expose: { rate: 3, shape: 'shard', color: '#ff4d6a', where: 'chest', motion: 'orbit', mark: { shape: 'target', color: '#ff3355', size: 0.95, front: 0.8, turn: 0.8 } },
+  weak: { rate: 3, shape: 'chevron', color: '#8f86b8', where: 'crown', motion: 'sink', tint: '#6f6a90' },
+  power: { rate: 4, shape: 'chevron', color: '#ff7a2e', where: 'feet', motion: 'climb', tint: '#ff6a2a' },
+  armor: { rate: 2, shape: 'ring', color: '#9ec9ff', where: 'chest', motion: 'still', tint: '#7fb2ff' },
+  ward: { rate: 3, shape: 'star', color: '#e2f0ff', where: 'chest', motion: 'orbit' },
   stone: { rate: 6, shape: 'smoke', color: '#8a8478', where: 'feet', motion: 'drift', haze: true },
-  thorns: { rate: 8, shape: 'spark', color: '#9cff5a', where: 'chest', motion: 'burst' },
-  mirror: { rate: 6, shape: 'shard', color: '#e0e8ff', where: 'chest', motion: 'orbit' },
-  immune: { rate: 10, shape: 'star', color: '#fff2a8', where: 'body', motion: 'orbit' },
-  cheat: { rate: 8, shape: 'glow', color: '#fffbe0', where: 'head', motion: 'rise' },
-  mend: { rate: 5, shape: 'rune', color: '#7dffb0', where: 'chest', motion: 'orbit' },
-  mana: { rate: 10, shape: 'glow', color: '#5aa8ff', where: 'body', motion: 'rise' },
-  doom: { rate: 12, shape: 'smoke', color: '#2a0a1a', where: 'head', motion: 'rise', haze: true },
-  bomb: { rate: 16, shape: 'glow', color: '#ff7a1a', where: 'chest', motion: 'burst' },
-  steady: { rate: 3, shape: 'ring', color: '#ffffff', where: 'feet', motion: 'rise' },
-  rewind: { rate: 6, shape: 'rune', color: '#ff7ae0', where: 'body', motion: 'orbit' },
-  blight: { rate: 8, shape: 'smoke', color: '#1f3a12', where: 'body', motion: 'drift', haze: true },
+  thorns: { rate: 8, shape: 'shard', color: '#7dff3a', where: 'chest', motion: 'burst', tint: '#5ee03a' },
+  mirror: { rate: 3, shape: 'spark', color: '#e0e8ff', where: 'chest', motion: 'orbit', mark: { shape: 'shard', color: '#dfe8ff', size: 0.42, count: 2, radius: 0.85, spin: 2.2 } },
+  immune: { rate: 8, shape: 'star', color: '#fff2a8', where: 'body', motion: 'orbit', tint: '#ffd23d' },
+  cheat: { rate: 3, shape: 'glow', color: '#fff3b8', where: 'crown', motion: 'rise' },
+  mend: { rate: 2, shape: 'glow', color: '#7dffb0', where: 'chest', motion: 'rise', mark: { shape: 'cross', color: '#4dff8e', size: 0.4, charges: true, radius: 0.85, spin: 1.6 } },
+  mana: { rate: 8, shape: 'glow', color: '#4d9dff', where: 'body', motion: 'rise', tint: '#4d8dff' },
+  doom: { rate: 8, shape: 'smoke', color: '#2a0612', where: 'crown', motion: 'rise', haze: true, tint: '#ff2a55', mark: { shape: 'rune', color: '#ff2a55', size: 0.62, radius: 0.6, spin: 0.9, pulse: 'fuse' } },
+  bomb: { rate: 6, shape: 'spark', color: '#ffb02e', where: 'chest', motion: 'burst', tint: '#ff5a1a', mark: { shape: 'glow', color: '#ff5a1a', size: 1.1, front: 0.75, pulse: 'fuse' } },
+  steady: { rate: 3, shape: 'ring', color: '#fff3c8', where: 'feet', motion: 'rise' },
+  rewind: { rate: 3, shape: 'glow', color: '#ff7ae0', where: 'body', motion: 'rise', mark: { shape: 'rune', color: '#ff5ad6', size: 0.38, count: 2, radius: 0.8, spin: -2.4 } },
+  blight: { rate: 8, shape: 'smoke', color: '#1c3a0a', where: 'body', motion: 'drift', haze: true, tint: '#8cff2a' },
   sheep: { rate: 3, shape: 'glow', color: '#ffffff', where: 'chest', motion: 'drift' },
-  root: { rate: 10, shape: 'leaf', color: '#5aff6a', where: 'feet', motion: 'rise' },
-  ice: { rate: 8, shape: 'flake', color: '#d8fbff', where: 'body', motion: 'drift' },
+  root: { rate: 10, shape: 'leaf', color: '#3ee05a', where: 'feet', motion: 'rise', tint: '#36dd52' },
+  ice: { rate: 6, shape: 'flake', color: '#d8fbff', where: 'body', motion: 'drift' },
   time: { rate: 6, shape: 'rune', color: '#ffd166', where: 'body', motion: 'still' },
-  banish: { rate: 10, shape: 'rune', color: '#c77dff', where: 'body', motion: 'orbit' },
+  banish: { rate: 8, shape: 'rune', color: '#c77dff', where: 'body', motion: 'orbit', tint: '#b45cff' },
   boon: { rate: 4, shape: 'glow', color: '#7dffa8', where: 'body', motion: 'rise' },
   bane: { rate: 4, shape: 'glow', color: '#ff7a8a', where: 'body', motion: 'rise' },
 }
 
-for (const look of Object.values(STATUS_LOOK)) if (look.color !== 'school') look.color = new THREE.Color(look.color)
+for (const look of Object.values(STATUS_LOOK)) {
+  for (const row of [look, look.mark]) {
+    if (!row) continue
+    for (const key of ['color', 'tint']) if (row[key] && row[key] !== 'school') row[key] = new THREE.Color(row[key])
+  }
+}
 
 const STATUS_MOTION = {
   rise: () => ({ offset: [rand(-0.45, 0.45), rand(-0.6, 0.6), rand(-0.45, 0.45)], velocity: [0, rand(0.6, 1.4), 0], life: rand(0.7, 1.1) }),
@@ -1066,6 +1484,10 @@ const STATUS_MOTION = {
     const a = Math.random() * Math.PI * 2
     return { offset: [Math.cos(a) * 0.55, rand(-0.1, 0.1), Math.sin(a) * 0.55], velocity: [0, 0, 0], swirl: 3.2, life: rand(0.8, 1.1) }
   },
+  doze: () => ({ offset: [rand(0.1, 0.4), 0.2, rand(-0.2, 0.2)], velocity: [rand(0.2, 0.4), rand(0.5, 0.7), 0], life: rand(1.4, 1.8), grow: 0.8 }),
+  dash: () => ({ offset: [rand(-0.55, 0.55), rand(-0.8, 0.2), rand(-0.55, 0.55)], velocity: [0, rand(2.4, 3.4), 0], life: rand(0.35, 0.5) }),
+  climb: () => ({ offset: [rand(-0.5, 0.5), 0.1, rand(-0.5, 0.5)], velocity: [0, rand(1.3, 1.8), 0], life: rand(0.9, 1.2) }),
+  sink: () => ({ offset: [rand(-0.45, 0.45), rand(0, 0.3), rand(-0.45, 0.45)], velocity: [0, -rand(0.9, 1.3), 0], life: rand(0.9, 1.2) }),
   burst: () => ({ velocity: point(randomDirection().multiplyScalar(rand(0.8, 1.8))), life: rand(0.3, 0.6), drag: 2 }),
   still: () => ({ offset: [rand(-0.5, 0.5), rand(-0.6, 0.6), rand(-0.5, 0.5)], life: rand(0.6, 1) }),
 }
@@ -1173,6 +1595,7 @@ function shapes() {
     ice: new THREE.IcosahedronGeometry(1, 1),
     wool: new THREE.IcosahedronGeometry(0.3, 3),
     arrow: new THREE.ConeGeometry(0.16, 0.34, 4).rotateX(Math.PI),
+    nimbus: new THREE.TorusGeometry(0.3, 0.032, 8, 40),
   })
   return GEOMETRY
 }
@@ -1204,9 +1627,11 @@ const BUBBLE_FRAGMENT = /* glsl */ `
 /**
  * Give a standard material a soft rim of `color` where the surface turns away
  * from the camera, so robes read against the dark arena without flat shading.
+ * The uniform is kept in userData.rim so statuses can recolor it.
  */
 function addRim(material, color, strength = 0.4) {
   const rim = { value: color.clone().multiplyScalar(strength) }
+  material.userData.rim = rim
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uRim = rim
     shader.fragmentShader = shader.fragmentShader
@@ -1218,6 +1643,12 @@ function addRim(material, color, strength = 0.4) {
 }
 
 const SEAT_Y = 0.24
+/** Symbol particles are drawn big enough to read; other shapes pick their own size. */
+const SYMBOL_SIZE = { cross: 0.3, chevron: 0.32, zed: 0.36 }
+const RIM_GOAL = new THREE.Color()
+const MARK_AT = new THREE.Vector3()
+const MARK_SPOT = new THREE.Vector3()
+const TOWARD = new THREE.Vector3()
 const BASE_TEXT = new THREE.Color('#1b1e3a')
 const TINTS = { flash: new THREE.Color('#ffffff'), stone: new THREE.Color('#8a8478'), time: new THREE.Color('#ffd166') }
 
@@ -1250,12 +1681,12 @@ class Figure {
     this.root.add(this.body)
 
     this.robeMaterial = addRim(new THREE.MeshStandardMaterial({ color: robe, vertexColors: true, roughness: 0.62, metalness: 0.08, emissive: glow, emissiveIntensity: 0.05, transparent: true }), glow)
-    this.trimMaterial = new THREE.MeshStandardMaterial({ color: glow, emissive: glow, emissiveIntensity: 1.1, roughness: 0.3 })
+    this.trimMaterial = new THREE.MeshStandardMaterial({ color: glow, emissive: glow, emissiveIntensity: 0.8, roughness: 0.3 })
     const gold = new THREE.MeshStandardMaterial({ color: '#c79a52', roughness: 0.3, metalness: 0.9 })
     this.hatMaterial = addRim(new THREE.MeshStandardMaterial({ color: robe.clone().multiplyScalar(0.75), roughness: 0.66, metalness: 0.05, transparent: true }), glow, 0.3)
-    this.gemMaterial = new THREE.MeshStandardMaterial({ color: glow, emissive: glow, emissiveIntensity: 2.2, roughness: 0.15, metalness: 0.2, flatShading: true })
+    this.gemMaterial = new THREE.MeshStandardMaterial({ color: glow, emissive: glow, emissiveIntensity: 1.4, roughness: 0.15, metalness: 0.2, flatShading: true })
     const face = new THREE.MeshStandardMaterial({ color: '#0b0a18', roughness: 0.85 })
-    const eyes = new THREE.MeshBasicMaterial({ color: glow.clone().lerp(new THREE.Color('#ffffff'), 0.5).multiplyScalar(3) })
+    const eyes = new THREE.MeshBasicMaterial({ color: glow.clone().lerp(new THREE.Color('#ffffff'), 0.35).multiplyScalar(1.8) })
     const wood = new THREE.MeshStandardMaterial({ color: '#4a3024', roughness: 0.75 })
 
     const add = (geometry, material, position, rotation = [0, 0, 0], parent = this.body) => {
@@ -1283,17 +1714,22 @@ class Figure {
     this.gem = add(geo.gem, this.gemMaterial, [0, 1.42, 0], [0, 0, 0], this.staff)
     this.orbit = add(geo.orbit, gold, [0, 1.42, 0], [Math.PI / 2.4, 0, 0], this.staff)
     this.motes = [0, 1].map(() => add(geo.mote, this.trimMaterial, [0, SEAT_Y + 1.1, 0]))
-    this.halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex.glow, color: glow, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.5 }))
+    this.halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex.glow, color: glow, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.32 }))
     this.halo.scale.setScalar(0.7)
     this.gem.add(this.halo)
 
     add(geo.base, new THREE.MeshStandardMaterial({ color: BASE_TEXT, roughness: 0.4, metalness: 0.45, flatShading: true }), [0, 0, 0], [0, 0, 0], this.root)
     add(geo.rim, this.trimMaterial, [0, SEAT_Y + 0.005, 0], [Math.PI / 2, 0, Math.PI / 6], this.root)
-    const pool = add(geo.disc, new THREE.MeshBasicMaterial({ map: tex.glow, color: glow, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false }), [0, 0.02, 0], [0, 0, 0], this.root)
+    const pool = add(geo.disc, new THREE.MeshBasicMaterial({ map: tex.glow, color: glow, transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending, depthWrite: false }), [0, 0.02, 0], [0, 0, 0], this.root)
     pool.scale.setScalar(4.2)
 
-    this.circle = add(geo.disc, new THREE.MeshBasicMaterial({ map: tex.circle, color: glow, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false }), [0, SEAT_Y + 0.03, 0], [0, 0, 0], this.root)
+    // The casting circle takes the sigil and color of the spell's school.
+    this.circle = add(geo.disc, new THREE.MeshBasicMaterial({ map: sigilTexture('arcane'), color: glow, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false }), [0, SEAT_Y + 0.03, 0], [0, 0, 0], this.root)
     this.circle.scale.setScalar(2.6)
+
+    // A golden ring over the hat while death is held off (Death Ward, Guardian Spirit).
+    this.nimbus = add(geo.nimbus, new THREE.MeshBasicMaterial({ color: new THREE.Color('#ffc93d').multiplyScalar(1.6) }), [0, SEAT_Y + 3.05, 0], [Math.PI / 2 - 0.2, 0, 0], this.body)
+    this.nimbus.visible = false
 
     this.bubble = add(
       geo.bubble,
@@ -1349,9 +1785,10 @@ class Figure {
 
   // Anchors ──────────────────────────────────────────────────────────────
 
+  /** World points on the mage. `crown` circles the hat; `top` clears the halo, for the far row's plate. */
   anchor(name, out = new THREE.Vector3()) {
     if (name === 'gem') return this.gem.getWorldPosition(out)
-    const heights = { head: 3.05, chest: 1.3, feet: SEAT_Y, body: 1.1 }
+    const heights = { top: 3.5, head: 3.05, crown: 2.62, chest: 1.3, feet: SEAT_Y, body: 1.1 }
     out.copy(this.root.position)
     out.y = (heights[name] ?? 1.2) - this.lift
     return out
@@ -1360,9 +1797,12 @@ class Figure {
   // Events ───────────────────────────────────────────────────────────────
 
   beginCast(spell) {
+    const look = schoolLook(spell.school)
     this.cast = { school: spell.school, start: this.stage.time }
-    this.circle.material.color.copy(schoolLook(spell.school).main).multiplyScalar(0.7)
-    this.gemMaterial.emissive.copy(schoolLook(spell.school).main)
+    this.circle.material.map = sigilTexture(spell.school)
+    this.circle.material.color.copy(look.main)
+    this.gemMaterial.emissive.copy(look.main)
+    this.halo.material.color.copy(look.main)
   }
 
   endCast(broken) {
@@ -1373,7 +1813,8 @@ class Figure {
   release(spell) {
     const look = schoolLook(spell.school)
     this.gemMaterial.emissive.copy(look.main)
-    this.stage.looks.flash(this.anchor('gem'), look.main, 1.3, 0.22, 0.8)
+    this.halo.material.color.copy(look.main)
+    this.stage.looks.flash(this.anchor('gem'), look.main, 1.3, 0.22, 0.6)
     this.flare = 1
   }
 
@@ -1397,9 +1838,10 @@ class Figure {
     this.fallen = clamp(this.fallen + (down ? dt * 1.6 : -dt * 2), 0, 1)
 
     const bob = locked || down ? 0 : Math.sin(time * 1.7 + this.phase) * 0.05
+    const shiver = looks.has('fear') && !down ? Math.sin(time * 47) * 0.035 : 0
     const castShare = state?.cast ? state.cast.done / state.cast.total : 0
     const fall = ease(this.fallen)
-    this.body.position.set(0, bob - fall * 0.35, -this.kick * 0.25)
+    this.body.position.set(shiver, bob - fall * 0.35, -this.kick * 0.25)
     this.body.rotation.set(-this.kick * 0.25 - fall * 1.35 + castShare * 0.06, Math.sin(time * 0.6 + this.phase) * 0.06, Math.sin(time * 1.1 + this.phase) * 0.02)
     this.staff.rotation.set(state?.cast ? -0.35 : 0.05 * Math.sin(time + this.phase), 0, state?.cast ? -0.15 : 0)
     this.arm.rotation.z = state?.cast ? 1.05 : 0.8
@@ -1418,34 +1860,62 @@ class Figure {
     if (sheep) this.sheep.rotation.y = Math.sin(time * 2) * 0.2
     this.ice.visible = looks.has('ice') && !down
     this.ice.rotation.y += dt * 0.2
+    this.nimbus.visible = looks.has('cheat') && !down
+    if (this.nimbus.visible) this.nimbus.position.y = SEAT_Y + 3.05 + Math.sin(time * 2.2) * 0.04
 
     const opacity = ghost ? (down ? 0.35 : 0.45) : 1
     this.robeMaterial.opacity = this.hatMaterial.opacity = opacity
     const stone = looks.has('stone') || looks.has('time')
-    this.robeMaterial.emissive.copy(this.flash > 0 ? TINTS.flash : stone ? (looks.has('time') ? TINTS.time : TINTS.stone) : this.glow)
-    this.robeMaterial.emissiveIntensity = 0.05 + this.flash * this.flash * 0.22 + (stone ? 0.35 : 0)
+    const status = this.tintRim(dt, time, state, down)
+    this.robeMaterial.emissive.copy(this.flash > 0 ? TINTS.flash : stone ? (looks.has('time') ? TINTS.time : TINTS.stone) : (status ?? this.glow))
+    this.robeMaterial.emissiveIntensity = 0.05 + this.flash * this.flash * 0.22 + (stone ? 0.35 : status ? 0.1 + 0.05 * Math.sin(time * 5 + this.phase) : 0)
 
     const casting = Boolean(state?.cast)
-    const target = casting ? 0.5 : 0
+    const target = casting ? 0.9 : 0
     this.circle.material.opacity += (target - this.circle.material.opacity) * Math.min(1, dt * 10)
     this.circle.rotation.y += dt * (casting ? 1.6 : 0.4)
-    this.circle.scale.setScalar(1.5 + castShare * 1.2)
-    this.gemMaterial.emissiveIntensity = 2.2 + (casting ? 1.5 + castShare * 2.5 : 0) + this.flare * 3
-    this.halo.scale.setScalar(0.7 + (casting ? 0.4 + castShare * 0.6 : 0) + this.flare * 0.6)
-    if (!casting) this.gemMaterial.emissive.lerp(this.glow, Math.min(1, dt * 2))
+    this.circle.scale.setScalar(1.9 + castShare * 1.3)
+    this.gemMaterial.emissiveIntensity = 1.4 + (casting ? 0.8 + castShare * 1.4 : 0) + this.flare * 2
+    this.halo.scale.setScalar(0.7 + (casting ? 0.25 + castShare * 0.35 : 0) + this.flare * 0.4)
+    if (!casting) {
+      this.gemMaterial.emissive.lerp(this.glow, Math.min(1, dt * 2))
+      this.halo.material.color.lerp(this.glow, Math.min(1, dt * 2))
+    }
 
     const guard = (state?.guard ?? 0) > 0
     const immune = looks.has('immune') || looks.has('banish')
     this.bubble.visible = (guard || immune) && !down
     if (this.bubble.visible) {
       const uniforms = this.bubble.material.uniforms
-      uniforms.uColor.value.set(looks.has('banish') ? '#c77dff' : immune ? '#ffe680' : '#a8d8ff')
+      uniforms.uColor.value.set(looks.has('banish') ? '#b45cff' : immune ? '#ffc93d' : looks.has('stone') ? '#c9b98f' : '#7cc4ff')
       uniforms.uTime.value = time
       uniforms.uPower.value = 0.6 + this.kick * 0.6
     }
 
     if (casting && !down) this.emitCast(dt, castShare)
-    if (state && !down) this.emitStatus(dt, state)
+    if (state && !down) {
+      this.emitStatus(dt, state)
+      this.drawMarks(time, state)
+    }
+  }
+
+  /**
+   * Recolor the rim light by the most telling status: banes before boons,
+   * pulsing, so a burning, frozen or empowered mage reads from its outline.
+   * Returns that status color (or null) for the robe's faint glow.
+   */
+  tintRim(dt, time, state, down) {
+    let tinted = null
+    for (const aura of state?.auras ?? []) {
+      const look = STATUS_LOOK[aura.look]
+      if (!look?.tint || down) continue
+      if (!tinted || (aura.kind === 'bane' && tinted.kind !== 'bane')) tinted = { kind: aura.kind, color: look.tint === 'school' ? schoolLook(aura.school).main : look.tint }
+    }
+    const goal = RIM_GOAL.copy(tinted ? tinted.color : this.glow).multiplyScalar(tinted ? 0.85 + 0.35 * Math.sin(time * 5 + this.phase) : 0.4)
+    const k = Math.min(1, dt * 8)
+    this.robeMaterial.userData.rim.value.lerp(goal, k)
+    this.hatMaterial.userData.rim.value.lerp(goal.multiplyScalar(0.8), k)
+    return tinted?.color ?? null
   }
 
   emitCast(dt, share) {
@@ -1454,6 +1924,13 @@ class Figure {
     const gem = this.anchor('gem')
     const dir = randomDirection().multiplyScalar(1.1 - share * 0.4)
     this.stage.sparks.emit({ at: point(gem), offset: point(dir), velocity: point(dir.clone().multiplyScalar(-2.2)), color: tint(look), size: rand(0.08, 0.18), life: 0.45, shape: look.bit === 'ring' ? 'glow' : look.bit })
+    // The school's bodies rise from the casting circle as the cast fills.
+    if (Math.random() < 0.35 + share * 0.4) {
+      const a = Math.random() * Math.PI * 2
+      const feet = this.anchor('feet')
+      const r = 0.9 + share * 0.6
+      this.stage.sparks.emit({ at: [feet.x + Math.cos(a) * r, feet.y + 0.08, feet.z + Math.sin(a) * r], velocity: [0, rand(0.8, 1.6), 0], color: tint(look), alpha: 0.85, size: rand(0.14, 0.26), life: rand(0.5, 0.8), shape: look.body, drag: 0.6 })
+    }
   }
 
   emitStatus(dt, state) {
@@ -1468,7 +1945,29 @@ class Figure {
         const shape = look.shape === 'body' ? school.body : look.shape
         const motion = STATUS_MOTION[look.motion]()
         const at = this.anchor(look.where)
-        this.stage.sparks.emit({ at: point(at), color, shape, size: rand(0.1, 0.24) * (look.haze ? 3 : 1), alpha: look.haze ? 0.6 : 0.8, haze: look.haze, grow: look.haze ? 1 : 0, ...motion })
+        const size = SYMBOL_SIZE[shape] ?? rand(0.1, 0.24) * (look.haze ? 3 : 1)
+        this.stage.sparks.emit({ at: point(at), color, shape, size, alpha: look.haze ? 0.6 : 0.85, haze: look.haze, grow: look.haze ? 1 : 0, ...motion })
+      }
+    }
+  }
+
+  /** Status symbols for this frame: they last exactly as long as the status. */
+  drawMarks(time, state) {
+    const marks = this.stage.marks
+    for (const aura of state.auras) {
+      const mark = STATUS_LOOK[aura.look]?.mark
+      if (!mark) continue
+      const left = aura.total ? clamp(aura.left / aura.total, 0, 1) : 1
+      const beat = mark.pulse === 'fuse' ? Math.sin(time * (4 + 16 * (1 - left))) : mark.pulse ? Math.sin(time * 4) : 0
+      const size = mark.size * (1 + beat * 0.18)
+      const count = mark.charges ? clamp(aura.charges ?? 1, 1, 5) : (mark.count ?? 1)
+      const base = this.anchor(STATUS_LOOK[aura.look].where === 'crown' ? 'crown' : 'chest', MARK_AT)
+      if (mark.front) base.add(TOWARD.copy(this.stage.camera.position).sub(base).setY(0).normalize().multiplyScalar(mark.front))
+      for (let k = 0; k < count; k++) {
+        const a = time * (mark.spin ?? 0) + (k / count) * Math.PI * 2 + this.phase
+        const r = mark.radius ?? 0
+        MARK_SPOT.set(base.x + Math.cos(a) * r, base.y + Math.sin(a * 2) * 0.06 * Math.sign(r), base.z + Math.sin(a) * r)
+        marks.draw({ at: MARK_SPOT, color: mark.color, size, shape: mark.shape, angle: (mark.turn ?? 0) * time, alpha: 0.75 + beat * 0.25 })
       }
     }
   }
@@ -1523,6 +2022,13 @@ class Flight {
     return out.set(0, 0, 0).addScaledVector(a, u * u).addScaledVector(mid, 2 * u * t).addScaledVector(b, t * t)
   }
 
+  /** Draw head i at share t, turned the way it flies. */
+  head(t, i, scale) {
+    const at = this.path(t, i)
+    const dir = this.path(Math.min(1, t + 0.02), i).sub(this.path(Math.max(0, t - 0.02), i))
+    this.stage.looks.head(at, this.school, scale, dir)
+  }
+
   /**
    * Draw one frame. Trails are laid at 60 puffs a second along the stretch
    * flown since the last frame, so they look the same at any frame rate.
@@ -1542,11 +2048,14 @@ class Flight {
       for (let k = 1; k <= puffs; k++) draw(from + ((to - from) * k) / puffs)
     }
     if (style === 'bolt' || style === 'fall') {
-      along(before, share, (s) => looks.trail(this.path(s), this.school, this.power * (style === 'fall' ? 1.3 : 1)))
+      const scale = this.power * (style === 'fall' ? 1.3 : 1)
+      along(before, share, (s) => looks.trail(this.path(s), this.school, scale))
+      this.head(share, 0, scale * 0.62)
     } else if (style === 'volley') {
       const head = (at, i) => clamp((at - i * 0.08) / (1 - (this.heads - 1) * 0.08), 0, 1)
       for (let i = 0; i < this.heads; i++) {
         along(head(before, i), head(share, i), (s) => s > 0 && s < 1 && looks.trail(this.path(s, i), this.school, 0.55))
+        if (head(share, i) > 0 && head(share, i) < 1) this.head(head(share, i), i, 0.42)
       }
     } else if (style === 'beam') {
       this.ribbon = looks.beam(this.from.anchor('gem'), this.to.anchor('chest'), this.school, 0.16 + this.power * 0.05, this.ribbon)
@@ -1560,6 +2069,7 @@ class Flight {
       looks.stream(this.to.anchor('feet').setY(0.3), this.to.anchor('chest'), this.school, 0.3, dt * 30)
     } else if (style === 'aura' || style === 'nova') {
       along(before, share, (s) => Math.random() < 0.6 && looks.trail(this.path(s), this.school, 0.45))
+      if (share < 1) this.head(share, 0, 0.4)
     }
     return t < 1 + (style === 'beam' ? 0.25 : 0)
   }
@@ -1689,6 +2199,26 @@ const RIFT_FRAGMENT = /* glsl */ `
   }
 `
 
+/**
+ * Bloom's bright pass, rewritten: brightness is the brightest channel, not
+ * luminance, so a saturated red or blue glows as readily as white, and only
+ * the part above the threshold (with a soft knee) blooms, so a bright patch
+ * gets a halo of its own color instead of a white haze.
+ */
+const BRIGHT_PASS = /* glsl */ `
+  uniform sampler2D tDiffuse;
+  uniform float luminosityThreshold;
+  uniform float smoothWidth;
+  varying vec2 vUv;
+  void main() {
+    vec3 color = texture2D(tDiffuse, vUv).rgb;
+    float bright = max(color.r, max(color.g, color.b));
+    float knee = clamp(bright - luminosityThreshold + smoothWidth, 0.0, 2.0 * smoothWidth);
+    knee = knee * knee / (4.0 * smoothWidth + 1e-5);
+    gl_FragColor = vec4(color * max(knee, bright - luminosityThreshold) / max(bright, 1e-4), 1.0);
+  }
+`
+
 /** The final pass: tone mapping and sRGB, plus a little noise so dark gradients do not band. */
 function ditheredOutput() {
   const pass = new OutputPass()
@@ -1736,13 +2266,14 @@ class Stage {
     this.span = 1
     this.cursor = null
     this.motes = 0
-    this.band = [0, 1]
+    this.band = [0, 1, 0, 1]
 
     // Antialiasing comes from the multisampled scene buffer below, so the
     // canvas itself needs none.
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' })
-    renderer.toneMapping = THREE.ACESFilmicToneMapping
-    renderer.toneMappingExposure = 0.95
+    // Neutral tone mapping keeps hues and saturation where ACES bleaches bright colors toward white.
+    renderer.toneMapping = THREE.NeutralToneMapping
+    renderer.toneMappingExposure = 1
     this.renderer = renderer
 
     this.scene = new THREE.Scene()
@@ -1752,7 +2283,11 @@ class Stage {
 
     this.composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType }))
     this.composer.addPass(new RenderPass(this.scene, this.camera))
-    this.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.62, 0.42, 0.62)
+    // Bloom only what is truly bright: spell cores, gems, crystals. Trims, floor lines and robes stay crisp.
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.55, 0.32, 0.9)
+    this.bloom.highPassUniforms.smoothWidth.value = 0.3
+    this.bloom.materialHighPassFilter.fragmentShader = BRIGHT_PASS
+    this.bloom.materialHighPassFilter.needsUpdate = true
     // Bloom works at CSS-pixel size, so the glow spreads the same on every screen
     // and costs no more on high-density ones.
     const sizeBloom = this.bloom.setSize.bind(this.bloom)
@@ -1763,11 +2298,12 @@ class Stage {
     const gl = renderer.getContext()
     this.sparks = new Sparks(this.scene)
     this.sparks.uniforms.uMaxPoint.value = Math.min(1024, gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1])
+    this.marks = new Marks(this.scene, this.sparks.uniforms)
     this.rings = new Rings(this.scene)
     this.bolts = new Bolts(this.scene)
     this.looks = new Looks(this)
     const anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy())
-    for (const texture of Object.values(textures())) texture.anisotropy = anisotropy
+    for (const texture of Object.values(textures())) if (texture.isTexture) texture.anisotropy = anisotropy
     this.buildWorld()
     this.buildCursor()
     this.tiers = QUALITY.map((tier) => tier.name)
@@ -1857,8 +2393,8 @@ class Stage {
     const glows = TEAM_GLOW.map((hex) => {
       const color = new THREE.Color(hex)
       return {
-        band: new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 1.4, roughness: 0.3 }),
-        crystal: new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 2.4, roughness: 0.15, metalness: 0.1, flatShading: true }),
+        band: new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 1, roughness: 0.3 }),
+        crystal: new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 1.6, roughness: 0.15, metalness: 0.1, flatShading: true }),
       }
     })
     this.crystals = []
@@ -2022,6 +2558,7 @@ class Stage {
     this.mode = mode
     this.flights = []
     this.surge = 0
+    this.reach = 0
   }
 
   figure(id) {
@@ -2047,8 +2584,14 @@ class Stage {
     })
   }
 
+  /**
+   * A spell lands. The role sets the shape (damage bursts, heals raise
+   * crosses, boons climb, banes sink) and the school sets the color and the
+   * signature, so what landed reads at a glance.
+   */
   impact(spell, casterId, targetIds) {
     const roles = spell.roles
+    const look = schoolLook(spell.school)
     for (const id of targetIds) {
       const to = this.figures.get(id)
       if (!to) continue
@@ -2064,6 +2607,7 @@ class Stage {
         this.looks.pillar(feet, spell.school, 0.6)
       } else if (!friendly && roles.includes('damage')) {
         this.looks.burst(chest, spell.school, power)
+        this.looks.flourish(chest, feet, spell.school, power)
         if (spell.flight === 'fall' || spell.tier === 3) this.looks.ground(feet, spell.school, 2.2 * power)
         if (spell.tier === 3) this.shake(0.35)
       } else if (friendly) {
@@ -2071,7 +2615,8 @@ class Stage {
         this.looks.ground(feet, spell.school, 1.4)
       } else {
         this.looks.implode(chest, spell.school, 24, 1.6)
-        this.looks.flash(chest, schoolLook(spell.school).main, 1.8, 0.35)
+        this.looks.arrows(chest, look.main, false)
+        this.looks.flash(chest, look.main, 1.6, 0.35, 0.6)
       }
     }
     for (const flight of this.flights) if (flight.spell === spell && flight.from.id === casterId) flight.done = true
@@ -2095,33 +2640,42 @@ class Stage {
     this.composer.setSize(width, height)
     this.camera.aspect = width / height
     this.camera.updateProjectionMatrix()
-    this.band = [0, height]
+    this.band = [0, height, 0, width]
     this.shift = null
   }
 
   /**
-   * Attract mode orbits the arena. Match mode sits behind the viewer's row,
-   * pitched so the near row sits low and the far row high, then shifts the
-   * picture into the free band between the top bar and the tray.
+   * Attract mode watches the duel side-on, the two teams to the left and
+   * right of the centered menu card, swaying gently. Match mode sits behind
+   * the viewer's row, pitched so the near row sits low and the far row high,
+   * backs off until the widest row fits between the book's pages, and
+   * centers the picture in the free band between the top bar and the tray.
    */
   placeCamera(dt) {
     const camera = this.camera
-    const shiftX = this.mode === 'attract' && this.width > 860 ? -this.width * 0.17 : 0
-    const shiftY = this.mode === 'match' ? Math.round(this.height / 2 - (this.band[0] + this.band[1]) / 2) : 0
+    const [top, bottom, left = 0, right = this.width] = this.band
+    const match = this.mode === 'match'
+    const shiftX = match ? Math.round(this.width / 2 - (left + right) / 2) : 0
+    const shiftY = match ? Math.round(this.height / 2 - (top + bottom) / 2) : 0
     if (shiftX !== this.shift?.[0] || shiftY !== this.shift?.[1]) {
       this.shift = [shiftX, shiftY]
       if (shiftX || shiftY) camera.setViewOffset(this.width, this.height, shiftX, shiftY, this.width, this.height)
       else camera.clearViewOffset()
     }
     if (this.mode === 'attract') {
-      const a = this.time * 0.04 + 0.5
-      camera.position.set(Math.sin(a) * 13.5, 4.4 + Math.sin(this.time * 0.2) * 0.4, Math.cos(a) * 13.5)
-      camera.lookAt(0, 1.5, 0)
+      const a = Math.PI / 2 + Math.sin(this.time * 0.07) * 0.3
+      const far = camera.aspect > 1.2 ? 11.5 : 15
+      camera.position.set(Math.sin(a) * far, 4.2 + Math.sin(this.time * 0.2) * 0.3, Math.cos(a) * far)
+      camera.lookAt(0, 1.6, 0)
     } else {
-      const tall = (this.band[1] - this.band[0]) / this.height
+      const tall = (bottom - top) / this.height
+      const wide = (right - left) / this.width
       const halfWide = Math.atan(Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * camera.aspect)
       const width = (this.span - 1) * LAYOUT.gap + 4.4
-      const reach = Math.max(10, (width / 2 / Math.tan(halfWide)) * 1.05) / Math.max(0.75, tall)
+      const goal = Math.max(10, (width / 2 / (Math.tan(halfWide) * Math.max(0.4, wide))) * 1.05) / Math.max(0.75, tall)
+      // Ease toward the new distance when the book opens or closes.
+      this.reach = this.reach ? this.reach + (goal - this.reach) * Math.min(1, dt * 3) : goal
+      const reach = this.reach
       const height = reach * 0.7
       const side = this.viewer === 0 ? 1 : -1
       const pitch = Math.atan((height - 1.3) / reach) - THREE.MathUtils.degToRad(7)
@@ -2177,6 +2731,7 @@ class Stage {
     this.placeCamera(dt)
     const scale = (this.height * this.renderer.getPixelRatio()) / (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)))
     this.sparks.update(this.time, scale, this.camera.aspect)
+    this.marks.flush()
     this.rings.update(this.time)
     this.bolts.update(this.time, this.camera.aspect)
     this.composer.render()
@@ -2259,8 +2814,11 @@ class Plates {
       if (castSign !== plate.sign.cast) {
         plate.sign.cast = castSign
         if (state.cast) {
+          const spell = SPELL[state.cast.spell]
           const target = roster.find((m) => m.id === state.cast.target)
-          plate.castText.textContent = `${SPELL[state.cast.spell].name}${target && target.id !== state.id ? ` → ${target.name}` : ''}`
+          plate.castText.textContent = `${spell.name}${target && target.id !== state.id ? ` → ${target.name}` : ''}`
+          // The cast bar and the plate's edge take the school's color, like the circle under the caster.
+          plate.el.style.setProperty('--cast', `var(--${spell.school})`)
         }
       }
       if (state.cast) plate.castFill.style.width = `${(state.cast.done / state.cast.total) * 100}%`
@@ -2291,7 +2849,7 @@ class Plates {
       const figure = stage.figure(id)
       if (!figure) continue
       const near = figure.team === stage.viewer
-      spots.set(id, { near, team: figure.team, ...stage.toScreen(figure.anchor(near ? 'feet' : 'head', anchor)) })
+      spots.set(id, { near, team: figure.team, ...stage.toScreen(figure.anchor(near ? 'feet' : 'top', anchor)) })
     }
     // Measured once per layout, not every frame: reading it forces a reflow.
     this.width ||= this.plates.values().next().value?.el.offsetWidth || 0
@@ -2367,20 +2925,25 @@ class Hud {
          <span class="cool"></span>`,
       )
       const detail = `<b>${spell.name}</b> · ${spell.cost} mana · ${cast} · ${spell.cool}s cooldown<br>${spell.text}`
-      row.addEventListener('pointerenter', () => ($('#book-detail').innerHTML = detail))
+      const list = $(`#book-${spell.kind}`)
+      const note = $('.detail', list.closest('.page'))
+      row.addEventListener('pointerenter', () => (note.innerHTML = detail))
       row.addEventListener('click', () => {
-        $('#book-detail').innerHTML = detail
+        note.innerHTML = detail
         for (const other of this.rows.values()) other.row.classList.remove('picked')
         row.classList.add('picked')
       })
-      $(`#book-${spell.kind}`).appendChild(row)
+      list.appendChild(row)
       this.rows.set(entry.id, { row, entry, spell, cool: $('.cool', row), glyphs: $$('.sigil i', row) })
     }
     this.legend()
   }
 
+  /** Under the tray: which key types each rune, and how to clear a chord. */
   legend() {
-    $('#legend').innerHTML = RUNES.map((rune) => keyChip(rune)).join('')
+    const labels = LABELS[inputMode]
+    const runes = RUNES.map((rune) => `<span class="legend-key"><span class="key rune ${rune}">${svg(rune)}</span><kbd>${labels[rune] ?? ''}</kbd></span>`)
+    $('#legend').innerHTML = `${runes.join('')}<span class="legend-key clear"><kbd>${CLEAR_KEY[inputMode] ?? ''}</kbd>clear</span>`
   }
 
   /** Book rows: cooldown sweep, mana, and the runes typed so far. */
@@ -2898,15 +3461,27 @@ class Game {
     requestAnimationFrame((next) => this.loop(next))
   }
 
-  /** The screen rows not covered by the top bar and the tray or pads (measured twice a second). */
+  /**
+   * The screen area not covered by the HUD, as [top, bottom, left, right]:
+   * below the top bar, above the tray or pads, and between the book's pages
+   * when they sit at the sides (measured twice a second).
+   */
   freeBand() {
-    const height = this.stage.height
-    if (document.body.dataset.view !== 'match') return [0, height]
+    const { width, height } = this.stage
+    if (document.body.dataset.view !== 'match') return [0, height, 0, width]
     const now = performance.now()
     if (this.band && now - this.bandAt < 500) return this.band
     const touch = inputMode === 'touch' && this.me
-    const bottom = !this.me ? height - 8 : touch ? $('#pads .pad').getBoundingClientRect().top - 70 : $('#tray').getBoundingClientRect().top - 8
-    this.band = [64, Math.max(height * 0.5, bottom)]
+    // Leave room under the near row's feet for its plates (cast bar, chord and auras).
+    const bottom = !this.me ? height - 8 : touch ? $('#pads .pad').getBoundingClientRect().top - 70 : $('#tray').getBoundingClientRect().top - 48
+    let [left, right] = [0, width]
+    if (document.body.dataset.phase !== 'ready') {
+      const offense = $('.page.offense').getBoundingClientRect()
+      const defense = $('.page.defense').getBoundingClientRect()
+      if (offense.right < width / 2) left = Math.max(0, offense.right + 12)
+      if (defense.left > width / 2) right = Math.min(width, defense.left - 12)
+    }
+    this.band = [64, Math.max(height * 0.5, bottom), left, right]
     this.bandAt = now
     return this.band
   }
