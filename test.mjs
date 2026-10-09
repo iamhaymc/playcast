@@ -353,9 +353,26 @@ async function offenseChord(page) {
   return ['up', ...pick.sigil]
 }
 
+/**
+ * Save a screenshot. Software WebGL plays at the lowest render tier, but the
+ * picture is drawn at the top tier, as a desktop GPU would show it.
+ */
 async function shoot(page, name) {
   await page.waitForTimeout(250)
+  const was = await page.evaluate(() => {
+    const stage = window.chordcast.stage
+    const was = { tier: stage.tier, pinned: stage.governor.pinned }
+    stage.governor.pinned = true
+    stage.setQuality(stage.tiers.length - 1)
+    return was
+  })
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
   await page.screenshot({ path: new URL(`${name}.png`, SHOTS).pathname })
+  await page.evaluate(({ tier, pinned }) => {
+    const stage = window.chordcast.stage
+    stage.setQuality(tier)
+    stage.governor.pinned = pinned
+  }, was)
 }
 
 /**
@@ -504,17 +521,24 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
     await phone.waitForSelector('body[data-phase="ready"]')
     await phone.waitForTimeout(1000)
     await shoot(phone, '13-phone-study')
+
+    // Watching: the spectator joins by code while the phone studies. An idle
+    // player can fall to the bot within 20 seconds, and slow software
+    // rendering could let that pass before a later join.
+    const duel = await phone.evaluate(() => window.chordcast.room.code)
+    await stage.focus(cat)
+    await cat.fill('#code-input', duel)
+    await cat.click('#join-form button')
+    await cat.waitForSelector('body.watching[data-view="match"]')
+
+    await stage.focus(phone)
     await phone.waitForSelector('body[data-phase="fight"]')
     for (const key of await offenseChord(phone)) await phone.tap(`#pads [data-key="${key}"]`)
     await phone.waitForFunction(() => window.chordcast.seq >= 3)
     await phone.waitForTimeout(2500)
     await shoot(phone, '14-phone-fight')
 
-    // Watching: the spectator joins the live duel by code
-    const duel = await phone.evaluate(() => window.chordcast.room.code)
     await stage.focus(cat)
-    await cat.fill('#code-input', duel)
-    await cat.click('#join-form button')
     await cat.waitForSelector('body.watching[data-view="match"][data-phase="fight"]')
     await cat.waitForTimeout(2000)
     await shoot(cat, '15-watching')

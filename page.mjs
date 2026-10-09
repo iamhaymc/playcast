@@ -8,7 +8,7 @@
  *    2  Link     the message link to the host
  *    3  Pads     keyboard, gamepad and touch become keys
  *    4  Sparks   the GPU particle system
- *    5  Rings    flat glowing rings on the floor
+ *    5  Rings    glowing rings on the floor and ribbon bolts in the air
  *    6  Looks    particle recipes for schools and statuses
  *    7  Figure   one mage: model, motion and status visuals
  *    8  Flight   one spell in the air
@@ -25,6 +25,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
+import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js'
 import { AIM_TEXT, CODEX, LAYOUT, MOVES, RULES, RUNES, SPELL, TEAMS, TICK_MS, TICK_RATE, dampenAt, moveCursor, pack, place, readRunes, walkActs } from '/core.mjs'
 
 // ─── 1 · Kit ────────────────────────────────────────────────────────────────
@@ -35,6 +36,18 @@ const rand = (low, high) => low + Math.random() * (high - low)
 const pickOne = (list) => list[Math.floor(Math.random() * list.length)]
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value))
 const ease = (t) => 1 - Math.pow(1 - t, 3)
+
+/** Write text or markup only when it changed, so steady frames leave the DOM alone. */
+const written = new WeakMap()
+function setText(el, text) {
+  text = String(text)
+  if (written.get(el) !== text) el.textContent = text
+  written.set(el, text)
+}
+function setHtml(el, html) {
+  if (written.get(el) !== html) el.innerHTML = html
+  written.set(el, html)
+}
 
 function make(tag, className = '', html = '') {
   const el = document.createElement(tag)
@@ -350,6 +363,7 @@ const SPARK_VERTEX = /* glsl */ `
   uniform float uTime;
   uniform float uScale;
   uniform float uAspect;
+  uniform float uMaxPoint;
   attribute vec3 aOffset;
   attribute vec3 aVelocity;
   attribute vec4 aColor;
@@ -359,6 +373,7 @@ const SPARK_VERTEX = /* glsl */ `
   varying float vShape;
   varying float vAngle;
   varying float vHeat;
+  varying float vShrink;
 
   vec3 travel(float t) {
     float k = aForce.y;
@@ -385,9 +400,14 @@ const SPARK_VERTEX = /* glsl */ `
     float seed = fract(sin(aLife.x * 91.7 + aOffset.x * 47.3 + aVelocity.z * 13.1) * 43758.5);
     vAngle = aLife.w > 7.5 && aLife.w < 8.5 && length(dir) > 1e-5 ? atan(dir.y, dir.x) : seed * 6.2832 + age * (seed - 0.5) * 4.0;
     float size = aLife.z * max(0.0, 1.0 + aForce.w * u);
-    gl_PointSize = clamp(size * uScale / -view.z, 0.0, 600.0);
+    // Points under two pixels shimmer as they cross pixel centers: keep them
+    // two pixels wide and fade them by the area they lost instead.
+    float pixels = size * uScale / -view.z;
+    float cover = clamp(pixels * 0.5, 0.0, 1.0);
+    gl_PointSize = clamp(pixels, 2.0, uMaxPoint);
     float fade = smoothstep(0.0, 0.08, u) * (1.0 - smoothstep(0.55, 1.0, u));
-    vColor = vec4(aColor.rgb, aColor.a * fade);
+    vColor = vec4(aColor.rgb, aColor.a * fade * cover);
+    vShrink = cover;
     vShape = aLife.w;
     vHeat = 1.0 - u;
   }
@@ -398,6 +418,7 @@ const SPARK_FRAGMENT = /* glsl */ `
   varying float vShape;
   varying float vAngle;
   varying float vHeat;
+  varying float vShrink;
 
   float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
   float noise(vec2 p) {
@@ -408,7 +429,7 @@ const SPARK_FRAGMENT = /* glsl */ `
   }
 
   void main() {
-    vec2 p = gl_PointCoord * 2.0 - 1.0;
+    vec2 p = (gl_PointCoord * 2.0 - 1.0) * vShrink;
     p.y = -p.y;
     float c = cos(vAngle);
     float s = sin(vAngle);
@@ -436,9 +457,14 @@ const SPARK_FRAGMENT = /* glsl */ `
       float d = length(vec2(q.x * 2.3, q.y));
       alpha = smoothstep(1.0, 0.86, d) * (1.0 - 0.45 * exp(-abs(q.x) * 30.0));
     } else if (shape == 6) {
-      float ring = exp(-pow((r - 0.66) * 11.0, 2.0));
-      float cross = max(exp(-abs(q.x) * 18.0), exp(-abs(q.y) * 18.0)) * step(r, 0.6);
-      alpha = max(ring, cross * 0.85);
+      // A sigil: a ring around a triangle (iq's equilateral triangle distance) and a dot.
+      float ring = exp(-pow((r - 0.74) * 12.0, 2.0));
+      const float k = 1.7320508;
+      vec2 t = vec2(abs(q.x) - 0.55, q.y + 0.55 / k);
+      if (t.x + k * t.y > 0.0) t = vec2(t.x - k * t.y, -k * t.x - t.y) / 2.0;
+      t.x -= clamp(t.x, -1.1, 0.0);
+      float tri = exp(-pow(length(t) * 13.0, 2.0));
+      alpha = max(max(ring, tri * 0.9), exp(-r * r * 60.0));
     } else if (shape == 7) {
       float arms = exp(-abs(sin(3.0 * atan(q.y, q.x))) * r * 14.0) * smoothstep(1.0, 0.5, r);
       core = exp(-r * r * 25.0);
@@ -507,7 +533,8 @@ const ZERO3 = [0, 0, 0]
 class Sparks {
   constructor(scene, capacity = 24000) {
     this.time = 0
-    this.uniforms = { uTime: { value: 0 }, uScale: { value: 800 }, uAspect: { value: 1 } }
+    this.density = 1
+    this.uniforms = { uTime: { value: 0 }, uScale: { value: 800 }, uAspect: { value: 1 }, uMaxPoint: { value: 600 } }
     this.glow = new SparkLayer(capacity, THREE.AdditiveBlending, this.uniforms)
     this.haze = new SparkLayer(Math.floor(capacity / 4), THREE.NormalBlending, this.uniforms)
     this.haze.points.renderOrder = 1
@@ -516,6 +543,8 @@ class Sparks {
   }
   /** p: { at, offset?, velocity?, color, alpha?, life?, size?, shape?, gravity?, drag?, swirl?, grow?, delay?, haze? } */
   emit(p) {
+    // Lower quality tiers thin out small bits; big flashes always draw.
+    if (this.density < 1 && (p.size ?? 0.3) < 0.5 && Math.random() > this.density) return
     ;(p.haze ? this.haze : this.glow).write(p, this.time)
   }
   update(time, scale, aspect) {
@@ -565,7 +594,7 @@ class Rings {
       mesh.visible = false
       mesh.renderOrder = 3
       scene.add(mesh)
-      return { mesh, start: 0, life: 1, radius: 1 }
+      return { mesh, start: -Infinity, life: 1, radius: 1 }
     })
     this.next = 0
   }
@@ -586,6 +615,144 @@ class Rings {
       ring.mesh.material.uniforms.uFade.value = (1 - u) * 1.6
     }
   }
+}
+
+const BOLT_VERTEX = /* glsl */ `
+  uniform float uWidth;
+  uniform float uAspect;
+  attribute vec3 aPrev;
+  attribute vec3 aNext;
+  attribute float aSide;
+  attribute float aAlong;
+  varying float vSide;
+  varying float vAlong;
+  vec2 screen(vec3 p) {
+    vec4 clip = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+    return clip.xy / clip.w * vec2(uAspect, 1.0);
+  }
+  void main() {
+    vec4 clip = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    vec2 dir = screen(aNext) - screen(aPrev);
+    dir = length(dir) > 1e-6 ? normalize(dir) : vec2(1.0, 0.0);
+    vec2 normal = vec2(-dir.y, dir.x) / vec2(uAspect, 1.0);
+    float taper = 1.0 - 0.7 * pow(abs(aAlong * 2.0 - 1.0), 6.0);
+    clip.xy += normal * aSide * uWidth * taper * projectionMatrix[1][1];
+    vSide = aSide;
+    vAlong = aAlong;
+    gl_Position = clip;
+  }
+`
+const BOLT_FRAGMENT = /* glsl */ `
+  uniform vec3 uColor;
+  uniform vec3 uHot;
+  uniform float uFade;
+  varying float vSide;
+  varying float vAlong;
+  void main() {
+    float d = vSide * vSide;
+    float glow = exp(-d * 4.0) - 0.018;
+    float core = exp(-d * 36.0);
+    float ends = smoothstep(0.0, 0.03, vAlong) * smoothstep(1.0, 0.97, vAlong);
+    gl_FragColor = vec4((uColor * max(glow, 0.0) + uHot * core * 1.6) * ends, uFade);
+  }
+`
+
+/**
+ * A pool of glowing ribbons that always face the camera: lightning, beams and
+ * tethers. Each holds a polyline drawn as a strip with a hot core and soft edges.
+ */
+class Bolts {
+  constructor(scene, count = 48, capacity = 48) {
+    this.aspect = { value: 1 }
+    this.capacity = capacity
+    const index = []
+    for (let i = 0; i < capacity - 1; i++) index.push(i * 2, i * 2 + 1, i * 2 + 2, i * 2 + 1, i * 2 + 3, i * 2 + 2)
+    this.pool = Array.from({ length: count }, () => {
+      const geometry = new THREE.BufferGeometry()
+      for (const [name, size] of Object.entries({ position: 3, aPrev: 3, aNext: 3, aSide: 1, aAlong: 1 })) {
+        geometry.setAttribute(name, new THREE.BufferAttribute(new Float32Array(capacity * 2 * size), size).setUsage(THREE.DynamicDrawUsage))
+      }
+      geometry.setIndex(index)
+      const material = new THREE.ShaderMaterial({
+        uniforms: { uColor: { value: new THREE.Color() }, uHot: { value: new THREE.Color() }, uFade: { value: 0 }, uWidth: { value: 0.1 }, uAspect: this.aspect },
+        vertexShader: BOLT_VERTEX,
+        fragmentShader: BOLT_FRAGMENT,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide, // the strip's winding flips with its direction on screen
+      })
+      const mesh = new THREE.Mesh(geometry, material)
+      mesh.frustumCulled = false
+      mesh.visible = false
+      mesh.renderOrder = 3
+      scene.add(mesh)
+      return { mesh, start: -Infinity, life: 1, flicker: 0 }
+    })
+    this.next = 0
+  }
+
+  /** Draw a polyline (THREE.Vector3[]) for `life` seconds, in a fresh slot or in `bolt` again. */
+  spawn(points, { color, hot = color, width = 0.12, life = 0.15, flicker = 0, time }, bolt = null) {
+    const count = Math.min(points.length, this.capacity)
+    if (count < 2) return bolt
+    if (!bolt) {
+      bolt = this.pool[this.next]
+      this.next = (this.next + 1) % this.pool.length
+    }
+    const { position, aPrev, aNext, aSide, aAlong } = bolt.mesh.geometry.attributes
+    for (let i = 0; i < count; i++) {
+      const at = points[i]
+      const prev = points[Math.max(0, i - 1)]
+      const next = points[Math.min(count - 1, i + 1)]
+      for (let side = 0; side < 2; side++) {
+        const k = i * 2 + side
+        position.setXYZ(k, at.x, at.y, at.z)
+        aPrev.setXYZ(k, prev.x, prev.y, prev.z)
+        aNext.setXYZ(k, next.x, next.y, next.z)
+        aSide.setX(k, side ? 1 : -1)
+        aAlong.setX(k, i / (count - 1))
+      }
+    }
+    for (const attribute of [position, aPrev, aNext, aSide, aAlong]) {
+      attribute.clearUpdateRanges()
+      attribute.addUpdateRange(0, count * 2 * attribute.itemSize)
+      attribute.needsUpdate = true
+    }
+    bolt.mesh.geometry.setDrawRange(0, (count - 1) * 6)
+    const uniforms = bolt.mesh.material.uniforms
+    uniforms.uColor.value.copy(color)
+    uniforms.uHot.value.copy(hot)
+    uniforms.uWidth.value = width
+    Object.assign(bolt, { start: time, life, flicker })
+    return bolt
+  }
+
+  update(time, aspect) {
+    this.aspect.value = aspect
+    for (const bolt of this.pool) {
+      const u = (time - bolt.start) / bolt.life
+      bolt.mesh.visible = u >= 0 && u < 1
+      if (!bolt.mesh.visible) continue
+      const flicker = 1 - bolt.flicker * (0.5 + 0.5 * Math.sin(time * 90 + bolt.start * 50))
+      bolt.mesh.material.uniforms.uFade.value = (1 - u * u) * flicker
+    }
+  }
+}
+
+/** A jagged path between two points, by midpoint displacement. */
+function jagged(from, to, depth = 4, roughness = 0.26) {
+  let points = [from.clone(), to.clone()]
+  for (let level = 0; level < depth; level++) {
+    const next = [points[0]]
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1]
+      const b = points[i]
+      next.push(a.clone().lerp(b, 0.5).add(randomDirection().multiplyScalar(a.distanceTo(b) * roughness)), b)
+    }
+    points = next
+  }
+  return points
 }
 
 // ─── 6 · Looks ──────────────────────────────────────────────────────────────
@@ -609,6 +776,7 @@ class Looks {
     this.stage = stage
     this.sparks = stage.sparks
     this.rings = stage.rings
+    this.bolts = stage.bolts
   }
 
   flash(at, color, size = 1.6, life = 0.22, alpha = 1) {
@@ -617,7 +785,7 @@ class Looks {
 
   burst(at, school, power = 1) {
     const look = schoolLook(school)
-    this.flash(at, look.hot, 1.1 * Math.sqrt(power), 0.2, 0.75)
+    this.flash(at, mixColor(look.hot, look.main, 0.45), 1.1 * Math.sqrt(power), 0.2, 0.6)
     this.sparks.emit({ at: point(at), color: look.main, alpha: 0.7, size: 0.55 * power, life: 0.4, shape: 'ring', grow: 4 })
     const count = Math.round(26 * power)
     for (let i = 0; i < count; i++) {
@@ -689,7 +857,7 @@ class Looks {
         drag: 0.6,
       })
     }
-    this.sparks.emit({ at: [feet.x, feet.y + 1.2, feet.z], color: look.main, size: 2.2, life: 0.4, shape: 'glow', alpha: 0.45 })
+    this.sparks.emit({ at: [feet.x, feet.y + 1.2, feet.z], color: look.main, size: 1.6, life: 0.4, shape: 'glow', alpha: 0.35 })
   }
 
   spiral(center, school, rising = true) {
@@ -744,10 +912,11 @@ class Looks {
     if (look.smoke && Math.random() < 0.35) this.smoke(at, look.smoke, 1)
   }
 
-  stream(from, to, school, width = 0.12) {
+  /** Motes scattered along a line; `share` scales how many (rounded at random). */
+  stream(from, to, school, width = 0.12, share = 1) {
     const look = schoolLook(school)
     const span = to.clone().sub(from)
-    const count = Math.ceil(span.length() * 5)
+    const count = Math.floor(span.length() * 5 * share + Math.random())
     for (let i = 0; i < count; i++) {
       const at = from.clone().addScaledVector(span, Math.random())
       this.sparks.emit({
@@ -761,26 +930,34 @@ class Looks {
     }
   }
 
+  /** A rippling ribbon from one point to another. Pass back the returned bolt to redraw it. */
+  beam(from, to, school, width = 0.2, bolt = null) {
+    const look = schoolLook(school)
+    const span = to.clone().sub(from)
+    const side = new THREE.Vector3(-span.z, 0, span.x).normalize()
+    const t = this.sparks.time
+    const points = Array.from({ length: 24 }, (_, i) => {
+      const u = i / 23
+      const wave = Math.sin(u * 14 - t * 30) * 0.05 * Math.sin(u * Math.PI)
+      const at = from.clone().addScaledVector(span, u).addScaledVector(side, wave)
+      at.y += wave * 0.6
+      return at
+    })
+    return this.bolts.spawn(points, { color: look.main, hot: look.hot, width, life: 0.1, time: t }, bolt)
+  }
+
   lightning(from, to, school) {
     const look = schoolLook(school)
-    let points = [from.clone(), to.clone()]
-    for (let depth = 0; depth < 5; depth++) {
-      const next = [points[0]]
-      for (let i = 1; i < points.length; i++) {
-        const a = points[i - 1]
-        const b = points[i]
-        const jitter = a.distanceTo(b) * 0.28
-        next.push(a.clone().lerp(b, 0.5).add(randomDirection().multiplyScalar(jitter)), b)
-      }
-      points = next
+    const time = this.sparks.time
+    const points = jagged(from, to, 5, 0.24)
+    this.bolts.spawn(points, { color: look.main, hot: look.hot, width: 0.16, life: rand(0.12, 0.2), flicker: 0.5, time })
+    for (let i = 0; i < 2; i++) {
+      const at = points[Math.floor(rand(0.2, 0.75) * points.length)]
+      const reach = randomDirection().multiplyScalar(rand(0.5, 1.2)).add(to.clone().sub(at).multiplyScalar(0.25))
+      this.bolts.spawn(jagged(at, at.clone().add(reach), 3, 0.3), { color: look.deep, hot: look.main, width: 0.07, life: 0.1, time })
     }
-    for (let i = 1; i < points.length; i++) {
-      const a = points[i - 1]
-      const b = points[i]
-      const steps = Math.max(1, Math.ceil(a.distanceTo(b) * 9))
-      for (let k = 0; k < steps; k++) {
-        this.sparks.emit({ at: point(a.clone().lerp(b, k / steps)), color: k % 3 ? look.main : look.hot, size: rand(0.1, 0.18), life: 0.14, shape: 'glow' })
-      }
+    for (let i = 0; i < 3; i++) {
+      this.sparks.emit({ at: point(pickOne(points)), velocity: point(randomDirection().multiplyScalar(rand(1, 3))), color: look.hot, size: rand(0.06, 0.12), life: rand(0.15, 0.3), shape: 'spark', drag: 3 })
     }
   }
 
@@ -798,7 +975,7 @@ class Looks {
         drag: 0.4,
       })
     }
-    this.flash(center, look.main, 1.4, 0.3)
+    this.flash(center, look.main, 1.1, 0.3, 0.7)
   }
 
   shatter(center, color, count = 22) {
@@ -897,21 +1074,62 @@ const STATUS_MOTION = {
 
 const GEOMETRY = {}
 
+/** A centripetal Catmull-Rom curve through [radius, height] points, as lathe profile points. */
+function profile(points, samples) {
+  const curve = new THREE.CatmullRomCurve3(points.map(([x, y]) => new THREE.Vector3(x, y, 0)), false, 'centripetal')
+  return curve.getSpacedPoints(samples).map((v) => new THREE.Vector2(Math.max(0.001, v.x), v.y))
+}
+
+/** Weld a geometry's seams and give it smooth normals. */
+function smooth(geometry) {
+  for (const name of ['normal', 'uv']) geometry.deleteAttribute(name)
+  const welded = mergeVertices(geometry, 1e-4)
+  welded.computeVertexNormals()
+  return welded
+}
+
+/** A lathe, welded and smoothed, with an optional bend applied to each vertex. */
+function lathe(points, segments, bend) {
+  const geometry = new THREE.LatheGeometry(points, segments)
+  if (bend) {
+    const position = geometry.attributes.position
+    const v = new THREE.Vector3()
+    for (let i = 0; i < position.count; i++) position.setXYZ(i, ...bend(v.fromBufferAttribute(position, i)).toArray())
+  }
+  return smooth(geometry)
+}
+
+/** A hexagonal prism with chamfered edges, flat on the floor and `height` tall. */
+function hexPrism(radius, height, chamfer) {
+  const hex = new THREE.Shape()
+  for (let i = 0; i < 6; i++) {
+    const a = Math.PI / 6 + (i / 6) * Math.PI * 2
+    i ? hex.lineTo(Math.cos(a) * radius, Math.sin(a) * radius) : hex.moveTo(Math.cos(a) * radius, Math.sin(a) * radius)
+  }
+  const options = { depth: height - chamfer * 2, bevelEnabled: true, bevelThickness: chamfer, bevelSize: chamfer, bevelSegments: 2, curveSegments: 1 }
+  return new THREE.ExtrudeGeometry(hex, options).rotateX(-Math.PI / 2).translate(0, chamfer, 0)
+}
+
 function shapes() {
   if (GEOMETRY.robe) return GEOMETRY
-  const outline = [
-    [0.001, 0],
-    [0.66, 0],
-    [0.68, 0.06],
-    [0.56, 0.4],
-    [0.44, 0.9],
-    [0.36, 1.25],
-    [0.46, 1.4],
-    [0.32, 1.56],
-    [0.14, 1.64],
-    [0.001, 1.66],
-  ].map(([x, y]) => new THREE.Vector2(x, y))
-  const robe = new THREE.LatheGeometry(outline, 10).toNonIndexed()
+  const robe = lathe(
+    profile(
+      [
+        [0.001, 0],
+        [0.62, 0],
+        [0.68, 0.05],
+        [0.6, 0.32],
+        [0.47, 0.82],
+        [0.37, 1.22],
+        [0.45, 1.38],
+        [0.33, 1.55],
+        [0.14, 1.64],
+        [0.001, 1.66],
+      ],
+      32,
+    ),
+    32,
+  )
   const heights = robe.attributes.position
   const shade = new Float32Array(heights.count * 3)
   for (let i = 0; i < heights.count; i++) {
@@ -919,28 +1137,41 @@ function shapes() {
     shade.set([t, t, t], i * 3)
   }
   robe.setAttribute('color', new THREE.BufferAttribute(shade, 3))
-  robe.computeVertexNormals()
+
+  // One hat: a tilted brim and a tall cone whose tip droops to the side.
+  const brim = new THREE.CylinderGeometry(0.62, 0.66, 0.05, 40).rotateX(0.08).rotateZ(0.05).translate(0, SEAT_Y + 2.0, 0)
+  const cone = Array.from({ length: 20 }, (_, i) => {
+    const t = i / 19
+    return new THREE.Vector2(Math.max(0.001, 0.38 * Math.pow(1 - t, 1.3)), t * 1.02)
+  })
+  const crown = lathe(cone, 28, (v) => {
+    const t = v.y / 1.02
+    return v.set(v.x + 0.34 * Math.pow(t, 2.6), v.y - 0.12 * Math.pow(t, 4), v.z - 0.04 * Math.pow(t, 2))
+  }).translate(0, SEAT_Y + 1.99, 0)
+  brim.deleteAttribute('uv')
+
+  const eye = (x) => new THREE.SphereGeometry(0.038, 10, 6).translate(x, SEAT_Y + 1.85, 0.17)
+
   Object.assign(GEOMETRY, {
     robe,
-    head: new THREE.IcosahedronGeometry(0.21, 1),
-    hat: new THREE.ConeGeometry(0.38, 0.7, 10),
-    tip: new THREE.ConeGeometry(0.19, 0.5, 10),
-    brim: new THREE.CylinderGeometry(0.62, 0.66, 0.05, 20),
-    band: new THREE.TorusGeometry(0.36, 0.035, 6, 24),
-    eye: new THREE.SphereGeometry(0.038, 8, 6),
-    staff: new THREE.CylinderGeometry(0.035, 0.05, 2.5, 6),
-    gem: new THREE.OctahedronGeometry(0.18, 0),
-    orbit: new THREE.TorusGeometry(0.3, 0.018, 4, 24),
-    mote: new THREE.IcosahedronGeometry(0.06, 0),
-    collar: new THREE.TorusGeometry(0.3, 0.05, 6, 16),
-    belt: new THREE.TorusGeometry(0.44, 0.035, 6, 20),
-    arm: new THREE.CylinderGeometry(0.07, 0.14, 0.75, 7),
-    base: new THREE.CylinderGeometry(0.95, 1.08, 0.24, 6),
-    rim: new THREE.TorusGeometry(1.0, 0.03, 4, 6),
+    head: new THREE.SphereGeometry(0.21, 24, 16),
+    hat: mergeGeometries([brim, crown]),
+    band: new THREE.TorusGeometry(0.355, 0.035, 8, 40),
+    eyes: mergeGeometries([eye(-0.075), eye(0.075)]),
+    staff: new THREE.CylinderGeometry(0.035, 0.05, 2.5, 12),
+    knob: new THREE.TorusGeometry(0.06, 0.03, 6, 12),
+    gem: new THREE.OctahedronGeometry(0.18, 0).scale(1, 1.25, 1),
+    orbit: new THREE.TorusGeometry(0.3, 0.018, 6, 40),
+    mote: new THREE.IcosahedronGeometry(0.06, 1),
+    collar: new THREE.TorusGeometry(0.3, 0.05, 8, 32),
+    belt: new THREE.TorusGeometry(0.44, 0.035, 6, 40),
+    arm: new THREE.CylinderGeometry(0.07, 0.14, 0.75, 16),
+    base: hexPrism(1.0, 0.24, 0.045),
+    rim: new THREE.TorusGeometry(1.0, 0.03, 8, 6),
     disc: new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2),
-    bubble: new THREE.SphereGeometry(1.2, 32, 20),
+    bubble: new THREE.SphereGeometry(1.2, 48, 32),
     ice: new THREE.IcosahedronGeometry(1, 1),
-    wool: new THREE.IcosahedronGeometry(0.3, 1),
+    wool: new THREE.IcosahedronGeometry(0.3, 3),
     arrow: new THREE.ConeGeometry(0.16, 0.34, 4).rotateX(Math.PI),
   })
   return GEOMETRY
@@ -969,6 +1200,22 @@ const BUBBLE_FRAGMENT = /* glsl */ `
     gl_FragColor = vec4(uColor * a, a);
   }
 `
+
+/**
+ * Give a standard material a soft rim of `color` where the surface turns away
+ * from the camera, so robes read against the dark arena without flat shading.
+ */
+function addRim(material, color, strength = 0.4) {
+  const rim = { value: color.clone().multiplyScalar(strength) }
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uRim = rim
+    shader.fragmentShader = shader.fragmentShader
+      .replace('void main() {', 'uniform vec3 uRim;\nvoid main() {')
+      .replace('#include <opaque_fragment>', 'outgoingLight += uRim * pow(1.0 - saturate(dot(normal, normalize(vViewPosition))), 3.0);\n#include <opaque_fragment>')
+  }
+  material.customProgramCacheKey = () => 'rim'
+  return material
+}
 
 const SEAT_Y = 0.24
 const BASE_TEXT = new THREE.Color('#1b1e3a')
@@ -1002,14 +1249,14 @@ class Figure {
     this.body = new THREE.Group()
     this.root.add(this.body)
 
-    this.robeMaterial = new THREE.MeshStandardMaterial({ color: robe, vertexColors: true, roughness: 0.55, metalness: 0.15, flatShading: true, emissive: glow, emissiveIntensity: 0.05, transparent: true })
+    this.robeMaterial = addRim(new THREE.MeshStandardMaterial({ color: robe, vertexColors: true, roughness: 0.62, metalness: 0.08, emissive: glow, emissiveIntensity: 0.05, transparent: true }), glow)
     this.trimMaterial = new THREE.MeshStandardMaterial({ color: glow, emissive: glow, emissiveIntensity: 1.1, roughness: 0.3 })
-    const gold = new THREE.MeshStandardMaterial({ color: '#b08a4a', roughness: 0.35, metalness: 0.8 })
-    this.hatMaterial = new THREE.MeshStandardMaterial({ color: robe.clone().multiplyScalar(0.75), roughness: 0.6, flatShading: true, transparent: true })
-    this.gemMaterial = new THREE.MeshStandardMaterial({ color: glow, emissive: glow, emissiveIntensity: 2.2, roughness: 0.2, flatShading: true })
-    const face = new THREE.MeshStandardMaterial({ color: '#0b0a18', roughness: 0.9 })
+    const gold = new THREE.MeshStandardMaterial({ color: '#c79a52', roughness: 0.3, metalness: 0.9 })
+    this.hatMaterial = addRim(new THREE.MeshStandardMaterial({ color: robe.clone().multiplyScalar(0.75), roughness: 0.66, metalness: 0.05, transparent: true }), glow, 0.3)
+    this.gemMaterial = new THREE.MeshStandardMaterial({ color: glow, emissive: glow, emissiveIntensity: 2.2, roughness: 0.15, metalness: 0.2, flatShading: true })
+    const face = new THREE.MeshStandardMaterial({ color: '#0b0a18', roughness: 0.85 })
     const eyes = new THREE.MeshBasicMaterial({ color: glow.clone().lerp(new THREE.Color('#ffffff'), 0.5).multiplyScalar(3) })
-    const wood = new THREE.MeshStandardMaterial({ color: '#4a3024', roughness: 0.8, flatShading: true })
+    const wood = new THREE.MeshStandardMaterial({ color: '#4a3024', roughness: 0.75 })
 
     const add = (geometry, material, position, rotation = [0, 0, 0], parent = this.body) => {
       const mesh = new THREE.Mesh(geometry, material)
@@ -1023,18 +1270,16 @@ class Figure {
     add(geo.belt, gold, [0, SEAT_Y + 0.9, 0], [Math.PI / 2, 0, 0])
     add(geo.collar, this.trimMaterial, [0, SEAT_Y + 1.5, 0], [Math.PI / 2, 0, 0])
     add(geo.head, face, [0, SEAT_Y + 1.82, 0])
-    add(geo.eye, eyes, [-0.075, SEAT_Y + 1.85, 0.17])
-    add(geo.eye, eyes, [0.075, SEAT_Y + 1.85, 0.17])
-    add(geo.brim, this.hatMaterial, [0, SEAT_Y + 2.0, 0], [0.08, 0, 0.05])
+    add(geo.eyes, eyes, [0, 0, 0])
+    add(geo.hat, this.hatMaterial, [0, 0, 0])
     add(geo.band, this.trimMaterial, [0, SEAT_Y + 2.07, 0], [Math.PI / 2, 0, 0])
-    add(geo.hat, this.hatMaterial, [0, SEAT_Y + 2.37, 0])
-    add(geo.tip, this.hatMaterial, [0.1, SEAT_Y + 2.82, -0.03], [0.12, 0, -0.62])
     this.arm = add(geo.arm, this.robeMaterial, [0.4, SEAT_Y + 1.2, 0.12], [0.3, 0, 0.8])
     add(geo.arm, this.robeMaterial, [-0.38, SEAT_Y + 1.12, 0.06], [0.15, 0, -0.45])
     this.staff = new THREE.Group()
     this.staff.position.set(0.62, SEAT_Y + 1.2, 0.24)
     this.body.add(this.staff)
     add(geo.staff, wood, [0, 0, 0], [0, 0, 0], this.staff)
+    add(geo.knob, gold, [0, 1.22, 0], [Math.PI / 2, 0, 0], this.staff)
     this.gem = add(geo.gem, this.gemMaterial, [0, 1.42, 0], [0, 0, 0], this.staff)
     this.orbit = add(geo.orbit, gold, [0, 1.42, 0], [Math.PI / 2.4, 0, 0], this.staff)
     this.motes = [0, 1].map(() => add(geo.mote, this.trimMaterial, [0, SEAT_Y + 1.1, 0]))
@@ -1042,7 +1287,7 @@ class Figure {
     this.halo.scale.setScalar(0.7)
     this.gem.add(this.halo)
 
-    add(geo.base, new THREE.MeshStandardMaterial({ color: BASE_TEXT, roughness: 0.45, metalness: 0.35, flatShading: true }), [0, 0.12, 0], [0, 0, 0], this.root)
+    add(geo.base, new THREE.MeshStandardMaterial({ color: BASE_TEXT, roughness: 0.4, metalness: 0.45, flatShading: true }), [0, 0, 0], [0, 0, 0], this.root)
     add(geo.rim, this.trimMaterial, [0, SEAT_Y + 0.005, 0], [Math.PI / 2, 0, Math.PI / 6], this.root)
     const pool = add(geo.disc, new THREE.MeshBasicMaterial({ map: tex.glow, color: glow, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false }), [0, 0.02, 0], [0, 0, 0], this.root)
     pool.scale.setScalar(4.2)
@@ -1081,7 +1326,7 @@ class Figure {
   makeSheep() {
     const geo = shapes()
     const sheep = new THREE.Group()
-    const wool = new THREE.MeshStandardMaterial({ color: '#f4f1ff', roughness: 0.95, flatShading: true })
+    const wool = new THREE.MeshStandardMaterial({ color: '#f4f1ff', roughness: 0.95 })
     const skin = new THREE.MeshStandardMaterial({ color: '#2a2438', roughness: 0.8 })
     for (const [x, y, z, s] of [
       [0, 0.6, 0, 1.3],
@@ -1128,13 +1373,14 @@ class Figure {
   release(spell) {
     const look = schoolLook(spell.school)
     this.gemMaterial.emissive.copy(look.main)
-    this.stage.looks.flash(this.anchor('gem'), look.hot, 1.8, 0.25)
+    this.stage.looks.flash(this.anchor('gem'), look.main, 1.3, 0.22, 0.8)
     this.flare = 1
   }
 
-  hit(share) {
-    this.kick = Math.min(1, this.kick + 0.4 + share * 3)
-    this.flash = 1
+  /** Flinch from a hit. Damage over time ticks flinch less and barely flash. */
+  hit(share, direct = true) {
+    this.kick = Math.min(1, this.kick + (direct ? 0.4 : 0.1) + share * 3)
+    this.flash = Math.max(this.flash, direct ? 1 : 0.35)
   }
 
   // Frame ────────────────────────────────────────────────────────────────
@@ -1146,7 +1392,7 @@ class Figure {
     const down = Boolean(state?.down)
 
     this.kick = Math.max(0, this.kick - dt * 3)
-    this.flash = Math.max(0, this.flash - dt * 6)
+    this.flash = Math.max(0, this.flash - dt * 7)
     this.flare = Math.max(0, (this.flare ?? 0) - dt * 2.5)
     this.fallen = clamp(this.fallen + (down ? dt * 1.6 : -dt * 2), 0, 1)
 
@@ -1177,15 +1423,15 @@ class Figure {
     this.robeMaterial.opacity = this.hatMaterial.opacity = opacity
     const stone = looks.has('stone') || looks.has('time')
     this.robeMaterial.emissive.copy(this.flash > 0 ? TINTS.flash : stone ? (looks.has('time') ? TINTS.time : TINTS.stone) : this.glow)
-    this.robeMaterial.emissiveIntensity = 0.05 + this.flash * 0.3 + (stone ? 0.35 : 0)
+    this.robeMaterial.emissiveIntensity = 0.05 + this.flash * this.flash * 0.22 + (stone ? 0.35 : 0)
 
     const casting = Boolean(state?.cast)
     const target = casting ? 0.5 : 0
     this.circle.material.opacity += (target - this.circle.material.opacity) * Math.min(1, dt * 10)
     this.circle.rotation.y += dt * (casting ? 1.6 : 0.4)
     this.circle.scale.setScalar(1.5 + castShare * 1.2)
-    this.gemMaterial.emissiveIntensity = 2.2 + (casting ? 3 + castShare * 5 : 0) + this.flare * 6
-    this.halo.scale.setScalar(0.7 + (casting ? 0.6 + castShare : 0) + this.flare)
+    this.gemMaterial.emissiveIntensity = 2.2 + (casting ? 1.5 + castShare * 2.5 : 0) + this.flare * 3
+    this.halo.scale.setScalar(0.7 + (casting ? 0.4 + castShare * 0.6 : 0) + this.flare * 0.6)
     if (!casting) this.gemMaterial.emissive.lerp(this.glow, Math.min(1, dt * 2))
 
     const guard = (state?.guard ?? 0) > 0
@@ -1222,7 +1468,7 @@ class Figure {
         const shape = look.shape === 'body' ? school.body : look.shape
         const motion = STATUS_MOTION[look.motion]()
         const at = this.anchor(look.where)
-        this.stage.sparks.emit({ at: point(at), color, shape, size: rand(0.1, 0.24) * (look.haze ? 3 : 1), alpha: look.haze ? 0.6 : 1, haze: look.haze, grow: look.haze ? 1 : 0, ...motion })
+        this.stage.sparks.emit({ at: point(at), color, shape, size: rand(0.1, 0.24) * (look.haze ? 3 : 1), alpha: look.haze ? 0.6 : 0.8, haze: look.haze, grow: look.haze ? 1 : 0, ...motion })
       }
     }
   }
@@ -1277,30 +1523,43 @@ class Flight {
     return out.set(0, 0, 0).addScaledVector(a, u * u).addScaledVector(mid, 2 * u * t).addScaledVector(b, t * t)
   }
 
-  update(time) {
+  /**
+   * Draw one frame. Trails are laid at 60 puffs a second along the stretch
+   * flown since the last frame, so they look the same at any frame rate.
+   */
+  update(time, dt) {
     const t = (time - this.start) / this.duration
     if (t < 0) return true
     const looks = this.stage.looks
     const style = this.spell.flight
     const share = Math.min(1, t)
+    const before = this.share ?? 0
+    this.share = share
+    this.carry = (this.carry ?? 0) + dt * 60
+    const puffs = Math.floor(this.carry)
+    this.carry -= puffs
+    const along = (from, to, draw) => {
+      for (let k = 1; k <= puffs; k++) draw(from + ((to - from) * k) / puffs)
+    }
     if (style === 'bolt' || style === 'fall') {
-      looks.trail(this.path(share), this.school, this.power * (style === 'fall' ? 1.3 : 1))
+      along(before, share, (s) => looks.trail(this.path(s), this.school, this.power * (style === 'fall' ? 1.3 : 1)))
     } else if (style === 'volley') {
+      const head = (at, i) => clamp((at - i * 0.08) / (1 - (this.heads - 1) * 0.08), 0, 1)
       for (let i = 0; i < this.heads; i++) {
-        const local = clamp((t - i * 0.08) / (1 - (this.heads - 1) * 0.08), 0, 1)
-        if (local > 0 && local < 1) looks.trail(this.path(local, i), this.school, 0.55)
+        along(head(before, i), head(share, i), (s) => s > 0 && s < 1 && looks.trail(this.path(s, i), this.school, 0.55))
       }
     } else if (style === 'beam') {
-      looks.stream(this.from.anchor('gem'), this.to.anchor('chest'), this.school)
+      this.ribbon = looks.beam(this.from.anchor('gem'), this.to.anchor('chest'), this.school, 0.16 + this.power * 0.05, this.ribbon)
+      looks.stream(this.from.anchor('gem'), this.to.anchor('chest'), this.school, 0.12, dt * 20)
     } else if (style === 'arc') {
       if (time - this.lastArc > 0.05) {
         this.lastArc = time
         looks.lightning(this.from.anchor('gem'), this.to.anchor('chest'), this.school)
       }
-    } else if (style === 'rise' && Math.random() < 0.5) {
-      looks.stream(this.to.anchor('feet').setY(0.3), this.to.anchor('chest'), this.school, 0.3)
+    } else if (style === 'rise') {
+      looks.stream(this.to.anchor('feet').setY(0.3), this.to.anchor('chest'), this.school, 0.3, dt * 30)
     } else if (style === 'aura' || style === 'nova') {
-      if (Math.random() < 0.6) looks.trail(this.path(share), this.school, 0.45)
+      along(before, share, (s) => Math.random() < 0.6 && looks.trail(this.path(s), this.school, 0.45))
     }
     return t < 1 + (style === 'beam' ? 0.25 : 0)
   }
@@ -1359,7 +1618,25 @@ const FLOOR_FRAGMENT = /* glsl */ `
   uniform vec3 uDawn;
   uniform vec3 uDusk;
   varying vec3 vWorld;
-  float line(float v, float w) { return smoothstep(w, 0.0, abs(v)); }
+
+  // A line of half-width w around v = 0. Lines thinner than a pixel draw a
+  // pixel wide but fainter, so far lines fade out instead of shimmering.
+  float line(float v, float w) {
+    float aa = max(fwidth(v), 1e-5);
+    float drawn = max(w, aa);
+    return (1.0 - smoothstep(drawn - aa, drawn + aa, abs(v))) * clamp(w / drawn, 0.0, 1.0);
+  }
+
+  // Grid lines filtered by their on-screen size (after Ben Golus' pristine grid).
+  float grid(vec2 uv, float width) {
+    vec2 d = max(fwidth(uv), vec2(1e-5));
+    vec2 drawn = max(vec2(width), d);
+    vec2 g = 1.0 - abs(fract(uv) * 2.0 - 1.0);
+    vec2 lines = smoothstep(drawn + d * 1.5, drawn - d * 1.5, g) * clamp(width / drawn, 0.0, 1.0);
+    lines = mix(lines, vec2(width), clamp(d * 2.0 - 1.0, 0.0, 1.0));
+    return mix(lines.x, 1.0, lines.y);
+  }
+
   void main() {
     vec2 p = vWorld.xz;
     float r = length(p);
@@ -1367,12 +1644,15 @@ const FLOOR_FRAGMENT = /* glsl */ `
     vec3 base = vec3(0.035, 0.03, 0.085) * (1.25 - smoothstep(0.0, 22.0, r) * 0.6);
     vec3 side = p.y > 0.0 ? uDawn : uDusk;
     float sideFade = smoothstep(0.0, 2.0, abs(p.y)) * (1.0 - smoothstep(6.0, 14.0, abs(p.y)));
-    vec2 cell = abs(fract(p * 0.5) - 0.5);
-    float grid = smoothstep(0.47, 0.5, max(cell.x, cell.y)) * (1.0 - smoothstep(8.0, 18.0, r));
-    vec3 col = base + side * (grid * 0.07 + sideFade * 0.025);
+    float cells = grid(p * 0.5, 0.06) * (1.0 - smoothstep(8.0, 18.0, r));
+    vec3 col = base + side * (cells * 0.07 + sideFade * 0.025);
     float spin = ang + uTime * 0.05;
     float ringA = line(r - 10.2, 0.05) + line(r - 10.7, 0.03);
-    float ticks = line(r - 10.45, 0.22) * step(0.92, fract(spin * 24.0 / 6.2832));
+    // Tick marks: distance to the nearest tick in turns, filtered by how many turns a pixel spans.
+    float turns = spin * 24.0 / 6.2832;
+    float turnWidth = length(fwidth(p)) / max(r, 1e-3) * 24.0 / 6.2832;
+    float tick = abs(fract(turns + 0.54) - 0.5);
+    float ticks = line(r - 10.45, 0.22) * (1.0 - smoothstep(0.04 - turnWidth, 0.04 + turnWidth, tick));
     float ringB = line(r - 15.5, 0.06) * (0.6 + 0.4 * sin(spin * 6.0 + uTime));
     col += mix(vec3(0.45, 0.35, 1.0), vec3(1.0, 0.75, 0.35), 0.5 + 0.5 * sin(ang * 2.0 + uTime * 0.3)) * (ringA + ticks) * 0.55;
     col += vec3(0.6, 0.4, 1.0) * ringB * 0.35;
@@ -1409,6 +1689,39 @@ const RIFT_FRAGMENT = /* glsl */ `
   }
 `
 
+/** The final pass: tone mapping and sRGB, plus a little noise so dark gradients do not band. */
+function ditheredOutput() {
+  const pass = new OutputPass()
+  const dither = 'gl_FragColor.rgb += (fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) - 0.5) / 255.0;'
+  pass.material.fragmentShader = pass.material.fragmentShader.replace(/}\s*$/, `  ${dither}\n}`)
+  return pass
+}
+
+/**
+ * Render quality tiers. Each caps the pixel ratio, sets the MSAA samples of
+ * the scene buffer and thins small particles. The stage starts from a guess
+ * about the device and the governor moves between tiers as frames allow.
+ */
+const QUALITY = [
+  { name: 'low', ratio: 0.85, samples: 0, density: 0.5 },
+  { name: 'medium', ratio: 1, samples: 2, density: 0.75 },
+  { name: 'high', ratio: 1.5, samples: 4, density: 1 },
+  { name: 'ultra', ratio: 2, samples: 4, density: 1 },
+]
+
+/** The tier to start on: `?quality=` pins one, else a guess from the GPU and device. */
+function startQuality(renderer) {
+  const asked = QUALITY.findIndex((tier) => tier.name === new URLSearchParams(location.search).get('quality'))
+  if (asked >= 0) return { tier: asked, pinned: true }
+  const gl = renderer.getContext()
+  const debug = gl.getExtension('WEBGL_debug_renderer_info')
+  const gpu = String(gl.getParameter(debug ? debug.UNMASKED_RENDERER_WEBGL : gl.RENDERER))
+  if (/swiftshader|llvmpipe|softpipe|software|basic render/i.test(gpu)) return { tier: 0, pinned: false }
+  const small = (navigator.hardwareConcurrency || 8) <= 4 || (navigator.deviceMemory || 8) <= 3
+  const touch = matchMedia('(pointer: coarse)').matches
+  return { tier: small ? 1 : touch ? 2 : 3, pinned: false }
+}
+
 /** The 3D world: arena, mages, particles, flights, camera and post effects. */
 class Stage {
   constructor(canvas) {
@@ -1425,8 +1738,9 @@ class Stage {
     this.motes = 0
     this.band = [0, 1]
 
+    // Antialiasing comes from the multisampled scene buffer below, so the
+    // canvas itself needs none.
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' })
-    renderer.setPixelRatio(Math.min(devicePixelRatio, 1.6))
     renderer.toneMapping = THREE.ACESFilmicToneMapping
     renderer.toneMappingExposure = 0.95
     this.renderer = renderer
@@ -1436,18 +1750,30 @@ class Stage {
     this.camera = new THREE.PerspectiveCamera(40, 1, 0.1, 500)
     this.camera.position.set(0, 7, 15)
 
-    this.composer = new EffectComposer(renderer)
+    this.composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType }))
     this.composer.addPass(new RenderPass(this.scene, this.camera))
     this.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.62, 0.42, 0.62)
+    // Bloom works at CSS-pixel size, so the glow spreads the same on every screen
+    // and costs no more on high-density ones.
+    const sizeBloom = this.bloom.setSize.bind(this.bloom)
+    this.bloom.setSize = (width, height) => sizeBloom(Math.max(2, Math.round(this.width || width)), Math.max(2, Math.round(this.height || height)))
     this.composer.addPass(this.bloom)
-    this.composer.addPass(new OutputPass())
+    this.composer.addPass(ditheredOutput())
 
+    const gl = renderer.getContext()
     this.sparks = new Sparks(this.scene)
+    this.sparks.uniforms.uMaxPoint.value = Math.min(1024, gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1])
     this.rings = new Rings(this.scene)
+    this.bolts = new Bolts(this.scene)
     this.looks = new Looks(this)
+    const anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy())
+    for (const texture of Object.values(textures())) texture.anisotropy = anisotropy
     this.buildWorld()
     this.buildCursor()
-    this.resize()
+    this.tiers = QUALITY.map((tier) => tier.name)
+    const start = startQuality(renderer)
+    this.governor = { cost: 1 / 60, slow: 0, slowFrames: 0, fast: 0, trial: null, floor: 0, ceiling: QUALITY.length - 1, raised: -Infinity, pinned: start.pinned }
+    this.setQuality(start.tier)
     window.addEventListener('resize', () => this.resize())
   }
 
@@ -1458,26 +1784,44 @@ class Stage {
     this.shared = shared
     this.bakeSky()
 
-    const starCount = 1600
-    const stars = new Float32Array(starCount * 3)
-    const starColors = new Float32Array(starCount * 3)
-    for (let i = 0; i < starCount; i++) {
-      const dir = randomDirection()
-      dir.y = Math.abs(dir.y) * 0.9 + 0.05
-      dir.normalize().multiplyScalar(260)
-      stars.set(point(dir), i * 3)
-      const c = new THREE.Color().setHSL(rand(0.5, 0.95), 0.6, rand(0.7, 1))
-      starColors.set([c.r, c.g, c.b], i * 3)
+    // Stars: many faint ones and a few bright ones, drawn as soft round points.
+    for (const [count, size, opacity] of [
+      [1500, 2.2, 0.75],
+      [140, 4.2, 0.95],
+    ]) {
+      const stars = new Float32Array(count * 3)
+      const colors = new Float32Array(count * 3)
+      for (let i = 0; i < count; i++) {
+        const dir = randomDirection()
+        dir.y = Math.abs(dir.y) * 0.9 + 0.05
+        dir.normalize().multiplyScalar(260)
+        stars.set(point(dir), i * 3)
+        const c = new THREE.Color().setHSL(rand(0.5, 0.95), 0.6, rand(0.7, 1))
+        colors.set([c.r, c.g, c.b], i * 3)
+      }
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.BufferAttribute(stars, 3))
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+      const material = new THREE.PointsMaterial({ size, map: textures().glow, sizeAttenuation: false, vertexColors: true, fog: false, transparent: true, opacity, depthWrite: false, blending: THREE.AdditiveBlending })
+      this.scene.add(new THREE.Points(geometry, material))
     }
-    const starGeometry = new THREE.BufferGeometry()
-    starGeometry.setAttribute('position', new THREE.BufferAttribute(stars, 3))
-    starGeometry.setAttribute('color', new THREE.BufferAttribute(starColors, 3))
-    this.scene.add(new THREE.Points(starGeometry, new THREE.PointsMaterial({ size: 1.6, sizeAttenuation: false, vertexColors: true, fog: false, transparent: true, opacity: 0.9 })))
 
-    const floor = new THREE.Mesh(new THREE.CircleGeometry(24, 120).rotateX(-Math.PI / 2), new THREE.ShaderMaterial({ uniforms: shared, vertexShader: FLOOR_VERTEX, fragmentShader: FLOOR_FRAGMENT }))
+    const floor = new THREE.Mesh(new THREE.CircleGeometry(24, 160).rotateX(-Math.PI / 2), new THREE.ShaderMaterial({ uniforms: shared, vertexShader: FLOOR_VERTEX, fragmentShader: FLOOR_FRAGMENT }))
     this.scene.add(floor)
 
-    const rock = new THREE.Mesh(new THREE.ConeGeometry(24, 14, 24, 3, true).rotateX(Math.PI), new THREE.MeshStandardMaterial({ color: '#15112b', roughness: 0.9, flatShading: true }))
+    // The underside of the floating arena: a craggy cone, its top ring kept true to the floor edge.
+    const crag = new THREE.ConeGeometry(24, 14, 72, 6, true).rotateX(Math.PI)
+    const corner = crag.attributes.position
+    for (let i = 0; i < corner.count; i++) {
+      const [x, y, z] = [corner.getX(i), corner.getY(i), corner.getZ(i)]
+      const depth = (7 - y) / 14
+      if (depth < 0.01 || depth > 0.99) continue
+      // Hash the position, not the index, so seam vertices move together.
+      const seed = Math.sin(x * 1.7 + y * 3.1 + z * 2.3) * 43758.5
+      const swell = 1 + (seed - Math.floor(seed) - 0.5) * 0.12 * depth
+      corner.setXYZ(i, x * swell, y + Math.sin(seed) * 0.35, z * swell)
+    }
+    const rock = new THREE.Mesh(crag, new THREE.MeshStandardMaterial({ color: '#15112b', roughness: 0.9, flatShading: true }))
     rock.position.y = -7.02
     this.scene.add(rock)
 
@@ -1488,24 +1832,69 @@ class Stage {
     rift.position.y = 1.6
     this.scene.add(rift)
 
-    const stone = new THREE.MeshStandardMaterial({ color: '#1a1733', roughness: 0.55, metalness: 0.3, flatShading: true })
+    // Pillars: a turned column with a plinth and capital, a glowing band and a floating crystal.
+    const stone = new THREE.MeshStandardMaterial({ color: '#1a1733', roughness: 0.5, metalness: 0.3 })
+    const column = lathe(
+      profile(
+        [
+          [0.001, 0],
+          [0.92, 0],
+          [0.95, 0.2],
+          [0.8, 0.34],
+          [0.62, 0.5],
+          [0.5, 3.55],
+          [0.66, 3.78],
+          [0.74, 3.98],
+          [0.56, 4.14],
+          [0.001, 4.2],
+        ],
+        40,
+      ),
+      24,
+    )
+    const ringGeometry = new THREE.TorusGeometry(0.58, 0.035, 8, 48).rotateX(Math.PI / 2)
+    const crystalGeometry = new THREE.OctahedronGeometry(0.6, 0)
+    const glows = TEAM_GLOW.map((hex) => {
+      const color = new THREE.Color(hex)
+      return {
+        band: new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 1.4, roughness: 0.3 }),
+        crystal: new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 2.4, roughness: 0.15, metalness: 0.1, flatShading: true }),
+      }
+    })
     this.crystals = []
     for (let i = 0; i < 8; i++) {
       const a = (i / 8) * Math.PI * 2 + Math.PI / 8
-      const pillar = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.7, 4.2, 5), stone)
-      pillar.position.set(Math.cos(a) * 17, 2.1, Math.sin(a) * 17)
-      this.scene.add(pillar)
-      const color = new THREE.Color(Math.sin(a) > 0 ? TEAM_GLOW[0] : TEAM_GLOW[1])
-      const crystal = new THREE.Mesh(new THREE.OctahedronGeometry(0.6, 0), new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 2.4, flatShading: true }))
+      const glow = glows[Math.sin(a) > 0 ? 0 : 1]
+      const pillar = new THREE.Mesh(column, stone)
+      pillar.position.set(Math.cos(a) * 17, 0, Math.sin(a) * 17)
+      const band = new THREE.Mesh(ringGeometry, glow.band)
+      band.position.set(pillar.position.x, 3.62, pillar.position.z)
+      this.scene.add(pillar, band)
+      const crystal = new THREE.Mesh(crystalGeometry, glow.crystal)
       crystal.position.set(pillar.position.x, 5.3, pillar.position.z)
       crystal.scale.y = 1.7
       this.scene.add(crystal)
       this.crystals.push({ mesh: crystal, phase: i })
     }
+
+    // Drifting rocks far out: a few craggy shapes shared by all of them.
+    const rocks = Array.from({ length: 5 }, (_, k) => {
+      const shape = new THREE.IcosahedronGeometry(1, 1)
+      const corners = shape.attributes.position
+      for (let i = 0; i < corners.count; i++) {
+        const v = new THREE.Vector3().fromBufferAttribute(corners, i)
+        const bump = 0.78 + 0.32 * (0.5 + 0.5 * Math.sin(v.x * 3.1 + k * 1.7) * Math.cos(v.y * 2.3 - k) * Math.sin(v.z * 2.7 + k * 0.6))
+        corners.setXYZ(i, v.x * bump, v.y * bump * 0.8, v.z * bump)
+      }
+      shape.computeVertexNormals()
+      return shape
+    })
+    const rockMaterial = new THREE.MeshStandardMaterial({ color: '#1d1838', roughness: 0.8, flatShading: true })
     for (let i = 0; i < 26; i++) {
       const a = Math.random() * Math.PI * 2
       const r = rand(26, 46)
-      const shard = new THREE.Mesh(new THREE.IcosahedronGeometry(rand(0.6, 2.2), 0), new THREE.MeshStandardMaterial({ color: '#1d1838', roughness: 0.8, flatShading: true }))
+      const shard = new THREE.Mesh(pickOne(rocks), rockMaterial)
+      shard.scale.setScalar(rand(0.6, 2.2))
       shard.position.set(Math.cos(a) * r, rand(-6, 8), Math.sin(a) * r)
       shard.rotation.set(rand(0, 3), rand(0, 3), rand(0, 3))
       this.scene.add(shard)
@@ -1526,21 +1915,84 @@ class Stage {
   /** Render the procedural sky once into a cube map and use it as the background. */
   bakeSky() {
     const sky = new THREE.Scene()
-    sky.add(new THREE.Mesh(new THREE.SphereGeometry(100, 48, 24), new THREE.ShaderMaterial({ uniforms: { uTime: { value: 40 }, uSurge: { value: 0 } }, vertexShader: SKY_VERTEX, fragmentShader: SKY_FRAGMENT, side: THREE.BackSide, depthWrite: false })))
+    const material = new THREE.ShaderMaterial({ uniforms: { uTime: { value: 40 }, uSurge: { value: 0 } }, vertexShader: SKY_VERTEX, fragmentShader: SKY_FRAGMENT, side: THREE.BackSide, depthWrite: false })
+    sky.add(new THREE.Mesh(new THREE.SphereGeometry(100, 48, 24), material))
     const target = new THREE.WebGLCubeRenderTarget(512, { type: THREE.HalfFloatType })
     new THREE.CubeCamera(1, 200, target).update(this.renderer, sky)
     this.scene.background = target.texture
+    material.dispose()
   }
 
-  /** Lower the pixel ratio when frames are slow; never below 0.6. */
-  govern(dt) {
-    this.frameCost = (this.frameCost ?? dt) * 0.95 + dt * 0.05
-    this.slowFor = this.frameCost > 0.07 ? (this.slowFor ?? 0) + dt : 0
-    const ratio = this.renderer.getPixelRatio()
-    if (this.slowFor > 2 && ratio > 0.6) {
-      this.slowFor = 0
-      this.renderer.setPixelRatio(Math.max(0.6, ratio * 0.8))
-      this.resize()
+  /** Switch to a quality tier: pixel ratio, MSAA samples and particle density. */
+  setQuality(tier) {
+    const quality = QUALITY[tier]
+    this.tier = tier
+    this.quality = quality.name
+    this.sparks.density = quality.density
+    for (const target of [this.composer.renderTarget1, this.composer.renderTarget2]) {
+      if (target.samples === quality.samples) continue
+      target.samples = quality.samples
+      target.dispose()
+    }
+    this.resize()
+  }
+
+  /** The nearest tier below (-1) or above (+1) that draws differently on this screen. */
+  nextTier(step) {
+    const looks = (tier) => {
+      const quality = QUALITY[tier]
+      return `${Math.min(devicePixelRatio, quality.ratio)}:${quality.samples}:${quality.density}`
+    }
+    for (let tier = this.tier + step; tier >= 0 && tier < QUALITY.length; tier += step) if (looks(tier) !== looks(this.tier)) return tier
+    return this.tier
+  }
+
+  /**
+   * Keep frames smooth, timed by the wall clock. A run of slow frames drops a
+   * tier on trial: if the mean frame time does not improve (a capped display,
+   * a busy CPU), the drop is undone and not tried again. Long runs of fast
+   * frames climb back, but never above a tier that just failed.
+   */
+  govern() {
+    const g = this.governor
+    if (g.pinned) return
+    const now = performance.now()
+    const dt = Math.min(1, (now - (g.at ?? now)) / 1000)
+    g.at = now
+    g.cost += (dt - g.cost) * 0.08
+    if (g.trial) {
+      const trial = g.trial
+      // Let the switch settle (buffers, driver warm-up) before timing frames.
+      if (now - trial.at > 1000) {
+        trial.time += dt
+        trial.frames++
+      }
+      if (trial.time < 3 || trial.frames < 10) return
+      if (trial.time / trial.frames > trial.before * 0.85) {
+        g.floor = trial.from
+        this.setQuality(trial.from)
+      }
+      g.trial = null
+      g.slow = g.slowFrames = g.fast = 0
+      return
+    }
+    if (g.cost > 1 / 40) {
+      g.slow += dt
+      g.slowFrames++
+    } else g.slow = g.slowFrames = 0
+    g.fast = g.cost < 1 / 54 ? g.fast + dt : 0
+    if (g.slow > 1.5) {
+      const lower = this.nextTier(-1)
+      if (lower >= this.tier || lower < g.floor) return
+      if (now - g.raised < 12000) g.ceiling = lower
+      g.trial = { from: this.tier, before: g.slow / g.slowFrames, at: now, time: 0, frames: 0 }
+      this.setQuality(lower)
+    } else if (g.fast > 10) {
+      const higher = this.nextTier(1)
+      if (higher <= this.tier || higher > g.ceiling) return
+      g.raised = now
+      g.fast = 0
+      this.setQuality(higher)
     }
   }
 
@@ -1569,6 +2021,7 @@ class Stage {
     this.span = Math.max(...sizes, 1)
     this.mode = mode
     this.flights = []
+    this.surge = 0
   }
 
   figure(id) {
@@ -1633,12 +2086,15 @@ class Stage {
   resize() {
     const width = this.canvas.clientWidth || innerWidth
     const height = this.canvas.clientHeight || innerHeight
+    this.width = width
+    this.height = height
+    // Read the device ratio every time: zoom and moving to another screen change it.
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio, QUALITY[this.tier].ratio))
     this.renderer.setSize(width, height, false)
+    this.composer.setPixelRatio(this.renderer.getPixelRatio())
     this.composer.setSize(width, height)
     this.camera.aspect = width / height
     this.camera.updateProjectionMatrix()
-    this.width = width
-    this.height = height
     this.band = [0, height]
     this.shift = null
   }
@@ -1701,7 +2157,7 @@ class Stage {
   }
 
   render(dt) {
-    this.govern(dt)
+    this.govern()
     this.time += dt
     this.shared.uTime.value = this.time
     this.shared.uSurge.value += (this.surge - this.shared.uSurge.value) * Math.min(1, dt * 2)
@@ -1710,7 +2166,7 @@ class Stage {
       mesh.position.y += Math.sin(this.time * 0.8 + phase) * dt * (drift ? 0.2 : 0.3)
     }
     for (const figure of this.figures.values()) figure.update(dt, this.time)
-    this.flights = this.flights.filter((flight) => !flight.done && flight.update(this.time))
+    this.flights = this.flights.filter((flight) => !flight.done && flight.update(this.time, dt))
     if (this.cursor.visible) {
       const { ring, arrow } = this.cursor.userData
       ring.rotation.y += dt * 1.4
@@ -1722,6 +2178,7 @@ class Stage {
     const scale = (this.height * this.renderer.getPixelRatio()) / (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)))
     this.sparks.update(this.time, scale, this.camera.aspect)
     this.rings.update(this.time)
+    this.bolts.update(this.time, this.camera.aspect)
     this.composer.render()
   }
 }
@@ -1744,6 +2201,8 @@ class Plates {
     this.plates = new Map()
     this.pool = Array.from({ length: 48 }, () => floats.appendChild(make('div', 'float')))
     this.next = 0
+    this.width = 0
+    window.addEventListener('resize', () => (this.width = 0))
   }
 
   build(roster, me) {
@@ -1792,7 +2251,7 @@ class Plates {
       plate.ghost.style.width = `${share * 100}%`
       plate.ward.style.width = `${Math.min(1, state.guard / mage.lifeMax) * 100}%`
       plate.lifeBar.classList.toggle('low', share < 0.3)
-      plate.number.textContent = state.down ? 'DOWN' : state.life
+      setText(plate.number, state.down ? 'DOWN' : state.life)
       plate.mana.style.width = `${(state.mana / mage.manaMax) * 100}%`
       plate.el.classList.toggle('down', state.down)
       plate.el.classList.toggle('casting', Boolean(state.cast))
@@ -1834,7 +2293,9 @@ class Plates {
       const near = figure.team === stage.viewer
       spots.set(id, { near, team: figure.team, ...stage.toScreen(figure.anchor(near ? 'feet' : 'head', anchor)) })
     }
-    const width = this.plates.values().next().value?.el.offsetWidth || 150
+    // Measured once per layout, not every frame: reading it forces a reflow.
+    this.width ||= this.plates.values().next().value?.el.offsetWidth || 0
+    const width = this.width || 150
     const room = [0, 1].map((team) => {
       const xs = [...spots.values()].filter((s) => s.team === team).map((s) => s.x).sort((a, b) => a - b)
       const gaps = xs.slice(1).map((x, i) => x - xs[i])
@@ -1861,9 +2322,16 @@ class Plates {
     el.textContent = text
     el.style.left = `${(spot.x + rand(-26, 26)).toFixed(0)}px`
     el.style.top = `${(spot.y + rand(-16, 10)).toFixed(0)}px`
-    el.style.animation = 'none'
-    void el.offsetWidth
-    el.style.animation = ''
+    // Rewind the running animation instead of forcing a reflow to restart it.
+    const [animation] = el.getAnimations()
+    if (animation) {
+      animation.currentTime = 0
+      animation.play()
+    } else {
+      el.style.animation = 'none'
+      void el.offsetWidth
+      el.style.animation = ''
+    }
   }
 }
 
@@ -1932,16 +2400,17 @@ class Hud {
     const fighting = tick >= setup.fightAt
     const surging = tick >= setup.surgeAt
     const label = phase === 'over' ? 'Over' : !fighting ? 'Study' : surging ? 'Surge' : 'Fight'
-    $('#phase-label').textContent = label
-    $('#clock').textContent = fighting ? clockText((tick - setup.fightAt) / TICK_RATE) : clockText(Math.ceil((setup.fightAt - tick) / TICK_RATE))
+    setText($('#phase-label'), label)
+    setText($('#clock'), fighting ? clockText((tick - setup.fightAt) / TICK_RATE) : clockText(Math.ceil((setup.fightAt - tick) / TICK_RATE)))
     const heal = Math.round(dampenAt(tick, setup.fightAt, setup.surgeAt) * 100)
-    $('#heal-label').textContent = `Heal ${heal}%`
-    document.body.dataset.phase = phase === 'over' ? 'over' : !fighting ? 'ready' : surging ? 'surge' : 'fight'
+    setText($('#heal-label'), `Heal ${heal}%`)
+    const state = phase === 'over' ? 'over' : !fighting ? 'ready' : surging ? 'surge' : 'fight'
+    if (document.body.dataset.phase !== state) document.body.dataset.phase = state
   }
 
   alive(frame, roster) {
     for (const team of [0, 1]) {
-      $(`#alive-${team}`).textContent = frame.mages.filter((m, i) => roster[i].team === team && !m.down).length
+      setText($(`#alive-${team}`), frame.mages.filter((m, i) => roster[i].team === team && !m.down).length)
     }
   }
 
@@ -1961,8 +2430,9 @@ class Hud {
   tray({ roster, me, cursor, keys, pending, book }) {
     const target = roster.find((m) => m.id === cursor)
     const chip = $('#tray-target')
-    chip.textContent = !target ? '—' : target.id === me ? 'You' : target.name
-    chip.className = `target-chip team-${target?.team ?? 0}`
+    setText(chip, !target ? '—' : target.id === me ? 'You' : target.name)
+    const chipClass = `target-chip team-${target?.team ?? 0}`
+    if (chip.className !== chipClass) chip.className = chipClass
     const all = [...keys.map((key) => ({ key, pending: false })), ...pending.map((key) => ({ key, pending: true }))]
     const sign = all.map((k) => k.key + k.pending).join()
     if (sign !== this.traySign) {
@@ -1972,11 +2442,11 @@ class Hud {
     const runes = all.map((k) => k.key).filter((key) => RUNES.includes(key))
     const hint = $('#tray-hint')
     if (!runes.length) {
-      hint.innerHTML = all.length ? 'Now the runes' : 'Move to aim, then runes'
+      setHtml(hint, all.length ? 'Now the runes' : 'Move to aim, then runes')
       return runes
     }
     const options = book.filter((entry) => runes.every((rune, i) => entry.sigil[i] === rune) && entry.sigil.length > runes.length).slice(0, 3)
-    hint.innerHTML = options.length ? options.map((entry) => `<b>${SPELL[entry.id].name}</b>`).join(' · ') : 'No match'
+    setHtml(hint, options.length ? options.map((entry) => `<b>${SPELL[entry.id].name}</b>`).join(' · ') : 'No match')
     return runes
   }
 
@@ -2238,6 +2708,7 @@ class Game {
       this.setup = null
       this.frame = null
       this.results = null
+      document.body.classList.remove('watching')
       renderLobby(room, this.you, this.link)
       if (fresh || teamsChanged || document.body.dataset.view !== 'lobby') this.showDemo(room.rules.teams)
       setView('lobby')
@@ -2259,7 +2730,6 @@ class Game {
     const roster = setup.roster
     const viewer = this.myTeam() ?? 0
     this.stage.setRoster(roster, viewer, 'match')
-    this.stage.surge = 0
     this.plates.build(roster, you)
     this.hud.buildBook(setup.book)
     this.hud.traySign = null
@@ -2307,6 +2777,9 @@ class Game {
   // Events → visuals ─────────────────────────────────────────────────────
 
   onEvent(event) {
+    // A hidden tab draws nothing, so effects would pile up and all burst out
+    // on return. Only events that change lasting state are applied.
+    if (document.hidden && !LASTING_EVENTS.has(event.type)) return
     const handler = EVENT_VISUALS[event.type]
     if (handler) handler.call(this, event)
   }
@@ -2457,6 +2930,9 @@ class Game {
   }
 }
 
+/** Events that still matter while the tab is hidden: they set lasting state, not effects. */
+const LASTING_EVENTS = new Set(['fizzle', 'surge', 'over'])
+
 /** Event type → visual reaction. `this` is the Game. */
 const EVENT_VISUALS = {
   start() {
@@ -2499,7 +2975,7 @@ const EVENT_VISUALS = {
     const figure = this.figure(e.to)
     if (!figure) return
     const lifeMax = this.setup.roster.find((m) => m.id === e.to).lifeMax
-    if (e.amount > 0 || e.soak > 0) figure.hit(e.amount / lifeMax)
+    if (e.amount > 0 || e.soak > 0) figure.hit(e.amount / lifeMax, e.direct)
     if (e.direct && e.amount > 0) this.stage.looks.burst(figure.anchor('chest'), e.school, 0.35)
     if (e.soak > 0 && !e.amount) this.floatAt(e.to, `${e.soak} absorbed`, 'small note')
     else if (e.amount > 0) this.floatAt(e.to, `${e.amount}${e.soak ? ` (${e.soak})` : ''}`, `${e.school} ${e.amount >= lifeMax * 0.2 ? 'big' : e.direct ? '' : 'small'}`)
@@ -2520,7 +2996,7 @@ const EVENT_VISUALS = {
   mark(e) {
     const figure = this.figure(e.to)
     if (!figure) return
-    this.stage.looks.flash(figure.anchor('chest'), e.kind === 'boon' ? new THREE.Color('#7dffb0') : new THREE.Color('#ff6a80'), 1.1, 0.3)
+    this.stage.looks.flash(figure.anchor('chest'), e.kind === 'boon' ? new THREE.Color('#7dffb0') : new THREE.Color('#ff6a80'), 1.1, 0.3, 0.6)
     if (e.look === 'stun' || e.look === 'ice' || e.look === 'sheep' || e.look === 'time') this.floatAt(e.to, e.name, 'note', 'head')
   },
   fade(e) {
