@@ -30,6 +30,16 @@
         </div>
         <p class="lede">Duel with chords of keys. Every match deals a new book, so you learn the spells as you fight.</p>
 
+        <figure class="anatomy" aria-label="Chord example">
+          <div class="anatomy-row">
+            <span class="key move" data-glyph="up"></span>
+            <span class="plus">+</span>
+            <span class="key rune star" data-glyph="star"></span><span class="key rune wave" data-glyph="wave"></span
+            ><span class="key rune flame" data-glyph="flame"></span>
+          </div>
+          <figcaption><b>Move</b> picks the target. <b>Runes</b> pick the spell. It fires on the last rune.</figcaption>
+        </figure>
+
         <label class="field">
           <span>Name</span>
           <input id="name-input" maxlength="16" autocomplete="nickname" spellcheck="false" placeholder="Your mage name" />
@@ -56,29 +66,16 @@
           <span class="inputs"><i data-glyph="keys"></i>Keyboard <i data-glyph="pad"></i>Gamepad <i data-glyph="touch"></i>Touch</span>
         </footer>
       </section>
-
-      <aside class="anatomy glass" aria-label="Chord example">
-        <span class="eyebrow">A chord</span>
-        <div class="anatomy-row">
-          <span class="key move" data-glyph="up"></span>
-          <span class="plus">+</span>
-          <span class="key rune star" data-glyph="star"></span><span class="key rune wave" data-glyph="wave"></span
-          ><span class="key rune flame" data-glyph="flame"></span>
-        </div>
-        <p><b>Move</b> picks the target. <b>Runes</b> pick the spell. It fires on the last rune.</p>
-      </aside>
     </main>
 
     <!-- Lobby ──────────────────────────────────────────────────────────── -->
     <main id="lobby" class="view">
       <section class="lobby glass">
         <header class="lobby-head">
-          <div>
-            <span class="eyebrow">Match code</span>
-            <div class="code-row">
-              <strong id="room-code" class="code">----</strong>
-              <button id="copy-button" class="btn small ghost">Copy link</button>
-            </div>
+          <span class="eyebrow">Match code</span>
+          <div class="code-row">
+            <strong id="room-code" class="code">----</strong>
+            <button id="copy-button" class="btn small ghost">Copy link</button>
           </div>
           <p id="lobby-note" class="note">Share the code. Open seats are filled by bots.</p>
         </header>
@@ -154,18 +151,22 @@
 
       <div id="banner" class="banner"><strong></strong><span></span></div>
 
-      <aside id="book" class="book glass">
-        <header class="book-head">
-          <h3>Book <span class="study-note">New chords this match. Study them before the fight.</span></h3>
-          <div class="legend" id="legend"></div>
+      <!-- The book: offense on the left, defense on the right, side by side in the middle while you study. -->
+      <aside id="book" class="book">
+        <header class="book-intro">
+          <h3>Your book</h3>
+          <p>New chords this match. Study them before the fight.</p>
         </header>
-        <div class="book-body">
-          <h4 class="offense">Offense</h4>
+        <section class="page glass offense">
+          <header class="page-head"><h4>Offense</h4><span>Needs a foe</span></header>
           <ol id="book-offense" class="spells"></ol>
-          <h4 class="defense">Defense</h4>
+          <p class="detail">Hover or tap a spell to read it.</p>
+        </section>
+        <section class="page glass defense">
+          <header class="page-head"><h4>Defense</h4><span>Needs an ally or you</span></header>
           <ol id="book-defense" class="spells"></ol>
-        </div>
-        <p id="book-detail" class="detail">Hover or tap a spell to read it.</p>
+          <p class="detail">Hover or tap a spell to read it.</p>
+        </section>
       </aside>
 
       <footer id="tray" class="tray">
@@ -174,6 +175,7 @@
           <span id="tray-keys" class="tray-keys"></span>
           <span id="tray-hint" class="tray-hint">Move, then runes</span>
         </div>
+        <div class="legend" id="legend" aria-label="Rune keys"></div>
       </footer>
 
       <div id="pads" class="pads" aria-label="Touch controls">
@@ -233,7 +235,7 @@
         </thead>
         <tbody>
           <tr><td>Moves</td><td>W A S D or arrows</td><td>D-pad or left stick</td><td>Left pad</td></tr>
-          <tr><td>Runes <i data-glyph="star"></i><i data-glyph="wave"></i><i data-glyph="flame"></i><i data-glyph="leaf"></i></td><td>I J L K</td><td>Y X B A</td><td>Right pad</td></tr>
+          <tr><td>Runes <i data-glyph="star" class="star"></i><i data-glyph="wave" class="wave"></i><i data-glyph="flame" class="flame"></i><i data-glyph="leaf" class="leaf"></i></td><td>I J L K</td><td>Y X B A</td><td>Right pad</td></tr>
           <tr><td>Cancel</td><td>Space or Backspace</td><td>LB or RB</td><td>Center button</td></tr>
           <tr><td>Book</td><td>Tab</td><td>Start</td><td>Book button</td></tr>
         </tbody>

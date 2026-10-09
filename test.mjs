@@ -447,7 +447,7 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
     await stage.focus(ana)
     await ana.click('#start-button')
     await ana.waitForSelector('body[data-view="match"][data-phase="ready"]')
-    await ana.waitForTimeout(1200)
+    await ana.waitForTimeout(500)
     await shoot(ana, '05-study')
 
     // Fight: type a chord on the keyboard
@@ -456,7 +456,6 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
     const keys = await offenseChord(ana)
     for (const key of keys.slice(0, -1)) await ana.keyboard.press(KEYBOARD[key])
     await ana.waitForFunction(() => window.chordcast.chordView().keys.length + window.chordcast.chordView().pending.length > 1)
-    await ana.waitForTimeout(1000)
     await shoot(ana, '06-chord')
     // Slow software rendering can outlast the chord timeout, so clear and type it whole.
     await ana.keyboard.press(KEYBOARD.drop)
