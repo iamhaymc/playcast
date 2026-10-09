@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="#07061a" />
+    <meta name="description" content="Real-time arena magic duels cast with chords of keys." />
+    <title>Chordcast</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%233ee6ff' d='M12 1l3 8 8 3-8 3-3 8-3-8-8-3 8-3z'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/page.css" />
+    <script type="importmap">
+      { "imports": { "three": "/lib/three/build/three.module.js", "three/addons/": "/lib/three/examples/jsm/" } }
+    </script>
+    <script type="module" src="/page.mjs"></script>
+  </head>
+
+  <body data-view="home" data-input="keys" data-phase="none">
+    <canvas id="stage" aria-hidden="true"></canvas>
+    <div id="veil" aria-hidden="true"></div>
+
+    <!-- Home ───────────────────────────────────────────────────────────── -->
+    <main id="home" class="view">
+      <section class="hero glass">
+        <div class="brand">
+          <span class="brand-mark" data-glyph="star"></span>
+          <h1>Chordcast</h1>
+        </div>
+        <p class="lede">Duel with chords of keys. Every match deals a new book, so you learn the spells as you fight.</p>
+
+        <label class="field">
+          <span>Name</span>
+          <input id="name-input" maxlength="16" autocomplete="nickname" spellcheck="false" placeholder="Your mage name" />
+        </label>
+
+        <div class="stack">
+          <div class="split">
+            <button id="quick-button" class="btn primary">Quick duel</button>
+            <div class="segmented" id="quick-skill" role="radiogroup" aria-label="Bot skill">
+              <button data-value="easy">Easy</button>
+              <button data-value="normal" class="on">Normal</button>
+              <button data-value="hard">Hard</button>
+            </div>
+          </div>
+          <button id="host-button" class="btn">Host a match</button>
+          <form id="join-form" class="join">
+            <input id="code-input" maxlength="4" autocomplete="off" spellcheck="false" placeholder="CODE" aria-label="Match code" />
+            <button class="btn" type="submit">Join</button>
+          </form>
+        </div>
+
+        <footer class="hero-foot">
+          <button class="link" data-open="guide">How to play</button>
+          <span class="inputs"><i data-glyph="keys"></i>Keyboard <i data-glyph="pad"></i>Gamepad <i data-glyph="touch"></i>Touch</span>
+        </footer>
+      </section>
+
+      <aside class="anatomy glass" aria-label="Chord example">
+        <span class="eyebrow">A chord</span>
+        <div class="anatomy-row">
+          <span class="key move" data-glyph="up"></span>
+          <span class="plus">+</span>
+          <span class="key rune star" data-glyph="star"></span><span class="key rune wave" data-glyph="wave"></span
+          ><span class="key rune flame" data-glyph="flame"></span>
+        </div>
+        <p><b>Move</b> picks the target. <b>Runes</b> pick the spell. It fires on the last rune.</p>
+      </aside>
+    </main>
+
+    <!-- Lobby ──────────────────────────────────────────────────────────── -->
+    <main id="lobby" class="view">
+      <section class="lobby glass">
+        <header class="lobby-head">
+          <div>
+            <span class="eyebrow">Match code</span>
+            <div class="code-row">
+              <strong id="room-code" class="code">----</strong>
+              <button id="copy-button" class="btn small ghost">Copy link</button>
+            </div>
+          </div>
+          <p id="lobby-note" class="note">Share the code. Open seats are filled by bots.</p>
+        </header>
+
+        <div class="teams">
+          <div class="team team-0">
+            <h2><span class="dot"></span>Dawn</h2>
+            <ol id="seats-0" class="seats"></ol>
+          </div>
+          <div class="versus">vs</div>
+          <div class="team team-1">
+            <h2><span class="dot"></span>Dusk</h2>
+            <ol id="seats-1" class="seats"></ol>
+          </div>
+        </div>
+
+        <div id="rules" class="rules">
+          <div class="rule">
+            <span>Dawn size</span>
+            <div class="stepper" data-rule="team0"><button data-step="-1" aria-label="Fewer">−</button><b>1</b><button data-step="1" aria-label="More">+</button></div>
+          </div>
+          <div class="rule">
+            <span>Dusk size</span>
+            <div class="stepper" data-rule="team1"><button data-step="-1" aria-label="Fewer">−</button><b>1</b><button data-step="1" aria-label="More">+</button></div>
+          </div>
+          <div class="rule">
+            <span>Book</span>
+            <div class="segmented" data-rule="book"><button data-value="8">8</button><button data-value="12">12</button><button data-value="16">16</button><button data-value="20">20</button></div>
+          </div>
+          <div class="rule">
+            <span>Life</span>
+            <div class="segmented" data-rule="life"><button data-value="500">500</button><button data-value="800">800</button><button data-value="1200">1200</button><button data-value="2000">2000</button></div>
+          </div>
+          <div class="rule">
+            <span>Surge at</span>
+            <div class="segmented" data-rule="surge"><button data-value="60">60s</button><button data-value="90">90s</button><button data-value="120">120s</button><button data-value="180">180s</button></div>
+          </div>
+          <div class="rule">
+            <span>Bot skill</span>
+            <div class="segmented" data-rule="skill"><button data-value="easy">Easy</button><button data-value="normal">Normal</button><button data-value="hard">Hard</button></div>
+          </div>
+        </div>
+
+        <footer class="lobby-foot">
+          <button class="btn ghost" data-action="leave">Leave</button>
+          <span id="lobby-wait" class="note">Waiting for the host to start.</span>
+          <button id="start-button" class="btn primary">Start match</button>
+        </footer>
+      </section>
+    </main>
+
+    <!-- Match HUD ──────────────────────────────────────────────────────── -->
+    <section id="match" class="view">
+      <div id="plates" class="layer"></div>
+      <div id="floats" class="layer"></div>
+
+      <header class="topbar">
+        <div class="topbar-side">
+          <span class="chip code-chip" id="match-code">----</span>
+          <span class="chip score"><b class="dawn" id="alive-0">1</b><span>vs</span><b class="dusk" id="alive-1">1</b></span>
+        </div>
+        <div class="clock glass">
+          <span id="phase-label">Study</span>
+          <strong id="clock">0:00</strong>
+          <span id="heal-label" class="heal">Heal 100%</span>
+        </div>
+        <div class="topbar-side right">
+          <button class="icon-btn" data-action="book" aria-label="Toggle book" title="Book (Tab)"><i data-glyph="book"></i></button>
+          <button class="icon-btn" data-open="guide" aria-label="How to play" title="How to play"><i data-glyph="help"></i></button>
+          <button class="icon-btn" data-action="leave" aria-label="Leave match" title="Leave"><i data-glyph="close"></i></button>
+        </div>
+      </header>
+
+      <div id="banner" class="banner"><strong></strong><span></span></div>
+
+      <aside id="book" class="book glass">
+        <header class="book-head">
+          <h3>Book <span class="study-note">New chords this match. Study them before the fight.</span></h3>
+          <div class="legend" id="legend"></div>
+        </header>
+        <div class="book-body">
+          <h4 class="offense">Offense</h4>
+          <ol id="book-offense" class="spells"></ol>
+          <h4 class="defense">Defense</h4>
+          <ol id="book-defense" class="spells"></ol>
+        </div>
+        <p id="book-detail" class="detail">Hover or tap a spell to read it.</p>
+      </aside>
+
+      <footer id="tray" class="tray">
+        <div class="chord glass">
+          <span id="tray-target" class="target-chip">Self</span>
+          <span id="tray-keys" class="tray-keys"></span>
+          <span id="tray-hint" class="tray-hint">Move, then runes</span>
+        </div>
+      </footer>
+
+      <div id="pads" class="pads" aria-label="Touch controls">
+        <div class="pad moves">
+          <button data-key="up" class="up" aria-label="Up"><i data-glyph="up"></i></button>
+          <button data-key="left" class="left" aria-label="Left"><i data-glyph="left"></i></button>
+          <button data-key="right" class="right" aria-label="Right"><i data-glyph="right"></i></button>
+          <button data-key="down" class="down" aria-label="Down"><i data-glyph="down"></i></button>
+        </div>
+        <button data-key="drop" class="drop" aria-label="Cancel"><i data-glyph="close"></i></button>
+        <div class="pad runes">
+          <button data-key="star" class="up star" aria-label="Star rune"><i data-glyph="star"></i></button>
+          <button data-key="wave" class="left wave" aria-label="Wave rune"><i data-glyph="wave"></i></button>
+          <button data-key="flame" class="right flame" aria-label="Flame rune"><i data-glyph="flame"></i></button>
+          <button data-key="leaf" class="down leaf" aria-label="Leaf rune"><i data-glyph="leaf"></i></button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Results ────────────────────────────────────────────────────────── -->
+    <main id="result" class="view">
+      <section class="result glass">
+        <span class="eyebrow" id="result-sub">Match over</span>
+        <h2 id="result-title">Victory</h2>
+        <table class="stats">
+          <thead>
+            <tr><th>Mage</th><th>Damage</th><th>Healing</th><th>Taken</th><th>Casts</th><th>Fizzles</th></tr>
+          </thead>
+          <tbody id="result-rows"></tbody>
+        </table>
+        <footer class="result-foot">
+          <button class="btn ghost" data-action="leave">Leave</button>
+          <button id="lobby-button" class="btn">Lobby</button>
+          <button id="again-button" class="btn primary">Rematch</button>
+        </footer>
+        <p id="result-wait" class="note">Waiting for the host.</p>
+      </section>
+    </main>
+
+    <!-- Guide ──────────────────────────────────────────────────────────── -->
+    <dialog id="guide" class="guide glass">
+      <header>
+        <h2>How to play</h2>
+        <button class="icon-btn" data-close aria-label="Close"><i data-glyph="close"></i></button>
+      </header>
+      <ol class="steps">
+        <li><b>Every action is a chord.</b> Press moves to pick a target, then runes to pick a spell. The spell fires on the last rune.</li>
+        <li><b>Targets.</b> You start on yourself. <i data-glyph="up"></i> jumps to the foe row, <i data-glyph="down"></i> back to yours, <i data-glyph="left"></i><i data-glyph="right"></i> walk along a row.</li>
+        <li><b>Runes.</b> Each spell has a chord of 2 to 4 runes. Chords change every match, so study the book before the fight.</li>
+        <li><b>Offense</b> spells need a foe. <b>Defense</b> spells need an ally or yourself. A wrong chord, target, mana or cooldown fizzles and stalls you briefly.</li>
+        <li><b>Read the field.</b> Life, mana, shields, casts and effects of every mage show above them. Interrupt casts, cleanse allies, finish foes.</li>
+        <li><b>The surge.</b> Healing fades over time. When the rift surges, everyone takes rising damage until a team falls.</li>
+      </ol>
+      <table class="mapping">
+        <thead>
+          <tr><th></th><th>Keyboard</th><th>Gamepad</th><th>Touch</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Moves</td><td>W A S D or arrows</td><td>D-pad or left stick</td><td>Left pad</td></tr>
+          <tr><td>Runes <i data-glyph="star"></i><i data-glyph="wave"></i><i data-glyph="flame"></i><i data-glyph="leaf"></i></td><td>I J L K</td><td>Y X B A</td><td>Right pad</td></tr>
+          <tr><td>Cancel</td><td>Space or Backspace</td><td>LB or RB</td><td>Center button</td></tr>
+          <tr><td>Book</td><td>Tab</td><td>Start</td><td>Book button</td></tr>
+        </tbody>
+      </table>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>
