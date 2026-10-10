@@ -56,7 +56,14 @@
               <button data-value="hard">Hard</button>
             </div>
           </div>
-          <button id="host-button" class="btn">Host a match</button>
+          <div class="split pair">
+            <button id="lesson-button" class="btn" data-action="lesson">Tutorial<b class="badge">New?</b></button>
+            <button class="btn" data-action="practice">Practice</button>
+          </div>
+          <div class="split pair">
+            <button class="btn" data-action="browse">Find players</button>
+            <button id="host-button" class="btn">Host a match</button>
+          </div>
           <form id="join-form" class="join">
             <input id="code-input" maxlength="4" autocomplete="off" spellcheck="false" placeholder="CODE" aria-label="Match code" />
             <button class="btn" type="submit">Join</button>
@@ -67,8 +74,70 @@
           <span class="foot-links">
             <button class="link" data-open="guide">How to play</button>
             <button class="link sound-link" data-action="sound" aria-label="Sound" aria-pressed="true" title="Sound (M)"><i data-glyph="sound" class="when-on"></i><i data-glyph="mute" class="when-off"></i></button>
+            <button class="link sound-link" data-open="settings" aria-label="Settings" title="Settings"><i data-glyph="gear"></i></button>
           </span>
           <span class="inputs"><i data-glyph="keys"></i>Keyboard <i data-glyph="pad"></i>Gamepad <i data-glyph="touch"></i>Touch</span>
+        </footer>
+      </section>
+    </main>
+
+    <!-- Find players ───────────────────────────────────────────────────── -->
+    <main id="browse" class="view">
+      <section class="browse glass">
+        <header class="lobby-head">
+          <span class="eyebrow">Play online</span>
+          <h2>Find players</h2>
+          <p class="note">A quick match seats you with others who want the same size. Bots take the seats still open when its wait runs out.</p>
+        </header>
+        <div class="split">
+          <button id="seek-button" class="btn primary">Quick match</button>
+          <div class="segmented" id="seek-size" role="radiogroup" aria-label="Team size">
+            <button data-value="1" class="on">1 vs 1</button>
+            <button data-value="2">2 vs 2</button>
+            <button data-value="3">3 vs 3</button>
+          </div>
+        </div>
+        <div class="room-list">
+          <span class="eyebrow">Open matches</span>
+          <ol id="room-list"></ol>
+          <p id="room-empty" class="note">No public matches right now. Start a quick match, or host one and make it public.</p>
+        </div>
+        <footer class="lobby-foot">
+          <button class="btn ghost" data-action="home">Back</button>
+        </footer>
+      </section>
+    </main>
+
+    <!-- Practice ───────────────────────────────────────────────────────── -->
+    <main id="practice" class="view">
+      <section class="practice glass">
+        <header class="lobby-head">
+          <span class="eyebrow">Practice room</span>
+          <h2>Drill your chords</h2>
+          <p class="note">No clock and no rift. Target dummies never fall. The spells you pick are your whole kit; pick none for a random book.</p>
+        </header>
+        <div class="drill-filter">
+          <div class="segmented" id="drill-schools" role="radiogroup" aria-label="School"></div>
+          <span class="drill-pick"><b id="drill-count">0 / 12</b><button id="drill-random" class="btn small ghost">Random</button><button id="drill-clear" class="btn small ghost">Clear</button></span>
+        </div>
+        <ol id="drill-spells" class="drill-spells"></ol>
+        <div class="rules">
+          <div class="rule">
+            <span>Dummies</span>
+            <div class="segmented" data-drill="dummies"><button data-value="1">1</button><button data-value="2">2</button><button data-value="3">3</button></div>
+          </div>
+          <div class="rule">
+            <span>Bolts at you</span>
+            <div class="segmented" data-drill="ward"><button data-value="off">Off</button><button data-value="on">Ward drill</button></div>
+          </div>
+          <div class="rule">
+            <span>Mana</span>
+            <div class="segmented" data-drill="free"><button data-value="off">Normal</button><button data-value="on">Free</button></div>
+          </div>
+        </div>
+        <footer class="lobby-foot">
+          <button class="btn ghost" data-action="home">Back</button>
+          <button id="drill-start" class="btn primary">Start practice</button>
         </footer>
       </section>
     </main>
@@ -83,6 +152,7 @@
             <button id="copy-button" class="btn small ghost">Copy link</button>
           </div>
           <p id="lobby-note" class="note">Share the code. Open seats are filled by bots.</p>
+          <strong id="lobby-clock" class="lobby-clock" hidden></strong>
         </header>
 
         <div class="teams">
@@ -132,6 +202,10 @@
             <span>Bot skill</span>
             <div class="segmented" data-rule="skill"><button data-value="easy">Easy</button><button data-value="normal">Normal</button><button data-value="hard">Hard</button></div>
           </div>
+          <div class="rule">
+            <span>Who can join</span>
+            <div class="segmented" id="listed"><button data-value="off">Code only</button><button data-value="on">Public</button></div>
+          </div>
         </div>
 
         <footer class="lobby-foot">
@@ -161,12 +235,34 @@
         <div class="topbar-side right">
           <button class="icon-btn" data-action="sound" aria-label="Sound" aria-pressed="true" title="Sound (M)"><i data-glyph="sound" class="when-on"></i><i data-glyph="mute" class="when-off"></i></button>
           <button class="icon-btn" data-action="book" aria-label="Toggle book" title="Book (Tab)"><i data-glyph="book"></i></button>
+          <button class="icon-btn" data-open="settings" aria-label="Settings" title="Settings"><i data-glyph="gear"></i></button>
           <button class="icon-btn" data-open="guide" aria-label="How to play" title="How to play"><i data-glyph="help"></i></button>
           <button class="icon-btn" data-action="leave" aria-label="Leave match" title="Leave"><i data-glyph="close"></i></button>
         </div>
       </header>
 
       <div id="banner" class="banner"><strong></strong><span></span></div>
+
+      <!-- Solo rooms: the lesson's coach, and the practice room's numbers. -->
+      <div id="coach" class="coach glass" hidden>
+        <header>
+          <span id="coach-step" class="eyebrow">1 / 8</span>
+          <h3 id="coach-title"></h3>
+          <span id="coach-dots" class="coach-dots"></span>
+          <button id="coach-skip" class="link">Skip</button>
+        </header>
+        <p id="coach-text"></p>
+        <p id="coach-tip" class="coach-tip" hidden></p>
+      </div>
+      <div id="drill-bar" class="drill-bar glass" hidden>
+        <span class="drill-stats">
+          <span><small>Casts</small><b id="drill-casts">0</b></span>
+          <span title="How much of the cast time your chord speed saves, on spells with a cast bar"><small>Chord speed</small><b id="drill-speed">—</b></span>
+          <span><small>Fizzles</small><b id="drill-fizzles">0</b></span>
+          <span><small>Parries</small><b id="drill-parries">0</b></span>
+        </span>
+        <button id="drill-shuffle" class="btn small">New chords</button>
+      </div>
 
       <!-- The book: offense on the left, defense on the right, side by side in the middle while you draft. -->
       <aside id="book" class="book">
@@ -248,7 +344,10 @@
     <dialog id="guide" class="guide glass">
       <header>
         <h2>How to play</h2>
-        <button class="icon-btn" data-close aria-label="Close"><i data-glyph="close"></i></button>
+        <span class="guide-actions">
+          <button class="btn small lesson-link" data-action="lesson">Play the tutorial</button>
+          <button class="icon-btn" data-close aria-label="Close"><i data-glyph="close"></i></button>
+        </span>
       </header>
       <ol class="steps">
         <li><b>Draft.</b> Each match deals a new book. Before the fight, type a spell's chord (or tap it) to put it in your kit. Only your kit can be cast.</li>
@@ -267,16 +366,46 @@
           <tr><th></th><th>Keyboard</th><th>Gamepad</th><th>Touch</th></tr>
         </thead>
         <tbody>
-          <tr><td>Moves</td><td>W A S D or arrows</td><td>D-pad or left stick</td><td>Left pad</td></tr>
-          <tr><td>Runes <i data-glyph="star" class="star"></i><i data-glyph="wave" class="wave"></i><i data-glyph="flame" class="flame"></i><i data-glyph="leaf" class="leaf"></i></td><td>I J L K</td><td>Y X B A</td><td>Right pad</td></tr>
-          <tr><td>Meta <i data-glyph="meta"></i></td><td>U, or Shift with a rune</td><td>RB</td><td>Corner of the right pad</td></tr>
-          <tr><td>Ward <i data-glyph="ward"></i></td><td>Space</td><td>RT</td><td>Shield button</td></tr>
-          <tr><td>Call <i data-glyph="call"></i></td><td>E</td><td>LT</td><td>Corner of the left pad</td></tr>
-          <tr><td>Cancel</td><td>Q or Backspace</td><td>LB</td><td>Center button</td></tr>
+          <tr><td>Moves</td><td data-bound="moves">W A S D or arrows</td><td>D-pad or left stick</td><td>Left pad</td></tr>
+          <tr><td>Runes <i data-glyph="star" class="star"></i><i data-glyph="wave" class="wave"></i><i data-glyph="flame" class="flame"></i><i data-glyph="leaf" class="leaf"></i></td><td data-bound="runes">I J L K</td><td>Y X B A</td><td>Right pad</td></tr>
+          <tr><td>Meta <i data-glyph="meta"></i></td><td data-bound="meta">U, or Shift with a rune</td><td>RB</td><td>Corner of the right pad</td></tr>
+          <tr><td>Ward <i data-glyph="ward"></i></td><td data-bound="ward">Space</td><td>RT</td><td>Shield button</td></tr>
+          <tr><td>Call <i data-glyph="call"></i></td><td data-bound="call">E</td><td>LT</td><td>Corner of the left pad</td></tr>
+          <tr><td>Cancel</td><td data-bound="drop">Q or Backspace</td><td>LB</td><td>Center button</td></tr>
           <tr><td>Book</td><td>Tab</td><td>Start</td><td>Book button</td></tr>
           <tr><td>Sound</td><td>M</td><td></td><td>Speaker button</td></tr>
         </tbody>
       </table>
+    </dialog>
+
+    <!-- Settings ───────────────────────────────────────────────────────── -->
+    <dialog id="settings" class="guide settings glass">
+      <header>
+        <h2>Settings</h2>
+        <button class="icon-btn" data-close aria-label="Close"><i data-glyph="close"></i></button>
+      </header>
+      <section class="set-group">
+        <h3>Sound</h3>
+        <label class="set-row"><span>Effects</span><input type="range" min="0" max="100" step="5" data-set="effects" /><output data-show="effects"></output></label>
+        <label class="set-row"><span>Music</span><input type="range" min="0" max="100" step="5" data-set="music" /><output data-show="music"></output></label>
+        <div class="set-row"><span>Haptics</span><div class="segmented" data-set="haptics"><button data-value="on">On</button><button data-value="off">Off</button></div></div>
+      </section>
+      <section class="set-group">
+        <h3>Picture</h3>
+        <div class="set-row"><span>Quality</span><div class="segmented" data-set="quality"><button data-value="auto">Auto</button><button data-value="low">Low</button><button data-value="medium">Medium</button><button data-value="high">High</button><button data-value="ultra">Ultra</button></div></div>
+        <div class="set-row"><span>Screen shake</span><div class="segmented" data-set="shake"><button data-value="on">On</button><button data-value="off">Off</button></div></div>
+        <div class="set-row"><span>Flashes</span><div class="segmented" data-set="flashes"><button data-value="on">On</button><button data-value="off">Soft</button></div></div>
+        <div class="set-row"><span>Motion</span><div class="segmented" data-set="reduced"><button data-value="off">Full</button><button data-value="on">Reduced</button></div></div>
+        <div class="set-row"><span>Colors</span><div class="segmented" data-set="palette"><button data-value="standard">Standard</button><button data-value="colorblind">Colorblind</button></div></div>
+      </section>
+      <section class="set-group">
+        <h3>Keyboard <button id="keys-reset" class="btn small ghost">Reset</button></h3>
+        <p class="note">Pick a key, then press the new one. The arrows and Backspace also work unless you bind them to something else.</p>
+        <div id="keys-grid" class="keys-grid"></div>
+      </section>
+      <footer class="set-foot">
+        <button class="link" data-open="guide">How to play</button>
+      </footer>
     </dialog>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>

@@ -13,9 +13,9 @@ import fs from 'node:fs/promises'
 import WebSocket from 'ws'
 import { chromium } from 'playwright'
 import {
-  Arena, Brain, CHORD_LENGTH, CODEX, Dice, GARB, KINDS, METAS, Match, Pilot, RULES, SCHOOLS, SPELL, TICK_RATE, TIMING, WISPS,
-  botRoster, costOf, diff, hashText, moveCursor, pack, packFrame, patch, pathTo, pickGarb, readChord, readRunes, simulate, splitTiers, tidyGarb,
-  tidyRules, unpack, unpackFrame, writeBook,
+  Arena, BOOK_MOST, Brain, CHORD_LENGTH, CODEX, DRILL_BOLTS, Dice, Drill, GARB, KINDS, LESSON, Lesson, METAS, Match, NEVER, Pilot, RULES, SCHOOLS, SPELL, TICK_RATE,
+  TIMING, WISPS, botRoster, costOf, diff, hashText, moveCursor, pack, packFrame, patch, pathTo, pickGarb, readChord, readRunes, simulate, splitTiers,
+  tidyGarb, tidyRules, unpack, unpackFrame, writeBook,
 } from './core.mjs'
 import { openHost } from './host.mjs'
 
@@ -577,6 +577,124 @@ test('the design document lists every spell', async () => {
   assert.ok(design.includes(`${CODEX.length} spells`), 'DESIGN.md states the spell count')
 })
 
+test('the lesson goes step by step, from the draft to a duel', () => {
+  const lesson = new Lesson({ seed: 9, name: 'Pip' })
+  const { match } = lesson
+  const me = lesson.mine
+  const seen = []
+  const tick = () => {
+    lesson.step()
+    if (seen.at(-1) !== (lesson.goal?.id ?? 'done')) seen.push(lesson.goal?.id ?? 'done')
+  }
+  const until = (test, limit = 600) => {
+    for (let i = 0; i < limit && !test(); i++) tick()
+    assert.ok(test(), `stuck on ${lesson.goal?.id}`)
+  }
+  const type = (keys) => {
+    for (const key of keys) {
+      lesson.press(key)
+      tick()
+      tick()
+    }
+  }
+  const chord = (id) => match.book.find((e) => e.id === id).sigil
+  const ready = (id) => until(() => (me.cools[id] ?? 0) <= match.tick && !me.cast && match.tick >= me.stagger)
+  assert.deepEqual(match.book.map((e) => e.id).sort(), [...LESSON.book].sort(), 'the lesson deals its own book')
+  assert.equal(match.surgeAt, NEVER, 'no clock in a lesson')
+  // The draft waits for the lesson's kit, however long it takes.
+  type(chord('fire-bolt'))
+  for (let i = 0; i < TIMING.ready * TICK_RATE * 2; i++) tick()
+  assert.equal(match.phase, 'ready', 'the draft waits')
+  for (const id of LESSON.kit.slice(1)) type(chord(id))
+  until(() => lesson.goal.id === 'aim', 200)
+  type(['up'])
+  type(chord('fire-bolt'))
+  until(() => lesson.goal.id === 'mend')
+  type(chord('healing-word'))
+  until(() => lesson.goal.id === 'ward')
+  until(() => {
+    const bolt = match.flights.find((f) => f.mage === 't1s0')
+    if (bolt && bolt.land - match.tick === 2) lesson.press('ward')
+    return lesson.goal.id !== 'ward'
+  })
+  ready('fire-bolt')
+  type(['meta', 'flame', ...chord('fire-bolt')])
+  until(() => lesson.goal.id === 'react')
+  assert.ok(!lesson.trainer.auras.some((a) => a.kind === 'bane'), 'the reaction step starts from a clean Trainer')
+  ready('frost-ray')
+  type(chord('frost-ray'))
+  ready('fire-bolt')
+  type(chord('fire-bolt'))
+  until(() => lesson.goal.id === 'duel')
+  assert.ok(!lesson.trainer.stand && lesson.arena.pilots.has('t1s0'), 'the Trainer fights for real')
+  until(() => {
+    if (!me.cast && !me.chord.keys.length && (me.cools['fire-bolt'] ?? 0) <= match.tick && match.tick >= me.stagger) for (const key of chord('fire-bolt')) lesson.press(key)
+    return match.phase === 'over'
+  }, 6000)
+  assert.deepEqual(seen, [...LESSON.steps.map((step) => step.id), 'done'])
+  assert.equal(lesson.goal, null)
+
+  // Skipping: the draft takes the kit for you, other steps move on, the duel stays.
+  const skipper = new Lesson({ seed: 3 })
+  skipper.skip()
+  for (let i = 0; i < 3; i++) skipper.step()
+  assert.equal(skipper.goal.id, 'aim')
+  assert.deepEqual([...skipper.mine.kit].sort(), [...LESSON.kit].sort())
+  for (let i = 0; i < 6; i++) skipper.skip()
+  assert.equal(skipper.goal.id, 'duel')
+  assert.equal(skipper.mine.aim, 't1s0', 'skipping the aim aims at the Trainer')
+  skipper.skip()
+  assert.equal(skipper.goal.id, 'duel', 'the duel cannot be skipped')
+})
+
+test('a drill: your chosen spells, dummies that never fall, no clock, and options', () => {
+  const spells = ['fire-bolt', 'frostbolt', 'meteor', 'renew', 'revive']
+  const drill = new Drill({ seed: 5, spells, dummies: 3, free: true })
+  const { match } = drill
+  assert.deepEqual(match.book.map((e) => e.id).sort(), spells.sort(), 'the book is the chosen spells')
+  assert.deepEqual([...drill.mine.kit].sort(), spells.sort(), 'and all of them are the kit')
+  assert.equal(match.mages.filter((m) => m.team === 1).length, 3)
+  drill.step()
+  assert.equal(match.phase, 'fight', 'no draft')
+  const dummy = match.index.get('t1s0')
+  match.hurt(drill.mine, dummy, 5000)
+  assert.ok(!dummy.down && dummy.life === dummy.lifeMax, 'a dummy never falls')
+  // Free casting: no mana spent, no cooldowns; the same spell again and again.
+  const cast = () => {
+    for (const key of ['up', ...match.book.find((e) => e.id === 'fire-bolt').sigil]) {
+      drill.press(key)
+      drill.step()
+    }
+    for (let i = 0; i < 30; i++) drill.step()
+  }
+  cast()
+  cast()
+  assert.equal(drill.mine.stats.casts, 2)
+  assert.equal(drill.mine.mana, drill.mine.manaMax)
+  for (let i = 0; i < TICK_RATE * 200; i++) drill.step()
+  assert.equal(match.phase, 'fight', 'no surge, no end')
+  assert.equal(match.book.length, spells.length)
+  const before = match.book.map((e) => e.sigil.join())
+  drill.rewrite()
+  assert.ok(match.book.every((e, i) => e.sigil.join() !== before[i]), 'new chords for every spell')
+  const events = match.flush()
+  assert.ok(events.some((e) => e.type === 'shift'))
+
+  // The ward drill: dummies cast bolts at you; a parry turns them back. A chosen book is capped.
+  const ward = new Drill({ seed: 8, spells: CODEX.slice(0, 20).map((s) => s.id), ward: true })
+  assert.equal(ward.match.book.length, BOOK_MOST)
+  const flown = []
+  for (let i = 0; i < TICK_RATE * 20; i++) {
+    const bolt = ward.match.flights.find((f) => f.targets.includes(ward.me) && f.land - ward.match.tick === 2)
+    if (bolt) ward.press('ward')
+    flown.push(...ward.step())
+  }
+  const bolts = flown.filter((e) => e.type === 'fire' && e.mage !== ward.me)
+  assert.ok(bolts.length >= 3 && bolts.every((e) => DRILL_BOLTS.includes(e.spell)), `${bolts.length} bolts`)
+  assert.ok(flown.some((e) => e.type === 'void' && e.why === 'parry'), 'bolts can be parried')
+  assert.ok(!ward.mine.down)
+})
+
 test('wire messages are checked field by field', () => {
   assert.deepEqual(unpack(pack('press', { key: 'star', seq: 3 })), { type: 'press', key: 'star', seq: 3 })
   for (const key of ['meta', 'ward', 'call', 'drop']) assert.equal(unpack(pack('press', { key, seq: 1 }))?.key, key)
@@ -752,6 +870,51 @@ test('rooms are hosted, joined by code and played over the wire', async () => {
     assert.ok(ben.raw[0].frame && ben.raw.slice(1).every((m) => m.delta && !m.frame), 'one whole frame, then deltas')
     assert.match(ben.socket.extensions, /permessage-deflate/, 'frames are compressed')
     ben.close()
+  } finally {
+    await host.close()
+  }
+})
+
+test('strangers meet: public rooms are listed, and a quick match seats people first, then bots', async () => {
+  const host = await openHost({ port: 0, quiet: true, wait: 1500 })
+  try {
+    const [ana, ben, cat, dan] = await Promise.all([0, 1, 2, 3].map(() => connect(host.url)))
+    for (const [peer, name] of [[ana, 'Ana'], [ben, 'Ben'], [cat, 'Cat'], [dan, 'Dan']]) peer.send('hello', { name })
+    cat.send('browse', { on: true })
+    assert.deepEqual((await cat.next((m) => m.type === 'rooms')).rooms, [], 'nothing is listed yet')
+    // A hosted room is private until its owner lists it; then it shows to everyone browsing.
+    ana.send('open', { rules: { teams: [2, 2] } })
+    const { room } = await ana.next((m) => m.type === 'room')
+    assert.deepEqual([room.listed, room.quick, room.wait], [false, false, null])
+    ben.send('join', { code: room.code })
+    await ana.next((m) => m.type === 'room' && m.room.seats.flat().filter((seat) => seat.kind === 'human').length === 2)
+    ben.send('list', { on: true })
+    ana.send('list', { on: true })
+    const { rooms } = await cat.next((m) => m.type === 'rooms' && m.rooms.length === 1)
+    const { code, host: owner, people, open, phase, quick } = rooms[0]
+    assert.deepEqual({ code, owner, people, open, phase, quick }, { code: room.code, owner: 'Ana', people: 2, open: 2, phase: 'lobby', quick: false })
+    ana.send('list', { on: false })
+    await cat.next((m) => m.type === 'rooms' && m.rooms.length === 0)
+    ben.send('leave')
+
+    // Quick match: Ben and Dan ask for 1 vs 1 and land in the same room, which starts as soon as it is full.
+    assert.equal(unpack(pack('seek', { size: 8 }), 'peer'), null, 'quick matches come in a few sizes')
+    ben.send('seek', { size: 1 })
+    const quickRoom = (await ben.next((m) => m.type === 'room' && m.room.quick)).room
+    assert.ok(quickRoom.listed && quickRoom.wait > 0 && quickRoom.wait <= 1500, 'a quick room is public and counts down')
+    await cat.next((m) => m.type === 'rooms' && m.rooms.some((r) => r.code === quickRoom.code && r.quick && r.open === 1))
+    dan.send('seek', { size: 1 })
+    assert.equal((await dan.next((m) => m.type === 'room')).room.code, quickRoom.code, 'strangers are seated together')
+    const [begun] = await Promise.all([ben.next((m) => m.type === 'begin'), dan.next((m) => m.type === 'begin')])
+    assert.deepEqual(begun.setup.roster.map((m) => [m.name, m.bot]).sort(), [['Ben', false], ['Dan', false]], 'people first: no bots needed')
+
+    // Alone in a 2 vs 2 quick room: when the wait runs out, bots take the open seats.
+    cat.send('seek', { size: 2 })
+    const alone = (await cat.next((m) => m.type === 'room' && m.room.quick)).room
+    assert.equal(alone.rules.teams.join(), '2,2')
+    const filled = await cat.next((m) => m.type === 'begin', 6000)
+    assert.equal(filled.setup.roster.filter((m) => m.bot).length, 3, 'bots fill the rest')
+    for (const peer of [ana, ben, cat, dan]) peer.close()
   } finally {
     await host.close()
   }
@@ -939,10 +1102,11 @@ function makeStage(browser, errors) {
   }
 }
 
-test('views: every essential screen renders and responds', { timeout: 900000 }, async () => {
+test('views: every essential screen renders and responds', { timeout: 1500000 }, async () => {
   await fs.mkdir(SHOTS, { recursive: true })
   // Frozen pages stop reading their sockets, so they cannot answer pings: don't ping during this test.
-  const host = await openHost({ port: 0, quiet: true, beat: 3600000 })
+  // Quick rooms wait long here: software rendering is slow, and the test starts them by hand.
+  const host = await openHost({ port: 0, quiet: true, beat: 3600000, wait: 600000 })
   const browser = await chromium.launch({ args: GL_FLAGS })
   const errors = []
   const stage = makeStage(browser, errors)
@@ -957,6 +1121,30 @@ test('views: every essential screen renders and responds', { timeout: 900000 }, 
     await ana.click('.hero [data-open="guide"]')
     await shoot(ana, '02-guide')
     await ana.click('#guide [data-close]')
+
+    // Settings: volumes reach the sound, the quality holds a tier, the palette recolors, keys rebind; all are kept.
+    await ana.click('.hero [data-open="settings"]')
+    await ana.locator('#settings input[data-set="music"]').fill('40')
+    await ana.click('#settings [data-set="quality"] [data-value="medium"]')
+    await ana.click('#settings [data-set="shake"] [data-value="off"]')
+    await ana.click('#settings [data-set="palette"] [data-value="colorblind"]')
+    await ana.click('#keys-grid [data-bind="star"]')
+    await ana.keyboard.press('KeyO')
+    await ana.click('#keys-grid [data-bind="wave"]')
+    await ana.keyboard.press('KeyO')
+    const set = await ana.evaluate(() => {
+      const { sound, stage } = window.chordcast
+      const saved = JSON.parse(localStorage.getItem('chordcast.settings'))
+      return { music: sound.volume.music, tier: stage.quality, pinned: stage.governor.pinned, shaking: stage.shaking, palette: document.body.dataset.palette, keys: [saved.keys.star, saved.keys.wave], cell: document.querySelector('[data-bound="runes"]').textContent }
+    })
+    assert.deepEqual(set, { music: 0.4, tier: 'medium', pinned: true, shaking: false, palette: 'colorblind', keys: ['KeyJ', 'KeyO'], cell: 'J O L K' }, 'a key bound twice swaps places')
+    await shoot(ana, '18-settings')
+    await ana.click('#keys-reset')
+    await ana.click('#settings [data-set="quality"] [data-value="auto"]')
+    await ana.click('#settings [data-set="palette"] [data-value="standard"]')
+    await ana.click('#settings [data-set="shake"] [data-value="on"]')
+    await ana.click('#settings [data-close]')
+    assert.equal(await ana.evaluate(() => [document.body.dataset.palette, window.chordcast.stage.governor.pinned, document.querySelector('[data-bound="runes"]').textContent].join()), 'standard,false,I J L K')
 
     // Lobby: host a match, then a friend joins by code
     await ana.click('#host-button')
@@ -982,7 +1170,9 @@ test('views: every essential screen renders and responds', { timeout: 900000 }, 
     await ana.waitForFunction(() => window.chordcast.room.rules.teams[0] === 2)
     await ana.click('[data-rule="team1"] [data-step="1"]')
     await ana.click('[data-rule="life"] [data-value="2000"]')
-    await ana.waitForFunction(() => window.chordcast.room.rules.teams.join() === '2,2' && window.chordcast.room.rules.life === 2000)
+    // A late surge keeps this match going through the steps below, which software rendering makes slow.
+    await ana.click('[data-rule="surge"] [data-value="180"]')
+    await ana.waitForFunction(() => window.chordcast.room.rules.teams.join() === '2,2' && window.chordcast.room.rules.life === 2000 && window.chordcast.room.rules.surge === 180)
     await ana.click('#seats-0 .seat.open .btn')
     await ana.waitForSelector('#seats-0 .seat.bot')
     await stage.focus(ben)
@@ -1091,7 +1281,74 @@ test('views: every essential screen renders and responds', { timeout: 900000 }, 
     await ana.waitForSelector('body[data-view="result"]', { timeout: 120000 })
     await ana.waitForTimeout(800)
     await shoot(ana, '11-result')
+
+    // The tutorial runs in the page: a coach walks through the draft, aiming and casting, then a duel.
+    await ana.locator('#result [data-action="leave"]').click()
+    await ana.waitForSelector('body[data-view="home"]')
+    assert.ok(await ana.locator('#lesson-button.fresh').count(), 'a first visit is pointed at the tutorial')
+    await ana.click('#lesson-button')
+    await ana.waitForSelector('body[data-solo="lesson"][data-phase="ready"] #coach:not([hidden])')
+    const lessonBook = await ana.evaluate(() => window.chordcast.setup.book)
+    for (const id of LESSON.kit) for (const key of lessonBook.find((e) => e.id === id).sigil) await ana.keyboard.press(KEYBOARD[key])
+    await ana.waitForFunction(() => window.chordcast.solo.room.goal?.id === 'aim', null, { timeout: 30000 })
+    await ana.keyboard.press(KEYBOARD.up)
+    await ana.waitForFunction(() => window.chordcast.solo.room.goal?.id === 'cast')
+    assert.ok(await ana.locator('#book-offense .spell.goal').count(), 'the spell to cast glows')
+    await shoot(ana, '19-lesson')
+    for (const key of lessonBook.find((e) => e.id === 'fire-bolt').sigil) await ana.keyboard.press(KEYBOARD[key])
+    await ana.waitForFunction(() => window.chordcast.solo.room.goal?.id === 'mend', null, { timeout: 30000 })
+    // Skip ahead to the duel; the Trainer starts it nearly down.
+    while ((await ana.evaluate(() => window.chordcast.solo.room.goal?.id)) !== 'duel') await ana.click('#coach-skip')
+    await ana.evaluate(() => (window.chordcast.solo.room.trainer.life = 1))
+    const won = () => document.body.dataset.view === 'result'
+    for (let attempt = 0; attempt < 6 && !(await ana.evaluate(won)); attempt++) {
+      await ana.waitForFunction(() => !window.chordcast.mine().cast && window.chordcast.serverTick() >= window.chordcast.mine().stagger)
+      for (const key of lessonBook.find((e) => e.id === 'fire-bolt').sigil) await ana.keyboard.press(KEYBOARD[key])
+      await ana.waitForFunction(won, null, { timeout: 8000 }).catch(() => {})
+    }
+    await ana.waitForFunction(() => document.querySelector('#result-title').textContent === 'Lesson complete' && localStorage.getItem('chordcast.lesson') === 'done')
+
+    // Practice: chosen spells are the whole kit, dummies never fall, and the bar counts what you do.
+    await ana.click('#lobby-button')
+    await ana.waitForSelector('body[data-view="practice"]')
+    await ana.click('#drill-schools [data-value="fire"]')
+    await ana.click('#drill-spells .drill-spell:nth-child(1)')
+    await ana.click('#drill-spells .drill-spell:nth-child(4)')
+    await ana.click('[data-drill="dummies"] [data-value="2"]')
+    await ana.click('[data-drill="free"] [data-value="on"]')
+    await ana.click('#drill-start')
+    await ana.waitForSelector('body[data-solo="drill"][data-phase="fight"]')
+    const drill = await ana.evaluate(() => ({ kit: window.chordcast.kits[window.chordcast.me], foes: window.chordcast.setup.roster.length - 1, calm: window.chordcast.setup.calm }))
+    assert.deepEqual([drill.kit.length, drill.foes, drill.calm], [2, 2, true])
+    const practiced = await offenseChord(ana)
+    for (let attempt = 0; attempt < 4 && !(await ana.evaluate(() => window.chordcast.tally.casts > 0)); attempt++) {
+      await ana.keyboard.press(KEYBOARD.drop)
+      for (const key of practiced) await ana.keyboard.press(KEYBOARD[key])
+      await ana.waitForFunction(() => window.chordcast.tally.casts > 0, null, { timeout: 10000 }).catch(() => {})
+    }
+    await ana.waitForFunction(() => document.querySelector('#drill-casts').textContent !== '0')
+    await shoot(ana, '20-practice')
     await stage.close(ana)
+
+    // Find players: a quick match counts down in its lobby and shows in the public list, where others join it.
+    const dan = await stage.open('dan', desk)
+    await dan.goto(host.url)
+    await dan.fill('#name-input', 'Dan')
+    await dan.click('.hero [data-action="browse"]')
+    await dan.click('#seek-size [data-value="2"]')
+    await dan.click('#seek-button')
+    await dan.waitForSelector('body.counting[data-view="lobby"]')
+    await shoot(dan, '21-quick-lobby')
+    const eve = await stage.open('eve', desk)
+    await eve.goto(host.url)
+    await eve.fill('#name-input', 'Eve')
+    await eve.click('.hero [data-action="browse"]')
+    await eve.waitForSelector('#room-list li.quick')
+    await shoot(eve, '22-find-players')
+    await eve.click('#room-list li.quick .btn')
+    await eve.waitForFunction(() => document.body.dataset.view === 'lobby' && window.chordcast.room.seats.flat().filter((seat) => seat.kind === 'human').length === 2)
+    await stage.close(eve)
+    await stage.close(dan)
 
     // A spectator waits on the home page while a phone plays
     const cat = await stage.open('cat', desk)
@@ -1120,15 +1377,41 @@ test('views: every essential screen renders and responds', { timeout: 900000 }, 
     await cat.click('#join-form button')
     await cat.waitForSelector('body.watching[data-view="match"]')
 
+    // While another page has the turn, the idle phone can still fall to the bot and lose: then it rematches.
+    const fighting = () => document.body.dataset.view === 'match' && window.chordcast.frame?.phase === 'fight'
+    const duelOn = async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await phone.waitForFunction(() => window.chordcast.frame?.phase === 'fight' || window.chordcast.results, null, { timeout: 60000 })
+        if (await phone.evaluate(fighting)) return
+        await phone.waitForSelector('body[data-view="result"] #again-button')
+        await phone.tap('#again-button')
+        await phone.waitForFunction(() => !window.chordcast.results)
+      }
+      throw new Error('the duel kept ending')
+    }
     await stage.focus(phone)
-    await phone.waitForSelector('body[data-phase="fight"]')
-    for (const key of await offenseChord(phone)) await phone.tap(`#pads [data-key="${key}"]`)
-    await phone.waitForFunction(() => window.chordcast.seq >= 3)
+    for (let attempt = 0; ; attempt++) {
+      await duelOn()
+      const from = await phone.evaluate(() => window.chordcast.seq)
+      try {
+        for (const key of await offenseChord(phone)) await phone.tap(`#pads [data-key="${key}"]`, { timeout: 10000 })
+        await phone.waitForFunction((seq) => window.chordcast.seq >= seq + 3, from, { timeout: 10000 })
+        break
+      } catch (error) {
+        if (attempt >= 2 || (await phone.evaluate(fighting))) throw error
+      }
+    }
     await phone.waitForTimeout(2500)
     await shoot(phone, '14-phone-fight')
 
     await stage.focus(cat)
-    await cat.waitForSelector('body.watching[data-view="match"][data-phase="fight"]')
+    const watching = () => cat.waitForSelector('body.watching[data-view="match"][data-phase="fight"]', { timeout: 20000 }).then(() => true, () => false)
+    if (!(await watching())) {
+      await stage.focus(phone)
+      await duelOn()
+      await stage.focus(cat)
+      assert.ok(await watching(), 'the spectator watches the rematch')
+    }
     await cat.waitForTimeout(2000)
     await shoot(cat, '15-watching')
 
@@ -1136,21 +1419,12 @@ test('views: every essential screen renders and responds', { timeout: 900000 }, 
     await cat.locator('.topbar [data-action="leave"]').dispatchEvent('click')
     await cat.click('#host-button')
     await cat.waitForSelector('body[data-view="lobby"]')
-    await cat.evaluate(() => window.chordcast.link.send('tune', { rules: { ...window.chordcast.room.rules, teams: [8, 8], life: 3000 } }))
+    // Sixteen mages fight fast: easy bots, a lot of life and a late surge keep the match going while
+    // slow software rendering takes the pictures. A book heavy with side spells can still end it
+    // first; then the room rematches and tries again.
+    await cat.evaluate(() => window.chordcast.link.send('tune', { rules: { ...window.chordcast.room.rules, teams: [8, 8], life: 3000, surge: 600, skill: 'easy' } }))
     await cat.waitForFunction(() => window.chordcast.room.rules.teams.join() === '8,8')
-    await cat.click('#start-button')
-    await cat.waitForSelector('body[data-phase="fight"]', { timeout: 60000 })
-    await cat.keyboard.press('Tab')
-    const fought = await cat.evaluate(() => window.chordcast.stage.time)
-    await cat.waitForFunction((at) => window.chordcast.stage.time > at + 3, fought, { timeout: 120000 })
-    const focus = await cat.evaluate(() => ({ ...window.chordcast.stage.focus, budgets: null }))
-    assert.deepEqual([focus.fade, focus.rate], [0.4, 337.5], 'sixteen mages: others fade to 40%, 337 particles a second each')
-    assert.ok(focus.spent > 0, 'particles are charged to budgets')
-    await shoot(cat, '16-big-fight')
-
-    // Aura details: hovering a chip on a nameplate shows what the aura does and how long it has left
-    await cat.waitForSelector('.plate-auras .aura', { timeout: 60000 })
-    assert.ok(await cat.locator('.plate-auras .aura svg').count(), 'aura chips are icons')
+    const live = () => document.body.dataset.view === 'match' && window.chordcast.frame?.phase === 'fight'
     const hoverChip = async () => {
       // Plates can overlap in a big fight: hover a chip that is on top.
       const at = await cat.evaluate(() => {
@@ -1164,9 +1438,36 @@ test('views: every essential screen renders and responds', { timeout: 900000 }, 
       if (at) await cat.mouse.move(at.x, at.y)
     }
     const tipOpen = () => !document.querySelector('#aura-tip').hidden && /s left/.test(document.querySelector('#aura-tip').textContent)
-    await hoverChip()
-    await cat.waitForFunction(tipOpen)
-    await shoot(cat, '17-aura', hoverChip, tipOpen)
+    for (let attempt = 0; ; attempt++) {
+      await cat.click(attempt ? '#again-button' : '#start-button')
+      await cat.waitForSelector('body[data-view="match"][data-phase="fight"]', { timeout: 60000 })
+      if (!attempt) await cat.keyboard.press('Tab')
+      try {
+        const fought = await cat.evaluate(() => window.chordcast.stage.time)
+        await cat.waitForFunction((at) => window.chordcast.stage.time > at + 3, fought, { timeout: 120000 })
+        const focus = await cat.evaluate(() => ({ ...window.chordcast.stage.focus, budgets: null }))
+        assert.deepEqual([focus.fade, focus.rate], [0.4, 337.5], 'sixteen mages: others fade to 40%, 337 particles a second each')
+        assert.ok(focus.spent > 0, 'particles are charged to budgets')
+        await shoot(cat, '16-big-fight')
+        if (!(await cat.evaluate(live))) throw new Error('the fight ended before its picture')
+
+        // Aura details: hovering a chip on a nameplate shows what the aura does and how long it has left
+        await cat.waitForSelector('.plate-auras .aura', { timeout: 60000 })
+        assert.ok(await cat.locator('.plate-auras .aura svg').count(), 'aura chips are icons')
+        await hoverChip()
+        await cat.waitForFunction(tipOpen)
+        // A slow top-tier picture can outlast the hovered aura: take it again if the details closed meanwhile.
+        for (let shot = 0; shot < 3; shot++) {
+          await shoot(cat, '17-aura', hoverChip, tipOpen)
+          if (await cat.evaluate(tipOpen)) break
+        }
+        if (!(await cat.evaluate(live))) throw new Error('the fight ended before its picture')
+        break
+      } catch (error) {
+        if (attempt >= 2 || (await cat.evaluate(live))) throw error
+        await cat.waitForSelector('body[data-view="result"] #again-button', { timeout: 60000 })
+      }
+    }
 
     assert.deepEqual(errors, [], 'no page errors')
   } finally {

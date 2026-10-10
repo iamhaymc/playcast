@@ -16,9 +16,10 @@
  *    9  Stage    scene, camera, world and the render loop
  *   10  Plates   nameplates and floating numbers
  *   11  Hud      clock, banner, book, chord tray, ward and flow
- *   12  Views    home, lobby and results screens
- *   13  Game     client state: messages in, effects and sounds out
- *   14  Boot
+ *   12  Views    home, find players, practice, lobby and results screens
+ *   13  Solo     lessons and practice, run in the page with no host
+ *   14  Game     client state: messages in, effects and sounds out
+ *   15  Boot
  */
 
 import * as THREE from 'three'
@@ -29,8 +30,9 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js'
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js'
 import {
-  AIM_TEXT, CODEX, DIMINISH, GARB, LAYOUT, METAS, META_OF_RUNE, MOVES, REACTIONS, RULES, RUNES, SPELL, TEAMS, TICK_MS, TICK_RATE, TIMING,
-  costOf, dampenAt, describeAura, moveCursor, pack, patch, pickGarb, place, reactionOn, readChord, readRunes, tidyGarb, unpackFrame, walkActs,
+  AIM_TEXT, BOOK_MOST, CODEX, DIMINISH, Drill, GARB, LAYOUT, Lesson, METAS, META_OF_RUNE, MOVES, REACTIONS, RULES, RUNES, SCHOOLS, SPELL, TEAMS,
+  TICK_MS, TICK_RATE, TIMING, costOf, dampenAt, describeAura, moveCursor, pack, packFrame, patch, pickGarb, place, reactionOn, readChord, readRunes,
+  tidyGarb, unpackFrame, walkActs,
 } from '/core.mjs'
 import { Sound } from '/sound.mjs'
 
@@ -104,7 +106,19 @@ const GLYPHS = {
   keys: stroke('M3 7h18v11H3zM7 11h.01M11 11h.01M15 11h.01M8 14.5h8', 1.8),
   pad: stroke('M7 8h10a4 4 0 0 1 4 4.5l-.6 3.6a2.5 2.5 0 0 1-4.4 1.1L14.5 15h-5L8 17.2a2.5 2.5 0 0 1-4.4-1.1L3 12.5A4 4 0 0 1 7 8zM8 11v3M6.5 12.5h3M15.5 12h.01M17.5 13.5h.01', 1.7),
   touch: stroke('M9 11V5.5a1.5 1.5 0 0 1 3 0V11m0-1.5a1.5 1.5 0 0 1 3 0V11m0-.5a1.5 1.5 0 0 1 3 0v4.5a6 6 0 0 1-6 6h-.6a6 6 0 0 1-4.9-2.6L4.6 15a1.5 1.5 0 0 1 2.4-1.8L9 15', 1.7),
+  gear: cog(8, 10.4, 7.6),
 }
+
+/** A cog with `count` teeth between radii `outer` and `inner`, around a hole. */
+function cog(count, outer, inner) {
+  const at = (angle, r) => `${(12 + Math.cos(angle) * r).toFixed(2)} ${(12 + Math.sin(angle) * r).toFixed(2)}`
+  const step = (Math.PI * 2) / count
+  const points = []
+  for (let i = 0; i < count; i++) for (const [turn, r] of [[-0.3, inner], [-0.17, outer], [0.17, outer], [0.3, inner]]) points.push(at((i + turn) * step, r))
+  return `<path d="M${points.join('L')}z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/>`
+}
+
+GLYPHS.drop = GLYPHS.close
 
 const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${GLYPHS[name] ?? ''}</svg>`
 
@@ -122,6 +136,81 @@ const LABELS = {
 
 let inputMode = 'keys'
 
+// Settings ────────────────────────────────────────────────────────────────
+
+/** Each game key's place on the keyboard, unless rebound in the settings. */
+const BOUND_KEYS = { up: 'KeyW', left: 'KeyA', right: 'KeyD', down: 'KeyS', star: 'KeyI', wave: 'KeyJ', flame: 'KeyL', leaf: 'KeyK', meta: 'KeyU', ward: 'Space', call: 'KeyE', drop: 'KeyQ' }
+/** Keys that also work, unless bound to something else. */
+const SPARE_KEYS = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', Backspace: 'drop' }
+/** Keys the page keeps for itself: the book (Tab), menus (Escape), sound (M) and the modifiers (Shift is meta with a rune). */
+const KEPT_CODES = /^(Tab|Escape|KeyM|Shift|Control|Alt|Meta|OS|Fn|CapsLock|ContextMenu)/
+const CODE_TEXT = {
+  Space: '␣', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', Backspace: '⌫', Enter: '⏎', Semicolon: ';', Quote: "'",
+  Comma: ',', Period: '.', Slash: '/', Backslash: '\\', BracketLeft: '[', BracketRight: ']', Minus: '-', Equal: '=', Backquote: '`',
+}
+
+/** A key code as a short label: KeyW → W, Space → ␣, Numpad4 → N4. */
+const codeLabel = (code) => CODE_TEXT[code] ?? code.replace(/^(Key|Digit)/, '').replace(/^Numpad/, 'N').slice(0, 3)
+
+/** A whole binding, every game key on its own code; anything broken falls back to the defaults. */
+function tidyKeys(input) {
+  const bound = { ...BOUND_KEYS }
+  if (input && typeof input === 'object') {
+    for (const key of Object.keys(BOUND_KEYS)) if (typeof input[key] === 'string' && /^\w{2,24}$/.test(input[key]) && !KEPT_CODES.test(input[key])) bound[key] = input[key]
+  }
+  return new Set(Object.values(bound)).size === Object.keys(bound).length ? bound : { ...BOUND_KEYS }
+}
+
+const PALETTES = ['standard', 'colorblind']
+const TIERS = ['auto', 'low', 'medium', 'high', 'ultra']
+
+/**
+ * What the player set, kept across visits. Volumes are 0–100. A first visit
+ * from a system that asks for less motion starts without screen shake and
+ * with reduced motion.
+ */
+function loadSettings() {
+  let saved = null
+  try {
+    saved = JSON.parse(memory.get('chordcast.settings'))
+  } catch {
+    /* not saved yet, or unreadable: the defaults */
+  }
+  saved = saved && typeof saved === 'object' ? saved : {}
+  const calm = matchMedia('(prefers-reduced-motion: reduce)').matches
+  const pick = (value, test, fallback) => (test(value) ? value : fallback)
+  const flag = (value, fallback) => pick(value, (v) => typeof v === 'boolean', fallback)
+  const volume = (value) => (Number.isFinite(value) ? clamp(Math.round(value), 0, 100) : 100)
+  return {
+    effects: volume(saved.effects),
+    music: volume(saved.music),
+    haptics: flag(saved.haptics, true),
+    quality: pick(saved.quality, (v) => TIERS.includes(v), 'auto'),
+    shake: flag(saved.shake, !calm),
+    flashes: flag(saved.flashes, true),
+    reduced: flag(saved.reduced, calm),
+    palette: pick(saved.palette, (v) => PALETTES.includes(v), 'standard'),
+    keys: tidyKeys(saved.keys),
+  }
+}
+
+const settings = loadSettings()
+
+const saveSettings = () => memory.set('chordcast.settings', JSON.stringify(settings))
+
+const KEY_NAMES = { up: 'Aim up', down: 'Aim down', left: 'Aim left', right: 'Aim right', star: 'Star rune', wave: 'Wave rune', flame: 'Flame rune', leaf: 'Leaf rune', meta: 'Meta', ward: 'Ward', call: 'Call', drop: 'Clear' }
+
+/** Keyboard code → game key, from the binding and the spares it leaves free. */
+let keyCodes = {}
+
+/** Apply the key binding: what each code types, and the labels on key chips. */
+function bindKeys() {
+  keyCodes = { ...SPARE_KEYS }
+  for (const [key, code] of Object.entries(settings.keys)) keyCodes[code] = key
+  LABELS.keys = Object.fromEntries(Object.entries(settings.keys).map(([key, code]) => [key, codeLabel(code)]))
+}
+bindKeys()
+
 /** A key chip: a rune, a move or the meta glyph, labeled for the current input mode. */
 function keyChip(key, extra = '') {
   const kind = RUNES.includes(key) ? `rune ${key}` : key === 'meta' ? 'meta' : 'move'
@@ -137,8 +226,20 @@ function metaChip(id, extra = '') {
 /** Rune glyphs for a chord, as the book and plates show them. */
 const sigilHtml = (sigil) => sigil.map((rune) => `<i data-glyph="${rune}" class="${rune}">${svg(rune)}</i>`).join('')
 
-const TEAM_GLOW = ['#3ee6ff', '#ff4fb8']
-const TEAM_ROBE = ['#1b5670', '#6b2250']
+/**
+ * Team colors per palette. The colorblind one swaps cyan and magenta for
+ * blue and amber, which stay apart in every common form of color blindness;
+ * it also moves nature to a bluish green and holy to yellow (SCHOOL_TONES),
+ * away from fire.
+ */
+const TEAM_TONES = {
+  standard: { glow: ['#3ee6ff', '#ff4fb8'], robe: ['#1b5670', '#6b2250'] },
+  colorblind: { glow: ['#4da3ff', '#ffa31f'], robe: ['#1d4675', '#6e4512'] },
+}
+
+/** The teams' colors now: paintPalette changes them in place. */
+const TEAM_GLOW = [...TEAM_TONES.standard.glow]
+const TEAM_ROBE = [...TEAM_TONES.standard.robe]
 
 /**
  * Spell schools. Each owns a hue around the color wheel (hot core, main and
@@ -164,6 +265,26 @@ for (const look of Object.values(SCHOOL_LOOK)) {
 }
 
 const schoolLook = (school) => SCHOOL_LOOK[school] ?? SCHOOL_LOOK.arcane
+
+const SCHOOL_TONES = {
+  standard: Object.fromEntries(['fire', 'nature', 'holy'].map((school) => [school, Object.fromEntries(['hot', 'main', 'deep'].map((key) => [key, '#' + SCHOOL_LOOK[school][key].getHexString()]))])),
+  colorblind: {
+    fire: { hot: '#ffd36b', main: '#ff6a00', deep: '#c43c00' },
+    nature: { hot: '#c4fff0', main: '#1fd6a6', deep: '#08806e' },
+    holy: { hot: '#fffbc2', main: '#f5e14a', deep: '#d9a400' },
+  },
+}
+
+/** Recolor the teams and the schools that clash, in place, for a palette. Figures built later wear it. */
+function paintPalette(name) {
+  const team = TEAM_TONES[name] ?? TEAM_TONES.standard
+  TEAM_GLOW.splice(0, 2, ...team.glow)
+  TEAM_ROBE.splice(0, 2, ...team.robe)
+  for (const [school, tones] of Object.entries(SCHOOL_TONES[name] ?? SCHOOL_TONES.standard)) {
+    for (const [key, hex] of Object.entries(tones)) SCHOOL_LOOK[school][key].set(hex)
+  }
+  document.body.dataset.palette = name
+}
 
 /** A canvas texture drawn once by `paint(context, size)`. */
 function canvasTexture(size, paint) {
@@ -395,10 +516,6 @@ class Link {
 
 // ─── 3 · Pads ───────────────────────────────────────────────────────────────
 
-const KEY_CODES = {
-  KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down', KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right',
-  KeyI: 'star', KeyJ: 'wave', KeyL: 'flame', KeyK: 'leaf', KeyU: 'meta', Space: 'ward', KeyE: 'call', KeyQ: 'drop', Backspace: 'drop',
-}
 const PAD_BUTTONS = { 12: 'up', 13: 'down', 14: 'left', 15: 'right', 3: 'star', 2: 'wave', 1: 'flame', 0: 'leaf', 4: 'drop', 5: 'meta', 6: 'call', 7: 'ward' }
 const PAD_COMMANDS = { 9: 'book', 8: 'guide' }
 
@@ -423,7 +540,7 @@ class Pads {
         button.classList.add('held')
         this.setMode('touch')
         this.onKey(button.dataset.key)
-        navigator.vibrate?.(8)
+        if (settings.haptics) navigator.vibrate?.(8)
       })
       for (const end of ['pointerup', 'pointercancel', 'pointerleave']) button.addEventListener(end, () => button.classList.remove('held'))
     }
@@ -439,13 +556,13 @@ class Pads {
 
   keyDown(event) {
     const typing = event.target instanceof HTMLInputElement
-    if (typing || $('#guide').open) return
+    if (typing || $('#guide').open || $('#settings').open) return
     if (event.code === 'Tab') {
       event.preventDefault()
       return this.onCommand('book')
     }
     if (event.code === 'KeyM' && !event.repeat) return this.onCommand('sound')
-    const key = KEY_CODES[event.code]
+    const key = keyCodes[event.code]
     if (!key) return
     event.preventDefault()
     if (event.repeat) return
@@ -1146,7 +1263,9 @@ class Looks {
   }
 
   flash(at, color, size = 1.6, life = 0.22, alpha = 1) {
-    this.sparks.emit({ at: point(at), color, size, life, alpha, shape: 'glow', grow: 0.6 })
+    // With flashes set to soft, bright pops stay small and faint.
+    const soft = this.stage.flashes ? 1 : 0.3
+    this.sparks.emit({ at: point(at), color, size: size * (0.7 + 0.3 * soft), life, alpha: alpha * soft, shape: 'glow', grow: 0.6 })
   }
 
   /** A burst of the school's shapes from a point: a tinted flash, a ring of light, bodies and bits. */
@@ -1570,6 +1689,7 @@ const STATUS_LOOK = {
   steady: { rate: 3, shape: 'ring', color: '#fff3c8', where: 'feet', motion: 'rise' },
   rewind: { rate: 3, shape: 'glow', color: '#ff7ae0', where: 'body', motion: 'rise', mark: { shape: 'rune', color: '#ff5ad6', size: 0.38, count: 2, radius: 0.8, spin: -2.4 } },
   blight: { rate: 8, shape: 'smoke', color: '#1c3a0a', where: 'body', motion: 'drift', haze: true, tint: '#8cff2a' },
+  leech: { rate: 6, shape: 'glow', color: '#ff2a55', where: 'body', motion: 'climb', tint: '#c2185b' },
   sheep: { rate: 3, shape: 'glow', color: '#ffffff', where: 'chest', motion: 'drift' },
   root: { rate: 10, shape: 'leaf', color: '#3ee05a', where: 'feet', motion: 'rise', tint: '#36dd52' },
   ice: { rate: 6, shape: 'flake', color: '#d8fbff', where: 'body', motion: 'drift' },
@@ -2343,7 +2463,7 @@ class Figure {
   /** Flinch from a hit. Damage over time ticks flinch less and barely flash. */
   hit(share, direct = true) {
     this.kick = Math.min(1, this.kick + (direct ? 0.4 : 0.1) + share * 3)
-    this.flash = Math.max(this.flash, direct ? 1 : 0.35)
+    this.flash = Math.max(this.flash, (direct ? 1 : 0.35) * (this.stage.flashes ? 1 : 0.2))
   }
 
   // Frame ────────────────────────────────────────────────────────────────
@@ -3075,7 +3195,8 @@ function startQuality(renderer) {
 }
 
 /** Rift dust: the two teams' colors and a pale grey, washed toward white. */
-const RIFT_DUST = [TEAM_GLOW[0], TEAM_GLOW[1], '#d6d3e4'].map((hex) => new THREE.Color(hex).lerp(new THREE.Color('#ffffff'), 0.45))
+const WHITE = new THREE.Color('#ffffff')
+const RIFT_DUST = [TEAM_GLOW[0], TEAM_GLOW[1], '#d6d3e4'].map((hex) => new THREE.Color(hex).lerp(WHITE, 0.45))
 const EMBER = new THREE.Color('#ff9a52')
 
 /** The 3D world: arena, mages, particles, flights, camera and post effects. */
@@ -3091,8 +3212,13 @@ class Stage {
     this.viewer = 0
     this.span = 1
     this.cursor = null
+    this.squeeze = 0.75 // the least share of the screen's height the match picture is fitted to
     this.motes = 0
     this.band = [0, 1, 0, 1]
+    // From the settings: camera shake, bright flashes, and fewer particles when reduced.
+    this.shaking = true
+    this.flashes = true
+    this.reduced = false
 
     // Antialiasing comes from the multisampled scene buffer below, so the
     // canvas itself needs none.
@@ -3139,7 +3265,8 @@ class Stage {
     this.buildCursor()
     this.tiers = QUALITY.map((tier) => tier.name)
     const start = startQuality(renderer)
-    this.governor = { cost: 1 / 60, slow: 0, slowFrames: 0, fast: 0, trial: null, floor: 0, ceiling: QUALITY.length - 1, raised: -Infinity, pinned: start.pinned }
+    this.guess = start.tier
+    this.governor = { cost: 1 / 60, slow: 0, slowFrames: 0, fast: 0, trial: null, floor: 0, ceiling: QUALITY.length - 1, raised: -Infinity, pinned: start.pinned, asked: start.pinned }
     this.setQuality(start.tier)
     window.addEventListener('resize', () => this.resize())
   }
@@ -3338,7 +3465,7 @@ class Stage {
     const glint = this.glints.reduce((dim, next) => (next.light.intensity < dim.light.intensity ? next : dim))
     glint.light.position.copy(at)
     glint.light.color.copy(color)
-    glint.peak = 16 * strength * this.focus.weight
+    glint.peak = 16 * strength * this.focus.weight * (this.flashes ? 1 : 0.35)
     glint.life = life
     glint.age = 0
   }
@@ -3348,7 +3475,7 @@ class Stage {
     const quality = QUALITY[tier]
     this.tier = tier
     this.quality = quality.name
-    this.sparks.density = quality.density
+    this.sparks.density = quality.density * (this.reduced ? 0.5 : 1)
     // The lowest tier draws a plainer floor without weathering, and its mages
     // cast no shadows, so the shadow map holds only still things and is drawn
     // once, not every frame.
@@ -3367,6 +3494,25 @@ class Stage {
       target.dispose()
     }
     this.resize()
+  }
+
+  /**
+   * The quality setting: 'auto' lets the governor move between tiers from a
+   * guess; a tier's name holds that tier. `?quality=` in the address wins.
+   */
+  choose(name) {
+    const g = this.governor
+    if (g.asked) return
+    const tier = this.tiers.indexOf(name)
+    Object.assign(g, { pinned: tier >= 0, trial: null, floor: 0, ceiling: QUALITY.length - 1, slow: 0, slowFrames: 0, fast: 0 })
+    this.setQuality(tier >= 0 ? tier : this.guess)
+  }
+
+  /** The team colors changed (the palette setting): the floor, the rift and its dust follow. */
+  repaint() {
+    this.shared.uDawn.value.set(TEAM_GLOW[0])
+    this.shared.uDusk.value.set(TEAM_GLOW[1])
+    RIFT_DUST.forEach((color, i) => i < 2 && color.set(TEAM_GLOW[i]).lerp(WHITE, 0.45))
   }
 
   /** The nearest tier below (-1) or above (+1) that draws differently on this screen. */
@@ -3532,7 +3678,7 @@ class Stage {
 
   /** Shake the camera, less for effects that are not about you. */
   shake(amount) {
-    this.shakeLevel = Math.min(1, this.shakeLevel + amount * this.focus.weight)
+    if (this.shaking) this.shakeLevel = Math.min(1, this.shakeLevel + amount * this.focus.weight)
   }
 
   // Camera and frame ─────────────────────────────────────────────────────
@@ -3581,7 +3727,7 @@ class Stage {
       const wide = (right - left) / this.width
       const halfWide = Math.atan(Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * camera.aspect)
       const width = (this.span - 1) * LAYOUT.gap + 4.4
-      const goal = Math.max(10, (width / 2 / (Math.tan(halfWide) * Math.max(0.4, wide))) * 1.05) / Math.max(0.75, tall)
+      const goal = Math.max(10, (width / 2 / (Math.tan(halfWide) * Math.max(0.4, wide))) * 1.05) / Math.max(this.squeeze, tall)
       // Ease toward the new distance when the book opens or closes.
       this.reach = this.reach ? this.reach + (goal - this.reach) * Math.min(1, dt * 3) : goal
       const reach = this.reach
@@ -3607,7 +3753,7 @@ class Stage {
 
   /** Quiet life in the air: dust lifting off the rift (much more in the surge) and a few stray embers. */
   ambient(dt) {
-    this.motes += dt * (10 + this.surge * 70)
+    this.motes += dt * (10 + this.surge * 70) * (this.reduced ? 0.35 : 1)
     while (this.motes >= 1) {
       this.motes--
       this.sparks.emit({ at: [rand(-11, 11), 0.05, rand(-0.2, 0.2)], velocity: [rand(-0.15, 0.15), rand(0.5, 1.6), rand(-0.08, 0.08)], color: pickOne(RIFT_DUST), alpha: 0.55, size: rand(0.04, 0.1), life: rand(1.2, 2.2), shape: 'glow', drag: 0.2 })
@@ -3700,6 +3846,7 @@ const AURA_ICONS = {
   anchor: '<circle cx="12" cy="4.4" r="2" fill="none" stroke="currentColor" stroke-width="2"/>' + stroke('M12 6.4V21M7.8 10h8.4M4.6 13.6a7.4 7.4 0 0 0 14.8 0', 2.1),
   rewind: stroke('M4.2 12a7.8 7.8 0 1 0 2.3-5.5M4.2 3.5v5h5', 2.3),
   blight: solid('M9.4 2.8h5.2v6.6h6.6v5.2h-6.6v6.6H9.4v-6.6H2.8V9.4h6.6z', ' opacity="0.5"') + stroke('M3.5 20.5l17-17', 2.7),
+  fang: solid('M3 3.5h18v3.2c-1.7 0-2.9 1-3.3 2.7L15.8 18l-2-8.4c-.4-1.5-1-2.3-1.8-2.3s-1.4.8-1.8 2.3L8.2 18 6.3 9.4C5.9 7.7 4.7 6.7 3 6.7z'),
   sheep: solid('M6.6 8.6a3 3 0 0 1 5-2.1 3 3 0 0 1 5.1 1.6 3 3 0 0 1 1.5 5.5 3 3 0 0 1-3 3.5H8.3a3 3 0 0 1-3.2-3.4 3 3 0 0 1 1.5-5.1z') + stroke('M9 17.6v3.4M15 17.6v3.4', 2) + eyehole(17.6, 10.4, 1.1),
   root: solid('M12 13.2C12 8.6 14.6 5.6 19.6 5c0 5-2.8 8-7.6 8.2zM12 13.2c0-3.6-2.2-6-6.6-6.5 0 4 2.2 6.3 6.6 6.5z') + stroke('M12 12v6.5M12 18.5l-4.2 3M12 18.5l4.2 3M12 18.5v3.5', 1.9),
   ice: solid('M12 2l7.5 4.3v11.4L12 22l-7.5-4.3V6.3z', ' opacity="0.35"') + '<path d="M12 2l7.5 4.3v11.4L12 22l-7.5-4.3V6.3zM12 2v20M4.5 6.3 12 10.6l7.5-4.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>',
@@ -3736,6 +3883,7 @@ const AURA_LOOKS = {
   steady: ['anchor', 'Steady'],
   rewind: ['rewind', 'Rewind'],
   blight: ['blight', 'No healing'],
+  leech: ['fang', 'Life steal'],
   sheep: ['sheep', 'Polymorph'],
   root: ['root', 'Root'],
   ice: ['ice', 'Frozen'],
@@ -4119,13 +4267,13 @@ class Hud {
   /** Under the tray: which key types each rune, and the other keys. */
   legend() {
     const labels = LABELS[inputMode]
-    const runes = RUNES.map((rune) => `<span class="legend-key"><span class="key rune ${rune}">${svg(rune)}</span><kbd>${labels[rune] ?? ''}</kbd></span>`)
+    const runes = RUNES.map((rune) => `<span class="legend-key" data-key="${rune}"><span class="key rune ${rune}">${svg(rune)}</span><kbd>${labels[rune] ?? ''}</kbd></span>`)
     const more = [
       ['meta', 'meta'],
       ['ward', 'ward'],
       ['call', 'call'],
       ['drop', 'clear'],
-    ].map(([key, word]) => `<span class="legend-key ${key}"><kbd>${labels[key] ?? ''}</kbd>${word}</span>`)
+    ].map(([key, word]) => `<span class="legend-key ${key}" data-key="${key}"><kbd>${labels[key] ?? ''}</kbd>${word}</span>`)
     $('#legend').innerHTML = `${runes.join('')}<span class="legend-more">${more.join('')}</span>`
     setText($('#ward-key'), labels.ward ?? '')
   }
@@ -4166,13 +4314,15 @@ class Hud {
     count.classList.toggle('full', Boolean(kit) && kit.length >= size)
   }
 
-  clock(frame, tick) {
+  /** The clock: phase, time and healing power. A solo room (`solo`: { label, text }) shows its own label, and its step instead of a time when it has one. */
+  clock(frame, tick, solo = null) {
     const { fightAt, surgeAt, shiftAt, phase } = frame
     const fighting = tick >= fightAt
     const surging = tick >= surgeAt
-    const label = phase === 'over' ? 'Over' : !fighting ? 'Draft' : surging ? 'Surge' : 'Fight'
+    const label = phase === 'over' ? 'Over' : solo ? solo.label : !fighting ? 'Draft' : surging ? 'Surge' : 'Fight'
     setText($('#phase-label'), label)
-    setText($('#clock'), fighting ? clockText((tick - fightAt) / TICK_RATE) : clockText(Math.ceil((fightAt - tick) / TICK_RATE)))
+    const time = fighting ? clockText((tick - fightAt) / TICK_RATE) : clockText(Math.ceil((fightAt - tick) / TICK_RATE))
+    setText($('#clock'), solo?.text ?? (solo && !fighting ? 'Draft' : time))
     const heal = Math.round(dampenAt(tick, fightAt, surgeAt) * 100)
     setText($('#heal-label'), `Heal ${heal}%`)
     const state = phase === 'over' ? 'over' : !fighting ? 'ready' : surging ? 'surge' : 'fight'
@@ -4307,7 +4457,7 @@ function renderLobby(room, you, link) {
       $('b', item).textContent = label
       $('small', item).textContent = note
       if (seat.kind === 'open') item.addEventListener('click', () => link.send('seat', { team, slot }))
-      if (owner && seat.kind !== 'human') {
+      if (owner && seat.kind !== 'human' && room.wait === null) {
         const toggle = make('button', 'btn small ghost', seat.kind === 'bot' ? 'Remove' : '+ Bot')
         toggle.addEventListener('click', (event) => {
           event.stopPropagation()
@@ -4319,28 +4469,47 @@ function renderLobby(room, you, link) {
     })
   }
   const rules = room.rules
-  $('#rules').classList.toggle('locked', !owner)
+  // A quick room runs itself until it starts: its rules are set.
+  const counting = room.wait !== null
+  $('#rules').classList.toggle('locked', !owner || counting)
   $('[data-rule="team0"] b').textContent = rules.teams[0]
   $('[data-rule="team1"] b').textContent = rules.teams[1]
   for (const field of ['book', 'kit', 'life', 'surge', 'skill']) {
     for (const button of $$(`[data-rule="${field}"] button`)) button.classList.toggle('on', String(rules[field]) === button.dataset.value)
   }
+  for (const button of $$('#listed button')) button.classList.toggle('on', (button.dataset.value === 'on') === room.listed)
   $('#start-button').hidden = !owner
-  $('#lobby-wait').hidden = owner
+  setText($('#start-button'), counting ? 'Start now' : 'Start match')
+  $('#lobby-wait').hidden = owner && !counting
+  if (!counting) setText($('#lobby-wait'), 'Waiting for the host to start.')
+  $('#lobby-clock').hidden = !counting
   const watchers = room.watchers.length ? ` Watching: ${room.watchers.map((w) => w.name).join(', ')}.` : ''
-  $('#lobby-note').textContent = `Share the code. Open seats are filled by bots.${watchers}`
+  const listed = room.listed ? ' Anyone can find this match.' : ''
+  $('#lobby-note').textContent = counting ? `Quick match. Waiting for players; bots take the seats still open.${watchers}` : `Share the code. Open seats are filled by bots.${listed}${watchers}`
+  document.body.classList.toggle('counting', counting)
 }
 
-/** Results: title, per-mage numbers and the owner's next step. */
-function renderResult(results, roster, myTeam, owner) {
+/** A quick room counts down in the lobby until it starts itself. */
+function tickLobby(room) {
+  if (room?.wait === null || room?.wait === undefined || room.phase !== 'lobby') return
+  const left = Math.max(0, Math.ceil((room.waitUntil - performance.now()) / 1000))
+  setText($('#lobby-wait'), left ? `Starting in ${left}s` : 'Starting…')
+  setText($('#lobby-clock'), left ? `Starts in ${left}s` : 'Starting…')
+}
+
+/** Results: title, per-mage numbers and the owner's next step. After a lesson: replay it, or go practice. */
+function renderResult(results, roster, myTeam, owner, lesson = false) {
   const card = $('.result')
   const winner = results.winner
   let title = winner === -1 ? 'Draw' : `${TEAMS[winner]} wins`
   if (myTeam !== null && winner !== -1) title = winner === myTeam ? 'Victory' : 'Defeat'
+  if (lesson) title = winner === myTeam ? 'Lesson complete' : 'So close'
   card.classList.toggle('win', myTeam === winner || (myTeam === null && winner !== -1))
   card.classList.toggle('lose', myTeam !== null && winner !== myTeam)
   $('#result-title').textContent = title
-  $('#result-sub').textContent = `Match over · ${clockText(results.ticks / TICK_RATE)}`
+  $('#result-sub').textContent = lesson ? 'Tutorial · Drill your chords in Practice, or find a match' : `Match over · ${clockText(results.ticks / TICK_RATE)}`
+  setText($('#again-button'), lesson ? 'Again' : 'Rematch')
+  setText($('#lobby-button'), lesson ? 'Practice' : 'Lobby')
   const best = {}
   for (const field of ['dealt', 'healed', 'taken', 'casts', 'parries', 'combos']) best[field] = Math.max(...results.mages.map((m) => m[field] ?? 0))
   const rows = [...results.mages].sort((a, b) => a.team - b.team || b.dealt - a.dealt)
@@ -4356,7 +4525,154 @@ function renderResult(results, roster, myTeam, owner) {
   $('#result-wait').hidden = owner
 }
 
-// ─── 13 · Game ──────────────────────────────────────────────────────────────
+/** The guide's keyboard column follows the key binding. */
+function paintGuide() {
+  const label = LABELS.keys
+  const spare = (code, key) => keyCodes[code] === key
+  const arrows = ['ArrowUp', 'ArrowLeft', 'ArrowDown', 'ArrowRight'].every((code, i) => spare(code, ['up', 'left', 'down', 'right'][i]))
+  const text = {
+    moves: `${label.up} ${label.left} ${label.down} ${label.right}${arrows ? ' or arrows' : ''}`,
+    runes: `${label.star} ${label.wave} ${label.flame} ${label.leaf}`,
+    meta: `${label.meta}, or Shift with a rune`,
+    ward: label.ward === '␣' ? 'Space' : label.ward,
+    call: label.call,
+    drop: `${label.drop}${spare('Backspace', 'drop') ? ' or Backspace' : ''}`,
+  }
+  for (const cell of $$('[data-bound]')) setText(cell, text[cell.dataset.bound])
+}
+
+/** The public rooms in the Find players view. A quick room counts down to its start. */
+function renderRooms(rooms, link) {
+  const list = $('#room-list')
+  list.replaceChildren()
+  $('#room-empty').hidden = rooms.length > 0
+  const now = performance.now()
+  for (const room of rooms) {
+    const playing = room.phase !== 'lobby'
+    const item = make('li', `room-row${room.quick ? ' quick' : ''}${playing ? ' playing' : ''}`)
+    item.innerHTML = `<span class="room-code"></span><span class="who"><b></b><small></small></span><span class="room-state"></span>`
+    $('.room-code', item).textContent = room.code
+    $('b', item).textContent = room.quick ? `Quick match ${room.teams[0]} vs ${room.teams[1]}` : `${room.host || 'Someone'}’s match`
+    $('small', item).textContent = `${room.teams[0]} vs ${room.teams[1]} · ${room.people} ${room.people === 1 ? 'player' : 'players'} · ${room.skill} bots`
+    const state = $('.room-state', item)
+    if (room.wait !== null) state.dataset.until = now + room.wait
+    state.textContent = playing ? 'Playing' : room.open ? `${room.open} open` : 'Full'
+    const join = make('button', 'btn small', playing || !room.open ? 'Watch' : 'Join')
+    join.addEventListener('click', () => link.send('join', { code: room.code }))
+    item.appendChild(join)
+    list.appendChild(item)
+  }
+  tickRooms()
+}
+
+/** Quick rooms in the list count down to their start. */
+function tickRooms() {
+  for (const state of $$('#room-list [data-until]')) setText(state, `Starts in ${Math.max(0, Math.ceil((state.dataset.until - performance.now()) / 1000))}s`)
+}
+
+// ─── 13 · Solo ──────────────────────────────────────────────────────────────
+//
+// The lesson and the practice room need no other player, so the page runs
+// them itself: a Runner steps a core Lesson or Drill on the host's clock and
+// hands the Game the same `begin`, `frame` and `end` messages a host would
+// send, through the same JSON, so everything downstream works unchanged.
+// They also work offline.
+
+class Runner {
+  constructor(game, room, kind) {
+    this.game = game
+    this.room = room // a core Lesson or Drill
+    this.kind = kind // 'lesson' | 'drill'
+    this.last = -1
+    this.due = performance.now()
+    this.timer = setInterval(() => this.loop(), TICK_MS / 2)
+  }
+
+  /** Speak as the host would: through JSON, so nothing is shared with the match by accident. */
+  say(type, body) {
+    return JSON.parse(pack(type, body))
+  }
+
+  begin() {
+    this.game.onBegin(this.say('begin', { setup: this.room.match.setup(), you: this.room.me }))
+  }
+
+  /** Run the ticks that are due (at most ten to catch up, so a hidden tab pauses) and send one frame. */
+  loop() {
+    const { match } = this.room
+    const now = performance.now()
+    if (now - this.due > TICK_MS * 10) this.due = now - TICK_MS * 10
+    const events = []
+    while (this.due <= now && match.phase !== 'over') {
+      events.push(...this.room.step())
+      this.due += TICK_MS
+    }
+    if (!events.length && this.last === match.tick) return
+    this.last = match.tick
+    const seen = events.filter((event) => event.only === undefined || event.only === 0)
+    this.game.onFrame(this.say('frame', { frame: packFrame(match.frame(0)), events: seen, kits: match.kits(0) }))
+    if (match.phase === 'over') {
+      this.stop()
+      this.game.onEnd(this.say('end', { results: match.results() }))
+    }
+  }
+
+  press(key, seq) {
+    this.room.press(key, seq)
+  }
+
+  stop() {
+    clearInterval(this.timer)
+  }
+}
+
+/** Lesson text: {key} becomes a key chip, [spell-id] the spell's name and its chord (checked off once taken while drafting). */
+function coachHtml(text, book, kit, drafting) {
+  return attr(text)
+    .replace(/\{(\w+)\}/g, (_, key) => keyChip(key))
+    .replace(/\[([\w-]+)\]/g, (_, id) => {
+      const entry = book.find((e) => e.id === id)
+      const taken = drafting && kit.includes(id) ? ' taken' : ''
+      return `<span class="coach-spell${taken}"><b>${SPELL[id]?.name ?? id}</b>${entry ? `<span class="sigil">${sigilHtml(entry.sigil)}</span>` : ''}</span>`
+    })
+}
+
+/** What the player did in the practice room, to see what to practice. */
+class Tally {
+  constructor() {
+    this.casts = 0
+    this.fizzles = 0
+    this.wards = 0
+    this.parries = 0
+    this.swift = []
+  }
+
+  /** Count one event from the player's own point of view. */
+  note(event, me) {
+    if (event.type === 'fire' && event.mage === me) this.casts++
+    if (event.type === 'cast' && event.mage === me && !event.metas?.includes('quicken')) this.swift.push(event.swift)
+    if (event.type === 'fizzle' && event.mage === me) this.fizzles++
+    if (event.type === 'ward' && event.mage === me) this.wards++
+    if (event.type === 'void' && event.why === 'parry' && event.to === me) this.parries++
+  }
+
+  /** Chord speed: how much of the cast time typing saved, as a share of the most it can, over the last ten casts. */
+  get speed() {
+    const recent = this.swift.slice(-10)
+    if (!recent.length) return null
+    const saved = recent.reduce((sum, swift) => sum + (1 - swift), 0) / recent.length
+    return Math.round((saved / (1 - TIMING.quick)) * 100)
+  }
+
+  render() {
+    setText($('#drill-casts'), this.casts)
+    setText($('#drill-speed'), this.speed === null ? '—' : `${this.speed}%`)
+    setText($('#drill-fizzles'), this.fizzles)
+    setText($('#drill-parries'), this.wards ? `${this.parries}/${this.wards}` : this.parries)
+  }
+}
+
+// ─── 14 · Game ──────────────────────────────────────────────────────────────
 
 /** Names for garb styles in the lobby picker. */
 const GARB_TEXT = { pointed: 'Pointed', wide: 'Wide', hood: 'Hood', circlet: 'Crown', plain: 'Plain', mantle: 'Mantle', banded: 'Bands', split: 'Split', gem: 'Gem', orb: 'Orb', crook: 'Crook', branch: 'Branch' }
@@ -4375,14 +4691,28 @@ function loadGarb() {
   return garb
 }
 
+/** The practice room's last setup, kept across visits: chosen spells and options. */
+function loadDrill() {
+  let saved = null
+  try {
+    saved = JSON.parse(memory.get('chordcast.drill'))
+  } catch {
+    /* not saved yet: a random book */
+  }
+  saved = saved && typeof saved === 'object' ? saved : {}
+  const spells = Array.isArray(saved.spells) ? saved.spells.filter((id) => SPELL[id] && SPELL[id].kind !== 'wisp' && !SPELL[id].team).slice(0, BOOK_MOST) : []
+  return { spells, dummies: [1, 2, 3].includes(saved.dummies) ? saved.dummies : 1, ward: saved.ward === true, free: saved.free === true }
+}
+
 /** Client state. Messages from the host come in; visuals and HUD go out. */
 class Game {
   constructor() {
     this.link = new Link()
+    paintPalette(settings.palette)
     this.stage = new Stage($('#stage'))
     this.plates = new Plates($('#plates'), $('#floats'), $('#aura-tip'))
     this.hud = new Hud()
-    this.sound = new Sound({ muted: memory.get('chordcast.sound') === 'off' })
+    this.sound = new Sound({ muted: memory.get('chordcast.sound') === 'off', effects: settings.effects / 100, music: settings.music / 100 })
     this.garb = loadGarb()
     document.body.classList.toggle('muted', this.sound.muted)
     this.pads = new Pads({ onKey: (key) => this.press(key), onCommand: (name) => this.command(name), onMode: () => this.refreshLabels() })
@@ -4402,20 +4732,29 @@ class Game {
     this.quick = false
     this.demoAt = 0
     this.last = performance.now()
+    this.solo = null // a lesson or a practice room running in the page
+    this.tally = null // practice numbers
+    this.rooms = [] // the public rooms, while finding players
+    this.drill = loadDrill()
+    this.binding = null // the game key waiting for a new keyboard key
     this.hud.onPick = (id) => this.tapPick(id)
 
+    // While a solo room runs, nothing from a host may reach the match view.
     this.link
       .on('welcome', (m) => this.onWelcome(m))
       .on('back', (m) => this.onBack(m))
       .on('moved', () => this.onMoved())
-      .on('room', (m) => this.onRoom(m))
-      .on('begin', (m) => this.onBegin(m))
-      .on('frame', (m) => this.onFrame(m))
-      .on('end', (m) => this.onEnd(m))
+      .on('room', (m) => this.solo || this.onRoom(m))
+      .on('rooms', (m) => this.onRooms(m))
+      .on('begin', (m) => this.solo || this.onBegin(m))
+      .on('frame', (m) => this.solo || this.onFrame(m))
+      .on('end', (m) => this.solo || this.onEnd(m))
       .on('fault', (m) => toast(m.text))
       .on('close', () => this.onClose())
 
+    this.applySettings()
     this.bindViews()
+    this.bindSettings()
     this.showDemo(RULES.teams)
     requestAnimationFrame((now) => this.loop(now))
   }
@@ -4462,14 +4801,43 @@ class Game {
       }
     })
     $('#start-button').addEventListener('click', () => this.link.send('start'))
-    $('#again-button').addEventListener('click', () => this.link.send('again'))
-    $('#lobby-button').addEventListener('click', () => this.link.send('lobby'))
+    // After a lesson these replay it and open the practice room.
+    $('#again-button').addEventListener('click', () => (this.solo ? this.startSolo(this.solo.kind) : this.link.send('again')))
+    $('#lobby-button').addEventListener('click', () => (this.solo ? this.showPractice() : this.link.send('lobby')))
     for (const button of $$('[data-action="leave"]')) button.addEventListener('click', () => this.leave())
+    for (const button of $$('[data-action="home"]')) button.addEventListener('click', () => this.home())
+    for (const button of $$('[data-action="lesson"]')) {
+      button.addEventListener('click', () => {
+        $('#guide').close()
+        this.startSolo('lesson')
+      })
+    }
+    for (const button of $$('[data-action="practice"]')) button.addEventListener('click', () => this.showPractice())
+    for (const button of $$('[data-action="browse"]')) button.addEventListener('click', () => this.showBrowse())
+    $('#lesson-button').classList.toggle('fresh', memory.get('chordcast.lesson') !== 'done')
+    $('#coach-skip').addEventListener('click', () => this.solo?.kind === 'lesson' && this.solo.room.skip())
+    $('#drill-shuffle').addEventListener('click', () => this.solo?.kind === 'drill' && this.solo.room.rewrite())
+    for (const button of $$('#seek-size button')) {
+      button.addEventListener('click', () => {
+        for (const other of $$('#seek-size button')) other.classList.toggle('on', other === button)
+      })
+    }
+    $('#seek-button').addEventListener('click', () => {
+      this.sendName()
+      this.link.send('seek', { size: Number($('#seek-size .on')?.dataset.value ?? 1) })
+    })
+    for (const button of $$('#listed button')) button.addEventListener('click', () => this.link.send('list', { on: button.dataset.value === 'on' }))
+    this.bindDrill()
     for (const button of $$('[data-action="book"]')) button.addEventListener('click', () => this.command('book'))
     for (const button of $$('[data-action="sound"]')) button.addEventListener('click', () => this.command('sound'))
     // A soft tick for every button; the sound toggle speaks for itself.
     document.addEventListener('click', (event) => event.target.closest?.('button:not([data-action="sound"])') && this.sound.play('click'))
-    for (const button of $$('[data-open="guide"]')) button.addEventListener('click', () => $('#guide').showModal())
+    for (const button of $$('[data-open="guide"]')) {
+      button.addEventListener('click', () => {
+        $('#settings').close()
+        $('#guide').showModal()
+      })
+    }
     $('#guide [data-close]').addEventListener('click', () => $('#guide').close())
     $('#guide').addEventListener('click', (event) => event.target === $('#guide') && $('#guide').close())
 
@@ -4507,12 +4875,17 @@ class Game {
     if (innerWidth < 860 || inputMode === 'touch') document.body.classList.add('book-closed')
   }
 
-  sendName() {
+  /** The name in the box, or a remembered stand-in when it is empty. */
+  myName() {
     const raw = $('#name-input').value.trim()
     const name = raw || memory.get('chordcast.fallback') || `Mage ${Math.floor(rand(10, 99))}`
     if (!raw) memory.set('chordcast.fallback', name)
     else memory.set('chordcast.name', raw)
-    this.link.send('hello', { name, garb: this.garb })
+    return name
+  }
+
+  sendName() {
+    this.link.send('hello', { name: this.myName(), garb: this.garb })
   }
 
   /** Pick a hat, robe or staff style; it is saved and sent at once, and the lobby's duel shows it. */
@@ -4554,16 +4927,15 @@ class Game {
   }
 
   leave() {
-    this.link.send('leave')
     // Gone on purpose: a reconnect must not ask for the seat back.
-    if (this.offline) this.token = null
+    if (this.offline && !this.solo) this.token = null
     this.goOnline()
     this.home()
   }
 
   /** Back to the home view with no room. */
   home() {
-    this.room = null
+    this.drop()
     this.setup = null
     this.frame = null
     this.results = null
@@ -4572,6 +4944,282 @@ class Game {
     this.hud.hush()
     this.showDemo(RULES.teams)
     setView('home')
+  }
+
+  /** Let go of whatever we were in: a host's room, a solo room, the public list. */
+  drop() {
+    if (this.room) this.link.send('leave')
+    if (document.body.dataset.view === 'browse') this.link.send('browse', { on: false })
+    this.room = null
+    this.solo?.stop()
+    this.solo = null
+    this.tally = null
+    delete document.body.dataset.solo
+    $('#coach').hidden = true
+    $('#drill-bar').hidden = true
+  }
+
+  // Find players ─────────────────────────────────────────────────────────
+
+  showBrowse() {
+    this.drop()
+    this.sendName()
+    setView('browse')
+    renderRooms(this.rooms, this.link)
+    this.link.send('browse', { on: true })
+  }
+
+  onRooms({ rooms }) {
+    this.rooms = rooms
+    if (document.body.dataset.view === 'browse') renderRooms(rooms, this.link)
+  }
+
+  // Solo rooms ───────────────────────────────────────────────────────────
+
+  /** Start the lesson ('lesson') or a practice room ('drill') in the page. */
+  startSolo(kind) {
+    this.drop()
+    const seed = Math.floor(Math.random() * 2 ** 31)
+    const who = { seed, name: this.myName(), garb: this.garb }
+    const room = kind === 'lesson' ? new Lesson(who) : new Drill({ ...who, ...this.drill })
+    this.solo = new Runner(this, room, kind)
+    this.tally = kind === 'drill' ? new Tally() : null
+    this.coachSign = null
+    document.body.dataset.solo = kind
+    this.solo.begin()
+    setText($('#match-code'), kind === 'lesson' ? 'Tutorial' : 'Practice')
+    $('#drill-bar').hidden = kind !== 'drill'
+    this.tally?.render()
+  }
+
+  showPractice() {
+    this.drop()
+    this.setup = null
+    this.frame = null
+    this.showDemo(RULES.teams)
+    setView('practice')
+    this.renderDrill()
+  }
+
+  /** The practice room's picker: spells by school, and the room's options. */
+  bindDrill() {
+    const schools = $('#drill-schools')
+    for (const school of ['all', ...SCHOOLS]) {
+      const button = make('button', school === 'all' ? 'on' : '', school === 'all' ? 'All' : capitalize(school))
+      button.dataset.value = school
+      if (school !== 'all') button.style.color = `var(--${school})`
+      button.addEventListener('click', () => {
+        this.drillSchool = school
+        this.renderDrill()
+      })
+      schools.appendChild(button)
+    }
+    this.drillSchool = 'all'
+    $('#drill-random').addEventListener('click', () => {
+      const pool = (kind) => CODEX.filter((spell) => spell.kind === kind && !spell.team).sort(() => Math.random() - 0.5)
+      this.drill.spells = [...pool('offense').slice(0, 4), ...pool('defense').slice(0, 4)].map((spell) => spell.id)
+      this.saveDrill()
+    })
+    $('#drill-clear').addEventListener('click', () => {
+      this.drill.spells = []
+      this.saveDrill()
+    })
+    for (const group of $$('[data-drill]')) {
+      for (const button of $$('button', group)) {
+        button.addEventListener('click', () => {
+          const field = group.dataset.drill
+          this.drill[field] = field === 'dummies' ? Number(button.dataset.value) : button.dataset.value === 'on'
+          this.saveDrill()
+        })
+      }
+    }
+    $('#drill-start').addEventListener('click', () => this.startSolo('drill'))
+  }
+
+  saveDrill() {
+    memory.set('chordcast.drill', JSON.stringify(this.drill))
+    this.renderDrill()
+  }
+
+  renderDrill() {
+    const { spells } = this.drill
+    for (const button of $$('#drill-schools button')) button.classList.toggle('on', button.dataset.value === this.drillSchool)
+    const list = $('#drill-spells')
+    const shown = CODEX.filter((spell) => !spell.team && (this.drillSchool === 'all' || spell.school === this.drillSchool))
+    list.replaceChildren(
+      ...shown.map((spell) => {
+        const on = spells.includes(spell.id)
+        const item = make(
+          'li',
+          `drill-spell${on ? ' on' : ''}`,
+          `<span class="school" style="background:var(--${spell.school})"></span><b>${spell.name}</b><small>${spell.kind === 'offense' ? 'Offense' : 'Defense'} · ${'●'.repeat(spell.tier)}</small>`,
+        )
+        item.title = spell.text
+        item.addEventListener('click', () => {
+          if (on) spells.splice(spells.indexOf(spell.id), 1)
+          else if (spells.length >= BOOK_MOST) return toast(`${BOOK_MOST} spells at most.`)
+          else spells.push(spell.id)
+          this.saveDrill()
+        })
+        return item
+      }),
+    )
+    setText($('#drill-count'), spells.length ? `${spells.length} / ${BOOK_MOST}` : 'Random book')
+    for (const group of $$('[data-drill]')) {
+      const value = this.drill[group.dataset.drill]
+      for (const button of $$('button', group)) button.classList.toggle('on', String(typeof value === 'boolean' ? (value ? 'on' : 'off') : value) === button.dataset.value)
+    }
+  }
+
+  /** The lesson's coach: the step, its text with live chords, and the keys and spells it is about, lit up. */
+  coach() {
+    const lesson = this.solo?.kind === 'lesson' ? this.solo.room : null
+    const goal = lesson && this.frame ? lesson.goal : null
+    const panel = $('#coach')
+    if (panel.hidden !== !goal) panel.hidden = !goal
+    const kit = this.kits[this.me] ?? []
+    const drafting = this.frame?.phase === 'ready'
+    const sign = goal ? [goal.index, goal.tip ?? '', kit.join(), inputMode, settings.keys.up, this.setup.book.map((e) => e.sigil.join('')).join()].join('|') : ''
+    if (sign === this.coachSign) return
+    this.coachSign = sign
+    const spells = goal?.spells ?? []
+    const keys = goal?.keys ?? []
+    for (const item of this.hud.rows.values()) item.row.classList.toggle('goal', spells.includes(item.spell.id) && !(drafting && kit.includes(item.spell.id)))
+    for (const el of $$('#legend [data-key], #pads [data-key]')) el.classList.toggle('goal', keys.includes(el.dataset.key))
+    $('#ward-chip').classList.toggle('goal', keys.includes('ward'))
+    if (!goal) return
+    setText($('#coach-step'), `${goal.index + 1} / ${goal.count}`)
+    setText($('#coach-title'), goal.title)
+    $('#coach-text').innerHTML = coachHtml(goal.text, this.setup.book, kit, drafting)
+    $('#coach-tip').hidden = !goal.tip
+    setText($('#coach-tip'), goal.tip ?? '')
+    $('#coach-dots').innerHTML = Array.from({ length: goal.count }, (_, i) => `<i class="${i < goal.index ? 'done' : i === goal.index ? 'now' : ''}"></i>`).join('')
+    $('#coach-skip').hidden = goal.id === 'duel'
+  }
+
+  // Settings ─────────────────────────────────────────────────────────────
+
+  bindSettings() {
+    const dialog = $('#settings')
+    for (const button of $$('[data-open="settings"]')) {
+      button.addEventListener('click', () => {
+        this.showSettings()
+        dialog.showModal()
+      })
+    }
+    $('[data-close]', dialog).addEventListener('click', () => dialog.close())
+    dialog.addEventListener('click', (event) => event.target === dialog && dialog.close())
+    dialog.addEventListener('close', () => this.stopBinding())
+    // Escape while picking a key cancels the pick, not the dialog.
+    dialog.addEventListener('cancel', (event) => {
+      if (!this.binding) return
+      event.preventDefault()
+      this.stopBinding()
+    })
+    for (const input of $$('input[data-set]', dialog)) input.addEventListener('input', () => this.set(input.dataset.set, Number(input.value)))
+    for (const group of $$('.segmented[data-set]', dialog)) {
+      for (const button of $$('button', group)) {
+        button.addEventListener('click', () => {
+          const name = group.dataset.set
+          this.set(name, typeof settings[name] === 'boolean' ? button.dataset.value === 'on' : button.dataset.value)
+        })
+      }
+    }
+    const grid = $('#keys-grid')
+    for (const key of Object.keys(BOUND_KEYS)) {
+      const button = make('button', 'bind', `${keyChip(key)}<span>${KEY_NAMES[key]}</span><kbd></kbd>`)
+      button.dataset.bind = key
+      button.addEventListener('click', () => {
+        this.binding = key
+        this.showSettings()
+      })
+      grid.appendChild(button)
+    }
+    $('#keys-reset').addEventListener('click', () => this.set('keys', { ...BOUND_KEYS }))
+    window.addEventListener('keydown', (event) => this.rebind(event), { capture: true })
+    this.showSettings()
+  }
+
+  /** The settings dialog shows what is set. */
+  showSettings() {
+    for (const input of $$('#settings input[data-set]')) {
+      input.value = settings[input.dataset.set]
+      setText($(`#settings output[data-show="${input.dataset.set}"]`), `${settings[input.dataset.set]}%`)
+    }
+    for (const group of $$('#settings .segmented[data-set]')) {
+      const value = settings[group.dataset.set]
+      const shown = typeof value === 'boolean' ? (value ? 'on' : 'off') : value
+      for (const button of $$('button', group)) button.classList.toggle('on', button.dataset.value === shown)
+    }
+    for (const button of $$('#keys-grid .bind')) {
+      const key = button.dataset.bind
+      button.classList.toggle('waiting', this.binding === key)
+      setText($('kbd', button), this.binding === key ? 'Press a key' : codeLabel(settings.keys[key]))
+    }
+  }
+
+  set(name, value) {
+    settings[name] = value
+    saveSettings()
+    this.applySettings(name)
+    this.showSettings()
+  }
+
+  /** A key pressed while one is being rebound becomes its new key; a key bound elsewhere swaps places. */
+  rebind(event) {
+    if (!this.binding) return
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.code === 'Escape') return this.stopBinding()
+    if (KEPT_CODES.test(event.code)) return toast(`${event.key === ' ' ? event.code : event.key} is kept for the page. Pick another key.`)
+    const keys = { ...settings.keys }
+    const other = Object.keys(keys).find((key) => keys[key] === event.code)
+    if (other) keys[other] = keys[this.binding]
+    keys[this.binding] = event.code
+    this.binding = null
+    this.set('keys', keys)
+  }
+
+  stopBinding() {
+    this.binding = null
+    this.showSettings()
+  }
+
+  /** Put the settings to work: sound, picture, palette and keys. `changed` names one, or all when left out. */
+  applySettings(changed = null) {
+    const all = !changed
+    const stage = this.stage
+    this.sound.setVolume({ effects: settings.effects / 100, music: settings.music / 100 })
+    stage.shaking = settings.shake
+    stage.flashes = settings.flashes
+    if (stage.reduced !== settings.reduced) {
+      stage.reduced = settings.reduced
+      stage.setQuality(stage.tier)
+    }
+    document.body.classList.toggle('reduced', settings.reduced)
+    if (all || changed === 'quality') stage.choose(settings.quality)
+    if (all || changed === 'palette') {
+      paintPalette(settings.palette)
+      stage.repaint()
+      if (changed) this.restage()
+    }
+    if (all || changed === 'keys') {
+      bindKeys()
+      this.refreshLabels()
+      paintGuide()
+    }
+  }
+
+  /** Rebuild the mages on stage, in the palette's colors. */
+  restage() {
+    if (this.setup) {
+      this.stage.setRoster(this.setup.roster, this.myTeam() ?? 0, 'match', this.me)
+      this.frame?.mages.forEach((state, i) => {
+        const figure = this.stage.figure(this.setup.roster[i].id)
+        if (figure) figure.state = state
+      })
+    } else if (this.room?.phase === 'lobby') this.showDemo(this.room.rules.teams, this.room.seats)
+    else this.showDemo(RULES.teams)
   }
 
   // Messages in ──────────────────────────────────────────────────────────
@@ -4617,7 +5265,9 @@ class Game {
   greet() {
     this.sendName()
     const code = $('#code-input').value
-    if (code.length === 4 && !this.room) this.link.send('join', { code })
+    if (code.length === 4 && !this.room && !this.solo) this.link.send('join', { code })
+    // A new connection starts unknown to the host: ask for the public list again.
+    if (document.body.dataset.view === 'browse') this.link.send('browse', { on: true })
   }
 
   /** The socket closed. In a room, keep everything on screen: the host holds the seat while we reconnect. */
@@ -4634,6 +5284,7 @@ class Game {
   }
 
   onRoom({ room }) {
+    room.waitUntil = room.wait === null ? null : performance.now() + room.wait
     $('#match-code').textContent = room.code
     const fresh = room.code !== this.room?.code
     const teamsChanged = String(room.rules.teams) !== String(this.room?.rules.teams)
@@ -4710,6 +5361,10 @@ class Game {
       if (figure) figure.state = state
     })
     for (const event of events) this.onEvent(event)
+    if (this.tally) {
+      for (const event of events) this.tally.note(event, this.me)
+      if (events.length) this.tally.render()
+    }
     this.plates.fill(frame, roster)
     this.hud.alive(frame, roster)
   }
@@ -4724,9 +5379,14 @@ class Game {
         if (figure.team === winner && !figure.state?.down) this.stage.looks.confetti(figure.anchor('head'), figure.glow)
       }
     }
+    if (this.solo?.kind === 'lesson') {
+      memory.set('chordcast.lesson', 'done')
+      $('#lesson-button').classList.remove('fresh')
+    }
     const show = () => {
       if (this.results !== results || !this.setup) return
-      renderResult(results, this.setup.roster, this.myTeam(), this.room?.owner === this.you)
+      const lesson = this.solo?.kind === 'lesson'
+      renderResult(results, this.setup.roster, this.myTeam(), Boolean(this.solo) || this.room?.owner === this.you, lesson)
       setView('result')
     }
     // Let the last blows land first, unless we joined after the match ended.
@@ -4763,10 +5423,11 @@ class Game {
   // Input ────────────────────────────────────────────────────────────────
 
   press(key) {
-    if (!this.me || !this.frame || this.offline || document.body.dataset.view !== 'match') return
+    if (!this.me || !this.frame || (this.offline && !this.solo) || document.body.dataset.view !== 'match') return
     const seq = ++this.seq
     this.pending.push({ seq, key })
-    this.link.send('press', { key, seq })
+    if (this.solo) this.solo.press(key, seq)
+    else this.link.send('press', { key, seq })
     this.keySound(key)
   }
 
@@ -4796,7 +5457,7 @@ class Game {
   }
 
   buzz(strength, ms) {
-    this.sound.rumble(strength, ms, { touch: inputMode === 'touch' })
+    if (settings.haptics) this.sound.rumble(strength, ms, { touch: inputMode === 'touch' })
   }
 
   /** Music follows the view: calm menus, and a fight loop that rises with the surge. */
@@ -4811,6 +5472,7 @@ class Game {
     const tick = this.serverTick()
     const surge = tick - this.frame.surgeAt
     this.sound.music('fight')
+    if (this.solo) return this.sound.intensity(phase === 'ready' ? 0.15 : 0.35)
     this.sound.intensity(phase === 'ready' ? 0.15 : surge >= 0 ? Math.min(1, 0.8 + surge / (TICK_RATE * 60)) : 0.5)
   }
 
@@ -4930,6 +5592,9 @@ class Game {
     this.pads.poll()
     this.demo()
     this.tuneMusic()
+    const view = document.body.dataset.view
+    if (view === 'lobby') tickLobby(this.room)
+    if (view === 'browse') tickRooms()
     if (this.setup && this.frame) this.drawMatch()
     this.stage.band = this.freeBand()
     this.stage.render(dt)
@@ -4949,7 +5614,12 @@ class Game {
     if (this.band && now - this.bandAt < 500) return this.band
     // Leave room under the near row's feet for its plates (cast bar, chord and auras).
     // The tray (with its status row) sits above the touch pads, so it bounds the band either way.
-    const bottom = !this.me ? height - 8 : $('#tray').getBoundingClientRect().top - 56
+    // A solo room's coach or numbers sit under the top bar: the picture fits below them, with room for the far
+    // row's plates, and may shrink to do so.
+    const panel = [$('#coach'), $('#drill-bar')].find((el) => !el.hidden)
+    const top = panel ? Math.max(64, panel.getBoundingClientRect().bottom + 52) : 64
+    this.stage.squeeze = panel ? 0.4 : 0.75
+    const bottom = !this.me ? height - 8 : $('#tray').getBoundingClientRect().top - (panel ? 64 : 56)
     let [left, right] = [0, width]
     if (document.body.dataset.phase !== 'ready') {
       const offense = $('.page.offense').getBoundingClientRect()
@@ -4957,7 +5627,7 @@ class Game {
       if (offense.right < width / 2) left = Math.max(0, offense.right + 12)
       if (defense.left > width / 2) right = Math.min(width, defense.left - 12)
     }
-    this.band = [64, Math.max(height * 0.5, bottom), left, right]
+    this.band = [top, Math.max(height * 0.5, bottom), left, right]
     this.bandAt = now
     return this.band
   }
@@ -4967,7 +5637,10 @@ class Game {
     const { frame, setup } = this
     const drafting = frame.phase === 'ready'
     const now = this.stage.time
-    this.hud.clock(frame, tick)
+    const goal = this.solo?.kind === 'lesson' ? this.solo.room.goal : null
+    const solo = !this.solo ? null : goal ? { label: 'Tutorial', text: `${goal.index + 1}/${goal.count}` } : { label: this.solo.kind === 'lesson' ? 'Tutorial' : 'Practice', text: null }
+    this.hud.clock(frame, tick, solo)
+    this.coach()
     // A chime as the shift warning appears.
     const shift = Math.min(frame.shiftAt, frame.surgeAt > tick ? frame.surgeAt : Infinity)
     if (frame.phase === 'fight' && shift > tick && shift - tick <= 8 * TICK_RATE && this.warned !== shift) {
@@ -5008,6 +5681,8 @@ const shapedText = (metas) => (metas ?? []).map((id) => METAS[id].name).join(' '
 /** Event type → visual reaction. `this` is the Game. */
 const EVENT_VISUALS = {
   start() {
+    if (this.solo?.kind === 'lesson') return
+    if (this.solo) return this.hud.say('Practice', 'No clock. The dummies never fall')
     this.hud.say('Fight!', 'Your kit is set. Chords fire on the last rune')
   },
   cast(e) {
@@ -5055,7 +5730,7 @@ const EVENT_VISUALS = {
     if (e.direct && e.amount > 0) this.stage.looks.burst(figure.anchor('chest'), e.school, 0.35)
     if (e.soak > 0 && !e.amount) this.floatAt(e.to, `${e.soak} absorbed`, 'small note')
     else if (e.amount > 0) this.floatAt(e.to, `${e.amount}${e.soak ? ` (${e.soak})` : ''}`, `${e.school} ${e.amount >= lifeMax * 0.2 ? 'big' : e.direct ? '' : 'small'}`)
-    if (e.to === this.me && e.amount > lifeMax * 0.06) {
+    if (e.to === this.me && e.amount > lifeMax * 0.06 && settings.flashes) {
       document.body.classList.add('hurt')
       setTimeout(() => document.body.classList.remove('hurt'), 140)
     }
@@ -5102,6 +5777,7 @@ const EVENT_VISUALS = {
     this.stage.shake(0.2)
     const mine = this.me && (this.kits[this.me] ?? [])
     const hits = mine ? e.changes.filter((c) => mine.includes(c.id)).length : e.changes.length
+    if (this.solo) return this.hud.say('New chords', 'Every spell has a new chord. The book shows them')
     this.hud.say('Rift shift', mine ? `${hits} of your chords changed` : `${e.changes.length} chords changed`)
   },
   call(e) {
@@ -5286,7 +5962,7 @@ const EVENT_SOUNDS = {
   },
 }
 
-// ─── 14 · Boot ──────────────────────────────────────────────────────────────
+// ─── 15 · Boot ──────────────────────────────────────────────────────────────
 
 const game = new Game()
 window.chordcast = game

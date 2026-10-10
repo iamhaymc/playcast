@@ -4,19 +4,22 @@ Real-time arena magic duels where every action is a chord of keys. A few moves p
 
 ![A 2 vs 2 fight](shots/08-battle.png)
 
-- **137 spells** drawn from tabletop and MMO classics: Fireball, Polymorph, Counterspell, Lifebloom, Living Bomb, Death Ward and more.
+- **151 spells** drawn from tabletop and MMO classics: Fireball, Polymorph, Counterspell, Lifebloom, Living Bomb, Death Ward and more.
 - **Draft, then fight.** Each player drafts a private kit of 8 from a 16-spell book by typing the chords.
 - **Skill on top.** Metamagic (Quicken, Twin, Empower, Extend), a timed ward that turns spells back, school reactions (Melt, Shatter, Eclipse…), a flow streak, sticky aim and team calls.
 - **Fair in big fights.** Repeat stuns diminish, and fallen mages keep playing as wisps.
 - **A field you can read.** A moonlit ruin of worn stone, brass and broken columns where nothing outside the field glows, so spells, mages and their status are the brightest things on screen. Soft shadows, spell light on the stone and weathered materials give it grit.
 - **Readable in big fights.** Your spells and the spells aimed at you draw at full strength; the rest fade as the field fills, and each mage's particles are capped. Auras show as icons tinted by school, with a ring that runs down; hover or long-press one for what it does.
 - **Your own mage.** Pick a hat, robe and staff in the lobby so you stand out in an 8 vs 8. Casting shows: the staff rises, the free hand glows in the spell's school, and the mage thrusts and recoils as it fires.
+- **Learn by playing.** A guided tutorial walks you through drafting, aiming, casting, healing through your aim, warding, metamagic and a reaction, then a short duel. A practice room has target dummies that never fall, no clock, the spells you choose, an optional ward drill and free mana, and counts your casts, fizzles, parries and chord speed. Both run in the page, so they work offline.
 - **Teams of any size**, 1 vs 1 by default, up to 8 vs 8. Bots fill open seats and use every mechanic.
+- **Play with strangers.** A quick match seats you with others who want the same size (1 vs 1 to 3 vs 3) and fills the seats still open with bots when its 15-second wait runs out. Public rooms are listed for anyone to join or watch.
 - **Host and join with a code.** Share a four-letter code or a link.
 - **Keyboard, gamepad and touch** all use the same twelve keys.
 - **Sound that teaches.** Every rune has its own note, so each chord is a tune you learn by ear, and a spell flying at you rises in pitch until it lands. School-voiced spells, music that builds with the surge, and rumble on gamepads and phones. All synthesized: nothing to download.
-- **One authority.** The host runs every match and sends the same frames to everyone, as small compressed deltas.
+- **One authority.** The host runs every match with people in it and sends the same frames to everyone, as small compressed deltas. The tutorial and practice run the same engine in the page.
 - **Drop and come back.** Lose your connection or reload the page and a bot holds your seat for a minute while you reconnect.
+- **Settings.** Effects and music volume, haptics, quality, screen shake, softer flashes, reduced motion, a colorblind palette and keyboard rebinding, all remembered.
 - **Swappable bots.** A deterministic brain today; any `think(view)` object, sync or async, can replace it.
 
 ## Quickstart
@@ -43,6 +46,8 @@ The browser test uses Playwright's Chromium. If it is not installed yet, run `np
 | Cancel | Q or Backspace | LB | Center button |
 | Book | Tab | Start | Book button |
 | Sound on or off | M | | Speaker button |
+
+Every keyboard key can be rebound in the settings (the gear). New? Start with **Tutorial** on the home page, then drill in **Practice**.
 
 1. **Draft.** Type a spell's chord (or tap it) to put it in your kit. Only your kit can be cast.
 2. **Aim.** Up jumps to the foe row, down comes back (again to snap to you), left and right walk a row. The aim stays between chords; ally spells aimed at a foe land on you.

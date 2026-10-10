@@ -9,7 +9,9 @@
  *   6  Match      top bar, banner, plates, floats, book, tray, pads
  *   7  Results
  *   8  Guide and toast
- *   9  Small screens
+ *   9  Find players, practice and the lesson
+ *  10  Settings and palettes
+ *  11  Small screens
  */
 
 /* ─── 1 · Tokens ─────────────────────────────────────────────────────────── */
@@ -108,6 +110,8 @@ body {
 /* Menus sit centered: darken the middle behind the card, leave the duel at the sides clear. */
 body[data-view='home'] #veil,
 body[data-view='lobby'] #veil,
+body[data-view='browse'] #veil,
+body[data-view='practice'] #veil,
 body[data-view='result'] #veil {
   background: radial-gradient(42% 70% at 50% 50%, rgba(5, 6, 9, 0.6) 0%, rgba(5, 6, 9, 0.2) 70%, rgba(5, 6, 9, 0.35) 100%);
 }
@@ -125,6 +129,8 @@ body.hurt #veil {
 
 body[data-view='home'] #home,
 body[data-view='lobby'] #lobby,
+body[data-view='browse'] #browse,
+body[data-view='practice'] #practice,
 body[data-view='match'] #match,
 body[data-view='result'] #result,
 body[data-view='result'] #match {
@@ -476,23 +482,27 @@ body[data-input='touch'] .key[data-label]::after {
 
 /* One card in the middle; the demo duel plays on both sides of it. */
 #home,
-#lobby {
+#lobby,
+#browse,
+#practice {
   overflow-y: auto;
   padding: 24px var(--gutter);
 }
 
 /* Flex with auto margins centers the card and still scrolls when it is taller than the screen. */
 body[data-view='home'] #home,
-body[data-view='lobby'] #lobby {
+body[data-view='lobby'] #lobby,
+body[data-view='browse'] #browse,
+body[data-view='practice'] #practice {
   display: flex;
 }
 
 .hero {
   margin: auto;
   width: min(440px, 100%);
-  padding: 32px;
+  padding: 30px 32px;
   display: grid;
-  gap: 20px;
+  gap: 18px;
   animation: rise 0.6s var(--ease) both;
 }
 
@@ -579,6 +589,30 @@ body[data-view='lobby'] #lobby {
 .join {
   display: flex;
   gap: 10px;
+}
+
+/* A first visit is pointed at the tutorial. */
+.btn .badge {
+  display: none;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  vertical-align: 1px;
+  color: #061019;
+  background: var(--gold);
+}
+
+.btn.fresh {
+  border-color: rgba(255, 209, 102, 0.6);
+  box-shadow: 0 0 22px rgba(255, 209, 102, 0.18);
+}
+
+.btn.fresh .badge {
+  display: inline-block;
 }
 
 .join input {
@@ -2567,9 +2601,616 @@ body.offline #stage {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+
+  /* Banners and floating numbers still have to be read: they fade in and out in place. */
+  .banner.show {
+    animation: still 1.8s linear both !important;
+  }
+
+  .float {
+    animation: still 1.15s linear both !important;
+  }
 }
 
-/* ─── 9 · Small screens ──────────────────────────────────────────────────── */
+/* Reduced motion in the settings calms the page the same way. */
+body.reduced *,
+body.reduced *::before,
+body.reduced *::after {
+  animation-duration: 0.01ms !important;
+  transition-duration: 0.01ms !important;
+}
+
+body.reduced .banner.show {
+  animation: still 1.8s linear both !important;
+}
+
+body.reduced .float {
+  animation: still 1.15s linear both !important;
+}
+
+@keyframes still {
+  0% {
+    opacity: 0;
+  }
+  10%,
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+/* ─── 9 · Find players, practice and the lesson ──────────────────────────── */
+
+.browse,
+.practice {
+  width: min(640px, 100%);
+  margin: auto;
+  padding: 28px;
+  display: grid;
+  gap: 20px;
+  animation: rise 0.5s var(--ease) both;
+}
+
+.practice {
+  width: min(760px, 100%);
+  padding: 24px 28px;
+  gap: 16px;
+}
+
+.practice .rules {
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  padding-top: 16px;
+}
+
+.browse h2,
+.practice h2 {
+  font-size: 28px;
+}
+
+.lobby-head .note {
+  max-width: 460px;
+  text-wrap: balance;
+}
+
+.room-list {
+  display: grid;
+  gap: 10px;
+}
+
+.room-list ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.room-list .note[hidden] {
+  display: none;
+}
+
+.room-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.room-row.quick {
+  border-color: rgba(255, 209, 102, 0.35);
+}
+
+.room-row.playing {
+  opacity: 0.75;
+}
+
+.room-code {
+  font: 800 15px var(--mono);
+  letter-spacing: 0.16em;
+  color: var(--dawn);
+}
+
+.room-row .who {
+  flex: 1;
+  min-width: 0;
+}
+
+.room-row .who b {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.room-row .who small,
+.room-state {
+  color: var(--mute);
+  font-size: 12px;
+}
+
+.room-row.quick .room-state {
+  color: var(--gold);
+}
+
+/* The practice room's picker: a school filter, then every spell as a chip. */
+.drill-filter {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+#drill-schools {
+  flex-wrap: wrap;
+}
+
+#drill-schools button {
+  padding: 6px 9px;
+  font-size: 12px;
+}
+
+#drill-schools button:not(.on) {
+  opacity: 0.8;
+}
+
+.drill-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.drill-pick b {
+  font: 700 13px var(--mono);
+  color: var(--gold);
+  margin-right: 4px;
+}
+
+.drill-spells {
+  list-style: none;
+  margin: 0;
+  padding: 2px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(164px, 1fr));
+  gap: 6px;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.drill-spell {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.035);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.drill-spell:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.drill-spell .school {
+  grid-row: span 2;
+  width: 8px;
+  height: 26px;
+  border-radius: 4px;
+}
+
+.drill-spell b {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.drill-spell small {
+  font-size: 11px;
+  color: var(--mute);
+}
+
+.drill-spell.on {
+  background: rgba(255, 209, 102, 0.12);
+  border-color: rgba(255, 209, 102, 0.6);
+}
+
+.drill-spell.on b::after {
+  content: ' ✓';
+  color: var(--gold);
+}
+
+.lobby-foot .note[hidden],
+#lobby-wait[hidden] {
+  display: none;
+}
+
+.lobby-clock {
+  margin-top: 6px;
+  padding: 4px 14px;
+  border-radius: 999px;
+  font: 700 14px var(--mono);
+  color: var(--gold);
+  background: rgba(255, 209, 102, 0.12);
+  border: 1px solid rgba(255, 209, 102, 0.4);
+}
+
+.lobby-clock[hidden] {
+  display: none;
+}
+
+body.counting #lobby-wait {
+  color: var(--gold);
+  font-weight: 700;
+}
+
+/* The lesson's coach and the practice room's numbers sit under the top bar. */
+.coach,
+.drill-bar {
+  position: absolute;
+  top: calc(var(--top) + 54px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(600px, calc(100vw - 32px));
+  pointer-events: auto;
+}
+
+.coach[hidden],
+.drill-bar[hidden] {
+  display: none;
+}
+
+.coach {
+  display: grid;
+  gap: 4px;
+  padding: 10px 16px 12px;
+  border-color: rgba(255, 209, 102, 0.35);
+  animation: rise 0.35s var(--ease) both;
+}
+
+.coach header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.coach header .eyebrow {
+  color: var(--gold);
+}
+
+.coach-dots {
+  flex: 1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.coach-dots i {
+  width: 14px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.coach-dots i.done {
+  background: rgba(255, 209, 102, 0.55);
+}
+
+.coach-dots i.now {
+  background: var(--gold);
+}
+
+.coach h3 {
+  font-size: 16px;
+}
+
+.coach p {
+  margin: 0;
+  color: var(--dim);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.coach .key,
+.coach .meta-chip {
+  width: 24px;
+  height: 24px;
+  font-size: 13px;
+  vertical-align: middle;
+  margin: 0 1px;
+}
+
+.coach-spell {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 2px;
+  padding: 0 7px 0 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  white-space: nowrap;
+  vertical-align: middle;
+  line-height: 22px;
+}
+
+.coach-spell b {
+  color: var(--ink);
+}
+
+.coach-spell .sigil {
+  display: inline-flex;
+  gap: 1px;
+}
+
+.coach-spell .sigil [data-glyph] {
+  width: 15px;
+  height: 15px;
+  font-size: 13px;
+}
+
+.coach-spell.taken {
+  opacity: 0.5;
+}
+
+.coach-spell.taken b::after {
+  content: ' ✓';
+  color: var(--gold);
+}
+
+.coach-tip {
+  font-size: 13px;
+  color: var(--gold) !important;
+}
+
+.coach-tip[hidden] {
+  display: none;
+}
+
+.drill-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 8px 10px 8px 16px;
+  border-radius: 999px;
+}
+
+.drill-stats {
+  display: flex;
+  gap: 18px;
+}
+
+.drill-stats > span {
+  display: grid;
+  line-height: 1.15;
+}
+
+.drill-stats small {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mute);
+}
+
+.drill-stats b {
+  font: 700 16px var(--mono);
+}
+
+/* What the lesson's step is about glows: the spells to take or cast, the keys to press. */
+.spell.goal,
+.legend-key.goal,
+.ward-chip.goal,
+.pads [data-key].goal {
+  animation: goal 1.1s ease-in-out infinite alternate;
+}
+
+.spell.goal {
+  border-color: rgba(255, 209, 102, 0.8);
+}
+
+.legend-key.goal {
+  color: var(--gold);
+}
+
+@keyframes goal {
+  from {
+    box-shadow: 0 0 0 rgba(255, 209, 102, 0);
+  }
+  to {
+    box-shadow: 0 0 0 2px rgba(255, 209, 102, 0.75), 0 0 22px rgba(255, 209, 102, 0.45);
+  }
+}
+
+/* In a solo room the clock shows the lesson's step or the practice time, with no healing to watch. */
+body[data-solo] #heal-label {
+  visibility: hidden;
+}
+
+body[data-solo] .banner {
+  top: 38%;
+}
+
+/* The lesson's coach says what to draft, so the book sits under it. */
+body[data-solo='lesson'] .book-intro {
+  display: none !important;
+}
+
+body[data-solo='lesson'][data-phase='ready'] .book {
+  top: calc(var(--top) + 220px);
+}
+
+.guide-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+body:not([data-view='home']) .lesson-link {
+  display: none;
+}
+
+/* ─── 10 · Settings and palettes ─────────────────────────────────────────── */
+
+.settings {
+  width: min(560px, calc(100vw - 32px));
+}
+
+.set-group {
+  display: grid;
+  gap: 10px;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+}
+
+.set-group h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.set-row {
+  display: grid;
+  grid-template-columns: 120px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.set-row .segmented {
+  grid-column: 2 / 4;
+  justify-self: start;
+  flex-wrap: wrap;
+}
+
+.set-row input[type='range'] {
+  width: 100%;
+  accent-color: var(--gold);
+}
+
+.set-row output {
+  min-width: 44px;
+  text-align: right;
+  font: 700 13px var(--mono);
+  color: var(--dim);
+}
+
+.set-foot {
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.keys-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 6px;
+}
+
+.bind {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--ink);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bind .key {
+  width: 26px;
+  height: 26px;
+  font-size: 14px;
+}
+
+.bind .key::after {
+  display: none;
+}
+
+.bind span:not(.key) {
+  flex: 1;
+}
+
+.bind kbd {
+  min-width: 26px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line-hi);
+  background: #0d0e14;
+  font: 700 12px var(--mono);
+  text-align: center;
+}
+
+.bind.waiting {
+  border-color: var(--gold);
+}
+
+.bind.waiting kbd {
+  color: var(--gold);
+  animation: blink 0.8s ease-in-out infinite alternate;
+}
+
+/* Colorblind: blue and amber teams, a bluish-green for nature and good news, vermilion for harm, yellow for holy. */
+body[data-palette='colorblind'] {
+  --dawn: #4da3ff;
+  --dusk: #ffa31f;
+  --good: #3fd9c0;
+  --bad: #ff6a1a;
+  --life: #4dc3ff;
+  --life-low: #ff6a1a;
+  --leaf: #3fd9c0;
+  --flame: #ff6a1a;
+  --fire: #ff7a1a;
+  --nature: #3fd9c0;
+  --holy: #f5e14a;
+}
+
+body[data-palette='colorblind'] .bar.life .fill {
+  background: linear-gradient(90deg, #1d7fd1, var(--life));
+}
+
+body[data-palette='colorblind'] .bar.life.low .fill {
+  background: linear-gradient(90deg, #c4410a, var(--life-low));
+}
+
+body[data-palette='colorblind'] .page.offense h4 {
+  color: #ffb27a;
+}
+
+body[data-palette='colorblind'] .page.defense h4 {
+  color: #8fd8ff;
+}
+
+body[data-palette='colorblind'] .key.rune.leaf {
+  background: rgba(63, 217, 192, 0.12);
+  border-color: rgba(63, 217, 192, 0.45);
+}
+
+body[data-palette='colorblind'] .key.rune.flame {
+  background: rgba(255, 106, 26, 0.12);
+  border-color: rgba(255, 106, 26, 0.45);
+}
+
+/* ─── 11 · Small screens ─────────────────────────────────────────────────── */
 
 @media (max-width: 1100px) {
   .page {
@@ -2683,6 +3324,15 @@ body.offline #stage {
     margin-bottom: 12px;
   }
 
+  body[data-solo='lesson'][data-phase='ready'] .book {
+    top: calc(var(--top) + 240px);
+  }
+
+  .browse,
+  .practice {
+    padding: 22px;
+  }
+
   .plate {
     width: 116px;
     margin-left: -58px;
@@ -2706,6 +3356,19 @@ body.offline #stage {
   .split {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .split.pair {
+    flex-direction: row;
+  }
+
+  .split.pair .btn {
+    padding: 12px 10px;
+  }
+
+  /* Four icons fit beside the clock: How to play moves into the settings. */
+  .topbar [data-open='guide'] {
+    display: none;
   }
 
   .split .segmented button {
@@ -2781,5 +3444,40 @@ body.offline #stage {
   .chord {
     min-height: 50px;
     padding: 8px 10px;
+  }
+
+  .coach,
+  .drill-bar {
+    top: calc(var(--top) + 46px);
+  }
+
+  .coach {
+    padding: 10px 12px 12px;
+  }
+
+  .coach h3 {
+    font-size: 16px;
+  }
+
+  .coach p {
+    font-size: 13px;
+  }
+
+  .drill-bar {
+    border-radius: 16px;
+    padding: 8px 10px;
+  }
+
+  .drill-stats {
+    gap: 10px;
+  }
+
+  .drill-stats b {
+    font-size: 14px;
+  }
+
+  .set-row {
+    grid-template-columns: 84px 1fr auto;
+    gap: 10px;
   }
 }

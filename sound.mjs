@@ -14,7 +14,7 @@
  *   2  Synth   tones and noise, routed, panned and counted
  *   3  Voices  every sound, built from tones and noise
  *   4  Music   the sequencer and its two loops
- *   5  Sound   the public object: unlock, mute, play, music and rumble
+ *   5  Sound   the public object: unlock, mute, volume, play, music and rumble
  */
 
 // ─── 1 · Kit ────────────────────────────────────────────────────────────────
@@ -508,8 +508,9 @@ class Music {
  * goes quiet. `played` counts voices started, for tests.
  */
 export class Sound {
-  constructor({ muted = false } = {}) {
+  constructor({ muted = false, effects = 1, music = 1 } = {}) {
     this.muted = muted
+    this.volume = { effects, music } // 0–1 each, set in the settings
     this.ctx = null
     this.wanted = null // the music mode asked for, applied once audio starts
     this.level = 0
@@ -543,9 +544,9 @@ export class Sound {
       wet.gain.value = 0.22
       room.connect(wet).connect(this.master)
       this.sfx = ctx.createGain()
-      this.sfx.gain.value = 0.9
+      this.sfx.gain.value = 0.9 * this.volume.effects
       this.score = ctx.createGain()
-      this.score.gain.value = 0.32
+      this.score.gain.value = 0.32 * this.volume.music
       for (const bus of [this.sfx, this.score]) {
         bus.connect(this.master)
         bus.connect(room)
@@ -573,6 +574,14 @@ export class Sound {
   setMuted(muted) {
     this.muted = muted
     this.wake()
+  }
+
+  /** Effects and music loudness, 0–1 each. */
+  setVolume({ effects = this.volume.effects, music = this.volume.music } = {}) {
+    this.volume = { effects, music }
+    if (!this.ctx) return
+    this.sfx.gain.setTargetAtTime(0.9 * effects, this.ctx.currentTime, 0.02)
+    this.score.gain.setTargetAtTime(0.32 * music, this.ctx.currentTime, 0.02)
   }
 
   /** 'menu', 'fight' or null for silence. Asking for the current mode does nothing. */
