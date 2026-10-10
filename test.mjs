@@ -696,7 +696,7 @@ async function shoot(page, name, prepare = null, ready = null) {
   // Bots can stun or polymorph the player mid-chord, which clears it: try again a few times.
   for (let attempt = 0; prepare && attempt < 4; attempt++) {
     await prepare()
-    await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
+    await page.evaluate(() => new Promise((done) => requestAnimationFrame(done)))
     if (!ready || (await page.evaluate(ready))) break
   }
   await page.screenshot({ path: new URL(`${name}.png`, SHOTS).pathname })
@@ -792,6 +792,7 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
     await ana.waitForTimeout(600)
     const keys = await offenseChord(ana)
     const typed = () => window.chordcast.chordView().keys.length > 3
+    const shown = () => document.querySelectorAll('#tray-keys > *').length > 2
     await shoot(
       ana,
       '06-chord',
@@ -801,7 +802,7 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
         for (const key of [keys[0], 'meta', 'flame', ...keys.slice(1, -1)]) await ana.keyboard.press(KEYBOARD[key])
         await ana.waitForFunction(typed, null, { timeout: 5000 }).catch(() => {})
       },
-      typed,
+      shown,
     )
     // Slow software rendering can outlast the chord timeout, so clear and type it whole.
     await ana.keyboard.press(KEYBOARD.drop)
