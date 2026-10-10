@@ -18,11 +18,11 @@
   color-scheme: dark;
 
   --ink: #eef0ff;
-  --dim: #a7acd6;
-  --mute: #6d729c;
-  --void: #07061a;
-  --glass: rgba(16, 14, 40, 0.62);
-  --glass-hi: rgba(34, 30, 78, 0.78);
+  --dim: #a9aec2;
+  --mute: #6e7386;
+  --void: #07080b;
+  --glass: rgba(13, 14, 19, 0.68);
+  --glass-hi: rgba(30, 32, 42, 0.8);
   --line: rgba(255, 255, 255, 0.09);
   --line-hi: rgba(255, 255, 255, 0.2);
 
@@ -79,7 +79,7 @@ body {
 }
 
 body {
-  background: radial-gradient(120% 90% at 50% 10%, #2a1458 0%, #110a32 45%, var(--void) 100%);
+  background: radial-gradient(120% 90% at 50% 10%, #1a1d26 0%, #0c0d12 45%, var(--void) 100%);
   color: var(--ink);
   font: 15px/1.45 var(--font);
   -webkit-font-smoothing: antialiased;
@@ -101,7 +101,7 @@ body {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  background: radial-gradient(80% 70% at 50% 50%, transparent 55%, rgba(5, 3, 18, 0.55) 100%);
+  background: radial-gradient(80% 70% at 50% 50%, transparent 50%, rgba(4, 5, 8, 0.65) 100%);
   transition: background 0.4s;
 }
 
@@ -109,7 +109,7 @@ body {
 body[data-view='home'] #veil,
 body[data-view='lobby'] #veil,
 body[data-view='result'] #veil {
-  background: radial-gradient(42% 70% at 50% 50%, rgba(6, 4, 22, 0.6) 0%, rgba(6, 4, 22, 0.2) 70%, rgba(6, 4, 22, 0.35) 100%);
+  background: radial-gradient(42% 70% at 50% 50%, rgba(5, 6, 9, 0.6) 0%, rgba(5, 6, 9, 0.2) 70%, rgba(5, 6, 9, 0.35) 100%);
 }
 
 body.hurt #veil {
@@ -288,7 +288,7 @@ input {
 .join input {
   width: 100%;
   border: 1px solid var(--line-hi);
-  background: rgba(5, 4, 20, 0.5);
+  background: rgba(5, 6, 9, 0.5);
   border-radius: 12px;
   padding: 12px 14px;
   outline: none;
@@ -307,7 +307,7 @@ input {
   gap: 2px;
   border-radius: 999px;
   border: 1px solid var(--line);
-  background: rgba(5, 4, 20, 0.45);
+  background: rgba(5, 6, 9, 0.45);
 }
 
 .segmented button {
@@ -333,7 +333,7 @@ input {
   align-items: center;
   border-radius: 999px;
   border: 1px solid var(--line);
-  background: rgba(5, 4, 20, 0.45);
+  background: rgba(5, 6, 9, 0.45);
 }
 
 .stepper button {
@@ -461,7 +461,7 @@ input {
   height: 15px;
   padding: 0 3px;
   border-radius: 5px;
-  background: #0d0b26;
+  background: #0d0e14;
   border: 1px solid var(--line-hi);
   color: var(--dim);
   font: 700 9px/13px var(--mono);
@@ -535,7 +535,7 @@ body[data-view='lobby'] #lobby {
   gap: 10px;
   border-radius: 14px;
   border: 1px solid var(--line);
-  background: rgba(5, 4, 20, 0.35);
+  background: rgba(5, 6, 9, 0.35);
 }
 
 .anatomy-row {
@@ -1006,7 +1006,7 @@ body[data-phase='ready'] #plates {
   gap: 3px;
   padding: 6px 8px 7px;
   border-radius: 12px;
-  background: rgba(10, 8, 30, 0.6);
+  background: rgba(9, 10, 14, 0.6);
   border: 1px solid var(--line);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
@@ -1274,7 +1274,7 @@ body[data-phase='ready'] #plates {
   border-radius: 50%;
   color: color-mix(in srgb, var(--tint, var(--arcane)) 85%, #fff);
   background:
-    radial-gradient(closest-side, color-mix(in srgb, var(--tint, var(--arcane)) 20%, #0b0820) calc(100% - 2.5px), transparent calc(100% - 2px)),
+    radial-gradient(closest-side, color-mix(in srgb, var(--tint, var(--arcane)) 20%, #0a0b10) calc(100% - 2.5px), transparent calc(100% - 2px)),
     conic-gradient(var(--ring) calc(var(--left, 1) * 1turn), rgba(255, 255, 255, 0.12) 0);
   pointer-events: auto;
   cursor: help;
@@ -1301,7 +1301,7 @@ body[data-phase='ready'] #plates {
   padding: 0 2px;
   border-radius: 6px;
   font: 800 8px/11px var(--mono);
-  color: #0b0820;
+  color: #0a0b10;
   background: var(--ink);
 }
 
@@ -1501,7 +1501,7 @@ body[data-phase='ready'] #plates {
 }
 
 .kit-count.full {
-  color: #0b0820;
+  color: #0a0b10;
   background: var(--gold);
 }
 
@@ -1639,7 +1639,7 @@ body.book-closed .page.defense {
 .spell .cool {
   position: absolute;
   inset: 0;
-  background: rgba(4, 3, 16, 0.6);
+  background: rgba(4, 5, 8, 0.6);
   transform-origin: 0 50%;
   transform: scaleX(0);
   pointer-events: none;
@@ -1888,7 +1888,7 @@ body.watching .pads {
   padding: 1px 5px;
   border-radius: 5px;
   border: 1px solid var(--line-hi);
-  background: rgba(13, 11, 38, 0.7);
+  background: rgba(12, 13, 18, 0.7);
   color: var(--dim);
   font: 700 11px/16px var(--mono);
   text-align: center;
@@ -1932,7 +1932,7 @@ body[data-phase='ready'] .spell {
   padding: 0 10px 0 8px;
   border-radius: 999px;
   border: 1px solid var(--line-hi);
-  background: conic-gradient(rgba(4, 3, 16, 0.75) calc(var(--rest, 0) * 360deg), rgba(255, 240, 184, 0.1) 0);
+  background: conic-gradient(rgba(4, 5, 8, 0.75) calc(var(--rest, 0) * 360deg), rgba(255, 240, 184, 0.1) 0);
   color: var(--mute);
   font-size: 16px;
   transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
@@ -1944,7 +1944,7 @@ body[data-phase='ready'] .spell {
 }
 
 .ward-chip.up {
-  color: #0b0820;
+  color: #0a0b10;
   background: #fff0b8;
   box-shadow: 0 0 22px rgba(255, 240, 184, 0.8);
 }
@@ -1966,7 +1966,7 @@ body[data-input='touch'] .ward-chip kbd {
   padding: 0 12px;
   border-radius: 999px;
   border: 1px solid var(--line);
-  background: rgba(13, 11, 38, 0.6);
+  background: rgba(12, 13, 18, 0.6);
   font-size: 10px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -2110,7 +2110,7 @@ body[data-input='touch'] .pads {
   font-size: 24px;
   border-radius: 50%;
   border: 1px solid var(--line-hi);
-  background: rgba(14, 12, 38, 0.66);
+  background: rgba(13, 14, 19, 0.66);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   touch-action: none;
@@ -2226,7 +2226,7 @@ body[data-input='touch'] .tray {
   overflow-y: auto;
   z-index: 2;
   padding: 72px var(--gutter) 24px;
-  background: rgba(5, 3, 18, 0.35);
+  background: rgba(4, 5, 8, 0.35);
 }
 
 body[data-view='result'] #result {
@@ -2327,7 +2327,7 @@ body[data-view='result'] #result {
 }
 
 .guide::backdrop {
-  background: rgba(4, 3, 14, 0.6);
+  background: rgba(4, 5, 8, 0.6);
   backdrop-filter: blur(4px);
 }
 
@@ -2391,7 +2391,7 @@ body[data-view='result'] #result {
   transform: translate(-50%, calc(-100% - 24px));
   padding: 10px 18px;
   border-radius: 999px;
-  background: rgba(30, 14, 40, 0.92);
+  background: rgba(28, 16, 20, 0.92);
   border: 1px solid rgba(255, 93, 115, 0.5);
   font-weight: 600;
   font-size: 14px;
@@ -2419,7 +2419,7 @@ body[data-view='result'] #result {
   gap: 8px;
   padding: 8px 16px;
   border-radius: 999px;
-  background: rgba(30, 14, 40, 0.92);
+  background: rgba(28, 16, 20, 0.92);
   border: 1px solid rgba(255, 209, 102, 0.5);
   color: var(--gold);
   font-weight: 600;
@@ -2594,7 +2594,7 @@ body.offline #stage {
   }
 
   body[data-view='home'] #veil {
-    background: rgba(6, 4, 22, 0.55);
+    background: rgba(5, 6, 9, 0.55);
   }
 
   .teams {
