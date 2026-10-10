@@ -2,7 +2,7 @@
  * test.mjs — Chordcast tests. Run with `npm test`.
  *
  *   1  Core    rules, book, chords, every spell, determinism and bots
- *   2  Host    rooms, codes and matches over the wire
+ *   2  Host    rooms, codes, matches over the wire, deltas, drops and faults
  *   3  Views   a Playwright run through every essential screen; the
  *              screenshots are written to shots/ and committed
  */
@@ -14,7 +14,8 @@ import WebSocket from 'ws'
 import { chromium } from 'playwright'
 import {
   Arena, Brain, CHORD_LENGTH, CODEX, Dice, KINDS, METAS, Match, Pilot, RULES, SCHOOLS, SPELL, TICK_RATE, TIMING, WISPS,
-  botRoster, costOf, moveCursor, pack, pathTo, readChord, readRunes, simulate, splitTiers, tidyRules, unpack, writeBook,
+  botRoster, costOf, diff, hashText, moveCursor, pack, packFrame, patch, pathTo, readChord, readRunes, simulate, splitTiers, tidyRules,
+  unpack, unpackFrame, writeBook,
 } from './core.mjs'
 import { openHost } from './host.mjs'
 
@@ -586,17 +587,79 @@ test('wire messages are checked field by field', () => {
   assert.equal(unpack(pack('hello', { name: '<script>' })).name, 'script')
   assert.equal(unpack(pack('frame', {})), null, 'peers cannot send host messages')
   assert.deepEqual(unpack(pack('tune', { rules: { teams: [3, 9] } })).rules.teams, [3, 8])
+  assert.equal(unpack(pack('resume', { token: 'short' })), null)
+  assert.equal(unpack(pack('resume', { token: 'abcdefghijklmnopqrstuv' })).token, 'abcdefghijklmnopqrstuv')
+  assert.deepEqual(unpack(pack('frame', { delta: { tick: 3 }, events: [] }), 'host'), { type: 'frame', delta: { tick: 3 }, events: [] }, 'kits and the whole frame are optional')
+})
+
+test('deltas rebuild every frame exactly and cost a fraction of whole frames', () => {
+  // Objects, arrays, removed keys, type changes and null all survive a round trip through JSON.
+  const cases = [
+    [{ a: 1, b: [1, 2], c: { d: 1 } }, { a: 2, b: [1, 3], c: { e: 2 } }],
+    [{ a: [1, 2] }, { a: [1, 2, 3] }],
+    [{ a: [1] }, { a: { 0: 1 } }],
+    [{ a: null }, { a: { b: 1 } }],
+    [{ a: { b: 1 } }, { a: null }],
+    [{ a: 1, b: undefined }, { b: 2 }],
+    [null, { a: 1 }],
+  ]
+  for (const [prev, next] of cases) {
+    const change = JSON.parse(JSON.stringify(diff(prev, next) ?? {}))
+    assert.deepEqual(patch(prev, change), JSON.parse(JSON.stringify(next)))
+  }
+  assert.equal(diff({ a: [1, { b: 2 }] }, { a: [1, { b: 2 }] }), undefined, 'nothing changed, nothing sent')
+  const prev = { a: { b: 1 } }
+  patch(prev, { a: { b: 2 } })
+  assert.equal(prev.a.b, 1, 'patch leaves the old frame alone')
+
+  for (const teams of [[1, 1], [4, 4]]) {
+    const rules = tidyRules({ teams, life: 400, surge: 30 })
+    const match = new Match({ seed: 11, rules, roster: botRoster(rules) })
+    const arena = new Arena(match)
+    for (const mage of match.mages) arena.seat(mage.id, new Pilot({ skill: 'hard', seed: hashText(`11:${mage.id}`) }))
+    let last = null
+    let client = null
+    let [whole, sent] = [0, 0]
+    while (match.phase !== 'over' && match.tick < TICK_RATE * 120) {
+      arena.step()
+      for (const team of [0, 1, null]) {
+        const frame = match.frame(team)
+        if (team !== 0) continue
+        const wire = packFrame(frame)
+        const text = JSON.stringify(diff(last, wire) ?? {})
+        client = patch(client, JSON.parse(text))
+        last = wire
+        assert.deepEqual(unpackFrame(client), JSON.parse(JSON.stringify(frame)), `tick ${match.tick}`)
+        whole += JSON.stringify(frame).length
+        sent += text.length
+      }
+    }
+    assert.ok(sent < whole * 0.15, `${teams.join('v')}: deltas are ${Math.round((sent / whole) * 100)}% of whole frames`)
+  }
 })
 
 // ─── 2 · Host ───────────────────────────────────────────────────────────────
 
-/** A scripted WebSocket peer that records every message. */
+/**
+ * A scripted WebSocket peer that records every message. Frames are rebuilt
+ * from deltas the way the page does it, so each recorded frame is whole;
+ * `raw` keeps them as they came.
+ */
 function connect(url) {
   const socket = new WebSocket(url.replace('http', 'ws') + '/wire')
   const inbox = []
+  const raw = []
   const waiters = new Set()
+  let wire = null
+  let kits = {}
   socket.on('message', (data) => {
-    const message = JSON.parse(data)
+    let message = JSON.parse(data)
+    if (message.type === 'frame') {
+      raw.push(message)
+      wire = message.frame ?? patch(wire, message.delta)
+      kits = message.kits ?? kits
+      message = { type: 'frame', frame: unpackFrame(wire), events: message.events, kits }
+    }
     inbox.push(message)
     for (const waiter of waiters) {
       if (!waiter.match(message)) continue
@@ -606,6 +669,8 @@ function connect(url) {
   })
   const peer = {
     inbox,
+    raw,
+    socket,
     send: (type, body) => socket.send(pack(type, body)),
     next: (match, timeout = 8000) =>
       new Promise((resolve, reject) => {
@@ -658,11 +723,124 @@ test('rooms are hosted, joined by code and played over the wire', async () => {
     ana.close()
     const end = await ben.next((m) => m.type === 'end', 60000)
     assert.ok([0, 1, -1].includes(end.results.winner))
+    assert.ok(ben.raw[0].frame && ben.raw.slice(1).every((m) => m.delta && !m.frame), 'one whole frame, then deltas')
+    assert.match(ben.socket.extensions, /permessage-deflate/, 'frames are compressed')
     ben.close()
   } finally {
     await host.close()
   }
 })
+
+/** Open a room for `peer` with `rules`, start it, and wait for the match to begin. */
+async function startMatch(peer, rules) {
+  peer.send('open', { rules })
+  const { room } = await peer.next((m) => m.type === 'room')
+  peer.send('start')
+  const begin = await peer.next((m) => m.type === 'begin')
+  await peer.next((m) => m.type === 'frame')
+  return { code: room.code, begin }
+}
+
+test('the host survives malformed requests and a match that throws', async () => {
+  const host = await openHost({ port: 0, quiet: true })
+  try {
+    for (const bad of ['/%E0%A4%A', '/%']) assert.equal((await fetch(host.url + bad)).status, 400)
+    assert.equal((await fetch(host.url + '/health')).status, 200, 'still up')
+    const ana = await connect(host.url)
+    const ben = await connect(host.url)
+    const broken = await startMatch(ana, { teams: [1, 1] })
+    const steady = await startMatch(ben, { teams: [1, 1] })
+    host.hall.rooms.get(broken.code).match.advance = () => {
+      throw new Error('a bug in a spell')
+    }
+    assert.match((await ana.next((m) => m.type === 'fault')).text, /error/)
+    await ana.next((m) => m.type === 'room' && m.room.phase === 'lobby')
+    const tick = host.hall.rooms.get(steady.code).match.tick
+    await ben.next((m) => m.type === 'frame' && m.frame.tick > tick + 5)
+    ana.send('start')
+    await ana.next((m) => m.type === 'begin' && m.setup.seed !== broken.begin.setup.seed)
+    ana.close()
+    ben.close()
+  } finally {
+    await host.close()
+  }
+})
+
+test('a dropped player takes their seat back; a seat held too long goes to the bot', async () => {
+  const host = await openHost({ port: 0, quiet: true, hold: 1500 })
+  try {
+    const ana = await connect(host.url)
+    const { token, you } = await ana.next((m) => m.type === 'welcome')
+    const { code, begin } = await startMatch(ana, { teams: [1, 1] })
+    const room = host.hall.rooms.get(code)
+    ana.socket.terminate()
+    await until(() => room.arena.pilots.has(begin.you))
+    assert.ok(room.peers.size === 1 && [...room.peers][0].away, 'the seat is held, with a bot standing in')
+
+    // Back on a new socket: the same peer, the same mage, a whole frame to catch up, and keys work again.
+    const again = await connect(host.url)
+    again.send('resume', { token })
+    assert.equal((await again.next((m) => m.type === 'back')).you, you)
+    assert.equal((await again.next((m) => m.type === 'begin')).you, begin.you)
+    await again.next((m) => m.type === 'frame')
+    assert.ok(again.raw[0].frame, 'the first frame after a resume is whole')
+    assert.ok(!room.arena.pilots.has(begin.you), 'the bot steps aside')
+    again.send('press', { key: 'up', seq: 1 })
+    await again.next((m) => m.type === 'frame' && m.frame.mages.find((x) => x.id === begin.you).seq >= 1)
+
+    // A resume while the host still thinks the old socket is up takes the seat over and closes the old one.
+    const third = await connect(host.url)
+    const closed = new Promise((resolve) => again.socket.on('close', resolve))
+    third.send('resume', { token })
+    assert.equal((await third.next((m) => m.type === 'back')).you, you)
+    await again.next((m) => m.type === 'moved')
+    await closed
+
+    // Unknown tokens get nothing; a seat held past its time is given up and the empty room closes.
+    const stranger = await connect(host.url)
+    stranger.send('resume', { token: 'abcdefghijklmnopqrstuv' })
+    assert.equal((await stranger.next((m) => m.type === 'back')).you, null)
+    third.socket.terminate()
+    await until(() => !host.hall.rooms.has(code), 5000)
+    const late = await connect(host.url)
+    late.send('resume', { token })
+    assert.equal((await late.next((m) => m.type === 'back')).you, null)
+    for (const peer of [stranger, late]) peer.close()
+  } finally {
+    await host.close()
+  }
+})
+
+test('a connection that stops answering pings is closed, and its seat held', async () => {
+  const host = await openHost({ port: 0, quiet: true, beat: 60 })
+  try {
+    const ana = await connect(host.url)
+    const { code } = await startMatch(ana, { teams: [1, 1] })
+    // A socket that never answers pings, like a vanished phone.
+    const ghost = new WebSocket(host.url.replace('http', 'ws') + '/wire', { autoPong: false })
+    await new Promise((resolve) => ghost.on('open', resolve))
+    ghost.send(pack('join', { code }))
+    const room = host.hall.rooms.get(code)
+    await until(() => room.peers.size === 2)
+    await until(() => [...room.peers].some((peer) => peer.away))
+    assert.equal(ghost.readyState, WebSocket.CLOSED)
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    assert.equal([...room.peers].filter((peer) => peer.away).length, 1)
+    assert.equal(ana.socket.readyState, WebSocket.OPEN, 'a peer that answers stays')
+    ana.close()
+  } finally {
+    await host.close()
+  }
+})
+
+/** Wait until `check()` is true. */
+async function until(check, timeout = 3000) {
+  const start = Date.now()
+  while (!check()) {
+    if (Date.now() - start > timeout) throw new Error('timed out waiting for a condition')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+}
 
 // ─── 3 · Views ──────────────────────────────────────────────────────────────
 
@@ -737,7 +915,8 @@ function makeStage(browser, errors) {
 
 test('views: every essential screen renders and responds', { timeout: 600000 }, async () => {
   await fs.mkdir(SHOTS, { recursive: true })
-  const host = await openHost({ port: 0, quiet: true })
+  // Frozen pages stop reading their sockets, so they cannot answer pings: don't ping during this test.
+  const host = await openHost({ port: 0, quiet: true, beat: 3600000 })
   const browser = await chromium.launch({ args: GL_FLAGS })
   const errors = []
   const stage = makeStage(browser, errors)
@@ -816,6 +995,15 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
     await ana.hover('#book-offense .spell:not(.out)')
     await shoot(ana, '09-book')
 
+    // Sound: the audio starts with the first key, keys and spells play, the fight has music, and the speaker mutes it all.
+    const heard = await ana.evaluate(() => ({ state: window.chordcast.sound.ctx?.state, played: window.chordcast.sound.played, music: window.chordcast.sound.track?.mode }))
+    assert.deepEqual([heard.state, heard.music], ['running', 'fight'])
+    assert.ok(heard.played > 5, `${heard.played} sounds played`)
+    await ana.click('.topbar [data-action="sound"]')
+    await ana.waitForFunction(() => document.body.classList.contains('muted') && window.chordcast.sound.ctx.state === 'suspended')
+    await ana.click('.topbar [data-action="sound"]')
+    await ana.waitForFunction(() => !document.body.classList.contains('muted') && window.chordcast.sound.ctx.state === 'running')
+
     // Gamepad: a stubbed pad drives the same chord keys
     await stage.focus(ben)
     await ben.evaluate(() => {
@@ -834,6 +1022,13 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
     await ben.waitForFunction(() => document.body.dataset.input === 'pad' && window.chordcast.seq >= 2)
     await shoot(ben, '10-gamepad')
     await stage.close(ben)
+
+    // A reload mid-match takes the same seat back from the bot that held it.
+    await stage.focus(ana)
+    const seat = await ana.evaluate(() => window.chordcast.me)
+    await ana.reload()
+    // (A slow reload can outlast the match: then the results come back instead of frames.)
+    await ana.waitForFunction((id) => window.chordcast.me === id && Boolean(window.chordcast.frame || window.chordcast.results), seat)
 
     // Results: a short, lopsided match ends quickly
     await stage.focus(ana)

@@ -11,7 +11,9 @@ Real-time arena magic duels where every action is a chord of keys. A few moves p
 - **Teams of any size**, 1 vs 1 by default, up to 8 vs 8. Bots fill open seats and use every mechanic.
 - **Host and join with a code.** Share a four-letter code or a link.
 - **Keyboard, gamepad and touch** all use the same twelve keys.
-- **One authority.** The host runs every match and sends the same frames to everyone.
+- **Sound that teaches.** Every rune has its own note, so each chord is a tune you learn by ear, and a spell flying at you rises in pitch until it lands. School-voiced spells, music that builds with the surge, and rumble on gamepads and phones. All synthesized: nothing to download.
+- **One authority.** The host runs every match and sends the same frames to everyone, as small compressed deltas.
+- **Drop and come back.** Lose your connection or reload the page and a bot holds your seat for a minute while you reconnect.
 - **Swappable bots.** A deterministic brain today; any `think(view)` object, sync or async, can replace it.
 
 ## Quickstart
@@ -37,6 +39,7 @@ The browser test uses Playwright's Chromium. If it is not installed yet, run `np
 | Call your aim | E | LT | Corner of the left pad |
 | Cancel | Q or Backspace | LB | Center button |
 | Book | Tab | Start | Book button |
+| Sound on or off | M | | Speaker button |
 
 1. **Draft.** Type a spell's chord (or tap it) to put it in your kit. Only your kit can be cast.
 2. **Aim.** Up jumps to the foe row, down comes back (again to snap to you), left and right walk a row. The aim stays between chords; ally spells aimed at a foe land on you.
@@ -52,6 +55,7 @@ The browser test uses Playwright's Chromium. If it is not installed yet, run `np
 | `core.mjs` | Portable engine: rules, spells, match, bots, messages |
 | `host.mjs` | Web server: pages, rooms, codes, the tick loop |
 | `page.html` `page.css` `page.mjs` | The client: 3D stage, particles, HUD, input |
+| `sound.mjs` | Synthesized sound effects, music and haptics |
 | `test.mjs` | Tests |
 
 See [DESIGN.md](DESIGN.md) for the full design and reference.
