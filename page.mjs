@@ -26,6 +26,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js'
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js'
 import {
   AIM_TEXT, CODEX, DIMINISH, GARB, LAYOUT, METAS, META_OF_RUNE, MOVES, REACTIONS, RULES, RUNES, SPELL, TEAMS, TICK_MS, TICK_RATE, TIMING,
@@ -87,7 +88,7 @@ const GLYPHS = {
   star: '<path d="M12 1.5l2.6 7.9 7.9 2.6-7.9 2.6-2.6 7.9-2.6-7.9L1.5 12l7.9-2.6z" fill="currentColor"/>',
   wave: stroke('M2.5 9c3-3.6 6.2-3.6 9.5 0s6.5 3.6 9.5 0M2.5 16c3-3.6 6.2-3.6 9.5 0s6.5 3.6 9.5 0', 2.6),
   flame: '<path d="M12 1.6c1.3 4.3 7 6.4 7 12.4a7 7 0 0 1-14 0c0-3 1.5-5.1 3.4-6.7.2 2.3 1.1 3.7 2.7 4.2-.6-3.7.2-6.9.9-9.9z" fill="currentColor"/>',
-  leaf: '<path d="M4 20.5C4 10.5 10 3.6 21 3c-.4 11.2-7.1 17.5-17 17.5z" fill="currentColor"/><path d="M4.5 20L14 10.5" stroke="#0b0820" stroke-width="1.7" stroke-linecap="round"/>',
+  leaf: '<path d="M4 20.5C4 10.5 10 3.6 21 3c-.4 11.2-7.1 17.5-17 17.5z" fill="currentColor"/><path d="M4.5 20L14 10.5" stroke="#0a0b10" stroke-width="1.7" stroke-linecap="round"/>',
   up: stroke('M5 15.5l7-7 7 7', 3),
   down: stroke('M5 8.5l7 7 7-7', 3),
   left: stroke('M15.5 5l-7 7 7 7', 3),
@@ -137,7 +138,7 @@ function metaChip(id, extra = '') {
 const sigilHtml = (sigil) => sigil.map((rune) => `<i data-glyph="${rune}" class="${rune}">${svg(rune)}</i>`).join('')
 
 const TEAM_GLOW = ['#3ee6ff', '#ff4fb8']
-const TEAM_ROBE = ['#16607e', '#7c1d5c']
+const TEAM_ROBE = ['#1b5670', '#6b2250']
 
 /**
  * Spell schools. Each owns a hue around the color wheel (hot core, main and
@@ -1641,6 +1642,118 @@ function hexPrism(radius, height, chamfer) {
   return new THREE.ExtrudeGeometry(hex, options).rotateX(-Math.PI / 2).translate(0, chamfer, 0)
 }
 
+/** A stable hash of a point in [0, 1), so vertices shared across a seam move together. */
+function hashPoint(v) {
+  const seed = Math.sin(Math.round(v.x * 1000) * 12.9898 + Math.round(v.y * 1000) * 78.233 + Math.round(v.z * 1000) * 37.719) * 43758.5453
+  return seed - Math.floor(seed)
+}
+
+/**
+ * A fluted stone column `height` tall, chipped all over. A whole one has a
+ * plinth and a capital; a `broken` one (any nonzero seed) ends in a jagged
+ * break; a `drum` is a bare length of shaft, centered, as one lies fallen.
+ */
+function column(height, broken = 0, drum = false) {
+  const top = drum || broken ? height : height - 0.5 // where the fluted shaft ends
+  const from = drum ? 0 : 0.6
+  const rings = Math.max(2, Math.ceil((top - from) / 0.3) + 1)
+  const shaft = Array.from({ length: rings }, (_, i) => [0.5 - (0.03 * i) / (rings - 1), from + ((top - from) * i) / (rings - 1)])
+  const plinth = [[0.001, 0], [0.82, 0], [0.82, 0.18], [0.7, 0.25], [0.62, 0.32], [0.62, 0.4], [0.52, 0.48]]
+  const capital = [[0.5, height - 0.44], [0.62, height - 0.3], [0.74, height - 0.24], [0.74, height], [0.001, height]]
+  const outline = drum ? [[0.001, 0], ...shaft, [0.001, height]] : broken ? [...plinth, ...shaft, [0.3, height + 0.03], [0.001, height - 0.06]] : [...plinth, ...shaft, ...capital]
+  const geometry = lathe(
+    outline.map(([r, y]) => new THREE.Vector2(r, y)),
+    80,
+    (v) => {
+      const phi = Math.atan2(v.x, v.z)
+      const fluted = v.y >= from - 0.01 && v.y <= top + 0.01 ? 1 - 0.06 * (0.5 + 0.5 * Math.cos(phi * 20)) ** 2 : 1
+      const chip = 1 + (hashPoint(v) - 0.5) * 0.05
+      if (broken && v.y > height - 0.4) v.y += (0.24 * Math.sin(3 * phi + broken) + 0.1 * Math.sin(7 * phi + broken * 2) + 0.05 * Math.sin(13 * phi + broken * 3)) * clamp((v.y - height + 0.4) / 0.4, 0, 1)
+      return v.set(v.x * fluted * chip, v.y, v.z * fluted * chip)
+    },
+  )
+  return drum ? geometry.translate(0, -height / 2, 0) : geometry
+}
+
+/**
+ * Cloth folds: how much the robe's radius swells or tucks at turn `phi` and
+ * height `y`. They hang from the belt and deepen toward the hem.
+ */
+function drape(phi, y) {
+  const hang = clamp((0.86 - y) / 0.86, 0, 1) ** 1.2
+  const blouse = clamp((y - 0.95) / 0.12, 0, 1) * clamp((1.3 - y) / 0.15, 0, 1)
+  return hang * (0.065 * Math.sin(7 * phi + 0.4) + 0.035 * Math.sin(12 * phi + 1.9 + y * 3) + 0.015 * Math.sin(19 * phi + 0.7)) + blouse * 0.018 * Math.sin(9 * phi + 1.2)
+}
+
+/** The robe's radius at height `y`, read off its outline curve. */
+function robeRadius(y) {
+  const curve = (robeRadius.curve ??= profile(ROBE_OUTLINE, 240))
+  for (let i = 1; i < curve.length; i++) {
+    const [a, b] = [curve[i - 1], curve[i]]
+    if ((a.y - y) * (b.y - y) <= 0 && a.y !== b.y) return a.x + ((b.x - a.x) * (y - a.y)) / (b.y - a.y)
+  }
+  return 0.5
+}
+
+/** A band of trim around the robe at height `y`, following its folds. */
+function hemBand(y, thickness) {
+  const r = robeRadius(y)
+  const points = Array.from({ length: 96 }, (_, i) => {
+    const phi = (i / 96) * Math.PI * 2
+    const reach = r * (1 + drape(phi, y)) + thickness * 0.4
+    return new THREE.Vector3(Math.sin(phi) * reach, SEAT_Y + y, Math.cos(phi) * reach)
+  })
+  return bare(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points, true), 96, thickness, 6, true))
+}
+
+/** Crumple a felt hat's crown: soft dents that come and go up its height (`t`, 0 to 1). */
+function crumple(v, t) {
+  const dent = 1 + 0.07 * Math.sin(4 * Math.atan2(v.x, v.z) + t * 7) * Math.sin(t * Math.PI)
+  return v.set(v.x * dent, v.y, v.z * dent)
+}
+
+/** A hat brim `radius` wide: a thin disc that droops toward its edge with a soft wave. */
+function brim(radius, droop, wave) {
+  const outline = [[0.001, -0.022], [radius * 0.5, -0.02], [radius * 0.9, -0.014], [radius, -0.003], [radius * 0.9, 0.01], [radius * 0.5, 0.02], [0.001, 0.022]]
+  return lathe(
+    outline.map(([r, y]) => new THREE.Vector2(r, y)),
+    56,
+    (v) => {
+      const t = Math.hypot(v.x, v.z) / radius
+      return v.setY(v.y - droop * t ** 2.4 + wave * Math.sin(5 * Math.atan2(v.x, v.z) + 0.6) * t ** 3)
+    },
+  )
+}
+
+/** A gnarled staff 2.5 long: it wavers, swells and knots along its length. */
+function staffShape() {
+  const geometry = new THREE.CylinderGeometry(0.034, 0.05, 2.5, 10, 24)
+  const position = geometry.attributes.position
+  const v = new THREE.Vector3()
+  for (let i = 0; i < position.count; i++) {
+    v.fromBufferAttribute(position, i)
+    const swell = 1 + 0.1 * Math.sin(v.y * 7.3 + 1.1) * Math.sin(v.y * 2.9) + 0.22 * Math.exp(-((v.y - 0.35) ** 2) * 70) + 0.16 * Math.exp(-((v.y + 0.7) ** 2) * 90)
+    position.setXYZ(i, v.x * swell + 0.02 * Math.sin(v.y * 1.9 + 0.3), v.y, v.z * swell + 0.015 * Math.sin(v.y * 2.6 + 1))
+  }
+  return smooth(geometry)
+}
+
+/** A sleeve that flares toward the cuff, darker at the cuff where it wears. */
+function sleeveShape() {
+  const geometry = lathe(
+    [[0.001, -0.37], [0.15, -0.375], [0.16, -0.36], [0.135, -0.25], [0.1, 0.1], [0.07, 0.375], [0.001, 0.375]].map(([r, y]) => new THREE.Vector2(r, y)),
+    20,
+  )
+  const position = geometry.attributes.position
+  const shade = new Float32Array(position.count * 3)
+  for (let i = 0; i < position.count; i++) {
+    const t = 0.62 + 0.3 * clamp((position.getY(i) + 0.375) / 0.75, 0, 1)
+    shade.set([t, t * 0.97, t * 0.94], i * 3)
+  }
+  geometry.setAttribute('color', new THREE.BufferAttribute(shade, 3))
+  return geometry
+}
+
 /** The robe's outline as [radius, height] points, turned into the robe. */
 const ROBE_OUTLINE = [
   [0.001, 0],
@@ -1657,36 +1770,44 @@ const ROBE_OUTLINE = [
 
 function shapes() {
   if (GEOMETRY.robe) return GEOMETRY
-  const robe = lathe(profile(ROBE_OUTLINE, 32), 32)
+  // The robe hangs in folds from the belt. Its vertex colors darken it low
+  // down and deep in each fold, and dirty its hem.
+  const robe = lathe(profile(ROBE_OUTLINE, 32), 72, (v) => {
+    const swell = 1 + drape(Math.atan2(v.x, v.z), v.y)
+    return v.set(v.x * swell, v.y, v.z * swell)
+  })
   const heights = robe.attributes.position
   const shade = new Float32Array(heights.count * 3)
   for (let i = 0; i < heights.count; i++) {
-    const t = 0.45 + 0.55 * (heights.getY(i) / 1.66)
-    shade.set([t, t, t], i * 3)
+    const y = heights.getY(i)
+    const fold = drape(Math.atan2(heights.getX(i), heights.getZ(i)), y)
+    const t = (0.45 + 0.55 * (y / 1.66)) * (1 + Math.min(0, fold) * 6)
+    const mud = 1 - clamp(y / 0.32, 0, 1)
+    shade.set([t * (1 - 0.3 * mud), t * (1 - 0.38 * mud), t * (1 - 0.46 * mud)], i * 3)
   }
   robe.setAttribute('color', new THREE.BufferAttribute(shade, 3))
 
   // One hat: a tilted brim and a tall cone whose tip droops to the side.
-  const brim = new THREE.CylinderGeometry(0.62, 0.66, 0.05, 40).rotateX(0.08).rotateZ(0.05).translate(0, SEAT_Y + 2.0, 0)
+  const hatBrim = brim(0.66, 0.06, 0.012).rotateX(0.08).rotateZ(0.05).translate(0, SEAT_Y + 2.0, 0)
   const cone = Array.from({ length: 20 }, (_, i) => {
     const t = i / 19
     return new THREE.Vector2(Math.max(0.001, 0.38 * Math.pow(1 - t, 1.3)), t * 1.02)
   })
-  const crown = lathe(cone, 28, (v) => {
+  const crown = lathe(cone, 40, (v) => {
     const t = v.y / 1.02
+    crumple(v, t)
     return v.set(v.x + 0.34 * Math.pow(t, 2.6), v.y - 0.12 * Math.pow(t, 4), v.z - 0.04 * Math.pow(t, 2))
   }).translate(0, SEAT_Y + 1.99, 0)
-  brim.deleteAttribute('uv')
 
   const eye = (x) => new THREE.SphereGeometry(0.038, 10, 6).translate(x, SEAT_Y + 1.85, 0.17)
 
   Object.assign(GEOMETRY, {
     robe,
-    head: new THREE.SphereGeometry(0.21, 24, 16),
-    hat: mergeGeometries([brim, crown]),
+    head: new THREE.SphereGeometry(0.21, 32, 20),
+    hat: mergeGeometries([hatBrim, crown]),
     band: new THREE.TorusGeometry(0.355, 0.035, 8, 40),
     eyes: mergeGeometries([eye(-0.075), eye(0.075)]),
-    staff: new THREE.CylinderGeometry(0.035, 0.05, 2.5, 12),
+    staff: staffShape(),
     knob: new THREE.TorusGeometry(0.06, 0.03, 6, 12),
     gem: new THREE.OctahedronGeometry(0.18, 0).scale(1, 1.25, 1),
     orbit: new THREE.TorusGeometry(0.3, 0.018, 6, 40),
@@ -1694,9 +1815,9 @@ function shapes() {
     mote: new THREE.IcosahedronGeometry(0.06, 1),
     collar: new THREE.TorusGeometry(0.3, 0.05, 8, 32),
     belt: new THREE.TorusGeometry(0.44, 0.035, 6, 40),
-    arm: new THREE.CylinderGeometry(0.07, 0.14, 0.75, 16),
+    arm: sleeveShape(),
     base: hexPrism(1.0, 0.24, 0.045),
-    rim: new THREE.TorusGeometry(1.0, 0.03, 8, 6),
+    rim: new THREE.TorusGeometry(0.98, 0.022, 8, 6),
     disc: new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2),
     bubble: new THREE.SphereGeometry(1.2, 48, 32),
     ice: new THREE.IcosahedronGeometry(1, 1),
@@ -1738,8 +1859,8 @@ function garbShapes(robe) {
   const crown = (height, base, bend) =>
     lathe(
       Array.from({ length: 16 }, (_, i) => new THREE.Vector2(Math.max(0.001, base * Math.pow(1 - i / 15, 1.15)), (i / 15) * height)),
-      24,
-      (v) => v.set(v.x, v.y, v.z - bend * Math.pow(v.y / height, 2.2)),
+      36,
+      (v) => crumple(v, v.y / height).set(v.x, v.y, v.z - bend * Math.pow(v.y / height, 2.2)),
     ).translate(0, top, 0)
 
   // A hood: an open shell around the head, drawn up into a peak at the back and flared over the shoulders.
@@ -1794,7 +1915,7 @@ function garbShapes(robe) {
     for (let k = 0; k < 3; k++) shade[i * 3 + k] *= 0.2
   }
   const seam = (side) =>
-    bare(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(ROBE_OUTLINE.slice(1, -2).map(([r, y]) => new THREE.Vector3(0, SEAT_Y + y, side * (r + 0.008)))), 40, 0.022, 6))
+    bare(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(ROBE_OUTLINE.slice(1, -2).map(([r, y]) => new THREE.Vector3(0, SEAT_Y + y, side * (r * (1 + drape(side > 0 ? 0 : Math.PI, y)) + 0.008)))), 40, 0.022, 6))
 
   // A crook: the shaft curls over into a hook that holds a small gem.
   const hook = bare(new THREE.TorusGeometry(0.2, 0.038, 8, 28, Math.PI * 1.25)).rotateZ(-Math.PI / 4).translate(0.2, 1.25, 0)
@@ -1811,7 +1932,7 @@ function garbShapes(robe) {
       wide: {
         crest: 2.85,
         parts: [
-          { geometry: bare(new THREE.CylinderGeometry(0.9, 0.94, 0.04, 48)).rotateX(-0.06).translate(0, top + 0.01, 0), paint: 'hat' },
+          { geometry: brim(0.93, 0.13, 0.035).rotateX(-0.06).translate(0, top + 0.01, 0), paint: 'hat' },
           { geometry: crown(0.62, 0.34, 0.16), paint: 'hat' },
           { geometry: new THREE.TorusGeometry(0.325, 0.032, 8, 40), paint: 'trim', at: [0, top + 0.07, 0], turn: flat },
         ],
@@ -1834,8 +1955,8 @@ function garbShapes(robe) {
       ],
       banded: [
         { geometry: body, paint: 'robe' },
-        { geometry: new THREE.TorusGeometry(0.66, 0.03, 8, 48), paint: 'trim', at: [0, SEAT_Y + 0.15, 0], turn: flat },
-        { geometry: new THREE.TorusGeometry(0.6, 0.024, 8, 48), paint: 'trim', at: [0, SEAT_Y + 0.36, 0], turn: flat },
+        { geometry: hemBand(0.15, 0.03), paint: 'trim' },
+        { geometry: hemBand(0.36, 0.024), paint: 'trim' },
       ],
       split: [
         { geometry: split, paint: 'robe', bright: 1.9 },
@@ -1902,18 +2023,22 @@ const BUBBLE_FRAGMENT = /* glsl */ `
 /**
  * Give a standard material a soft rim of `color` where the surface turns away
  * from the camera, so robes read against the dark arena without flat shading.
- * The uniform is kept in userData.rim so statuses can recolor it.
+ * The uniform is kept in userData.rim so statuses can recolor it. Any earlier
+ * shader patch on the material (such as weathering) is kept.
  */
 function addRim(material, color, strength = 0.4) {
   const rim = { value: color.clone().multiplyScalar(strength) }
   material.userData.rim = rim
-  material.onBeforeCompile = (shader) => {
+  const before = material.onBeforeCompile
+  const key = material.customProgramCacheKey()
+  material.onBeforeCompile = (shader, renderer) => {
+    before.call(material, shader, renderer)
     shader.uniforms.uRim = rim
     shader.fragmentShader = shader.fragmentShader
       .replace('void main() {', 'uniform vec3 uRim;\nvoid main() {')
       .replace('#include <opaque_fragment>', 'outgoingLight += uRim * pow(1.0 - saturate(dot(normal, normalize(vViewPosition))), 3.0);\n#include <opaque_fragment>')
   }
-  material.customProgramCacheKey = () => 'rim'
+  material.customProgramCacheKey = () => `${key}+rim`
   return material
 }
 
@@ -1950,7 +2075,8 @@ const RIM_GOAL = new THREE.Color()
 const MARK_AT = new THREE.Vector3()
 const MARK_SPOT = new THREE.Vector3()
 const TOWARD = new THREE.Vector3()
-const BASE_TEXT = new THREE.Color('#1b1e3a')
+const PEDESTAL = new THREE.Color('#5a554e')
+const MOONLIGHT = new THREE.Color('#c8d4ff')
 const TINTS = { flash: new THREE.Color('#ffffff'), stone: new THREE.Color('#8a8478'), time: new THREE.Color('#ffd166') }
 const FLOW_COLOR = new THREE.Color('#ffc94a')
 const CALL_COLOR = new THREE.Color('#ff5a3c')
@@ -1979,6 +2105,7 @@ class Figure {
     const glow = new THREE.Color(TEAM_GLOW[mage.team]).offsetHSL(((mage.slot % 3) - 1) * 0.03, 0, 0)
     const robe = new THREE.Color(TEAM_ROBE[mage.team]).offsetHSL(((mage.slot % 3) - 1) * 0.04, 0, 0)
     this.glow = glow
+    this.rimRest = glow.clone().lerp(MOONLIGHT, 0.35) // the rim at rest: the team's color, washed by moonlight
 
     const { x, z } = place(mage.team, mage.slot, size)
     this.root = new THREE.Group()
@@ -1991,14 +2118,22 @@ class Figure {
     const hat = geo.garb.hat[garb.hat]
     this.garb = garb
     this.crest = hat.crest
-    this.robeMaterial = addRim(new THREE.MeshStandardMaterial({ color: robe, vertexColors: true, roughness: 0.62, metalness: 0.08, emissive: glow, emissiveIntensity: 0.05, transparent: true }), glow)
-    this.trimMaterial = new THREE.MeshStandardMaterial({ color: glow, emissive: glow, emissiveIntensity: 0.8, roughness: 0.3 })
-    const gold = new THREE.MeshStandardMaterial({ color: '#c79a52', roughness: 0.3, metalness: 0.9 })
-    this.hatMaterial = addRim(new THREE.MeshStandardMaterial({ color: robe.clone().multiplyScalar(0.75), roughness: 0.66, metalness: 0.05, transparent: true, side: hat.double ? THREE.DoubleSide : THREE.FrontSide }), glow, 0.3)
+    // Wool robes and felt hats with a soft sheen, worn and streaked; embroidered
+    // trim in the team's color; aged brass; dark, grained wood.
+    const sheen = glow.clone().lerp(MOONLIGHT, 0.65).multiplyScalar(0.18)
+    const cloth = { local: true, scale: 6, bump: 0.018, stain: 0.5, stretch: [1, 0.3, 1] }
+    this.robeMaterial = addRim(weathered(new THREE.MeshPhysicalMaterial({ color: robe, vertexColors: true, roughness: 0.82, sheen: 1, sheenColor: sheen, sheenRoughness: 0.5, emissive: glow, emissiveIntensity: 0.015, transparent: true }), cloth), this.rimRest, 0.32)
+    this.trimMaterial = new THREE.MeshStandardMaterial({ color: glow.clone().multiplyScalar(0.55), emissive: glow, emissiveIntensity: 0.2, roughness: 0.55 })
+    const gold = new THREE.MeshStandardMaterial({ color: '#a37c47', roughness: 0.42, metalness: 1, envMap: stage.environment, envMapIntensity: 0.9 })
+    this.hatMaterial = addRim(
+      weathered(new THREE.MeshPhysicalMaterial({ color: robe.clone().multiplyScalar(0.72), roughness: 0.86, sheen: 1, sheenColor: sheen, sheenRoughness: 0.6, transparent: true, side: hat.double ? THREE.DoubleSide : THREE.FrontSide }), cloth),
+      this.rimRest,
+      0.26,
+    )
     this.gemMaterial = new THREE.MeshStandardMaterial({ color: glow, emissive: glow, emissiveIntensity: 1.4, roughness: 0.15, metalness: 0.2, flatShading: garb.staff !== 'orb' })
-    const face = new THREE.MeshStandardMaterial({ color: '#0b0a18', roughness: 0.85 })
-    const eyes = new THREE.MeshBasicMaterial({ color: glow.clone().lerp(new THREE.Color('#ffffff'), 0.35).multiplyScalar(1.8) })
-    const wood = new THREE.MeshStandardMaterial({ color: '#4a3024', roughness: 0.75 })
+    const face = new THREE.MeshStandardMaterial({ color: '#0a0a0c', roughness: 0.85 })
+    const eyes = new THREE.MeshBasicMaterial({ color: glow.clone().lerp(new THREE.Color('#ffffff'), 0.35).multiplyScalar(1.5) })
+    const wood = weathered(new THREE.MeshStandardMaterial({ color: '#3d2b20', roughness: 0.78 }), { local: true, scale: 3, bump: 0.008, stain: 0.7, stretch: [8, 0.4, 8] })
     const paints = { robe: this.robeMaterial, hat: this.hatMaterial, trim: this.trimMaterial, gold, wood, gem: this.gemMaterial }
 
     const add = (geometry, material, position, rotation = [0, 0, 0], parent = this.body) => {
@@ -2064,9 +2199,14 @@ class Figure {
     this.recoil = 0 // 1 as a spell leaves, falling back to 0
     this.thrust = 0 // the recoil, eased in so the strike has a short wind
 
-    add(geo.base, new THREE.MeshStandardMaterial({ color: BASE_TEXT, roughness: 0.4, metalness: 0.45, flatShading: true }), [0, 0, 0], [0, 0, 0], this.root)
-    add(geo.rim, this.trimMaterial, [0, SEAT_Y + 0.005, 0], [Math.PI / 2, 0, Math.PI / 6], this.root)
-    const pool = add(geo.disc, new THREE.MeshBasicMaterial({ map: tex.glow, color: glow, transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending, depthWrite: false }), [0, 0.02, 0], [0, 0, 0], this.root)
+    // A worn stone pedestal with a rune ring inlaid in the team's color.
+    const base = add(geo.base, weathered(new THREE.MeshStandardMaterial({ color: PEDESTAL, roughness: 0.82, flatShading: true }), { scale: 2, bump: 0.02 }), [0, 0, 0], [0, 0, 0], this.root)
+    base.castShadow = base.receiveShadow = true
+    add(geo.rim, new THREE.MeshStandardMaterial({ color: glow.clone().multiplyScalar(0.3), emissive: glow, emissiveIntensity: 0.3, roughness: 0.4 }), [0, SEAT_Y + 0.005, 0], [Math.PI / 2, 0, Math.PI / 6], this.root)
+    // Soft contact shadow where the pedestal meets the floor, under the team's faint pool of light.
+    const contact = add(geo.disc, new THREE.MeshBasicMaterial({ map: tex.glow, color: '#000000', transparent: true, opacity: 0.6, depthWrite: false }), [0, 0.012, 0], [0, 0, 0], this.root)
+    contact.scale.setScalar(3.4)
+    const pool = add(geo.disc, new THREE.MeshBasicMaterial({ map: tex.glow, color: glow, transparent: true, opacity: 0.14, blending: THREE.AdditiveBlending, depthWrite: false }), [0, 0.02, 0], [0, 0, 0], this.root)
     pool.scale.setScalar(4.2)
 
     // The casting circle takes the sigil and color of the spell's school.
@@ -2101,6 +2241,18 @@ class Figure {
     this.sheep = this.makeSheep()
     this.root.add(this.sheep)
     this.sheep.visible = false
+
+    // Solid parts cast shadows, except while the mage is a ghost or on the
+    // lowest tier. Robes and hats take them too, as under a brim.
+    const solid = new Set([this.robeMaterial, this.hatMaterial, this.trimMaterial, gold, wood, face])
+    this.casters = []
+    this.body.traverse((part) => {
+      if (!part.isMesh || !solid.has(part.material)) return
+      part.receiveShadow = part.material === this.robeMaterial || part.material === this.hatMaterial
+      this.casters.push(part)
+    })
+    this.sheep.traverse((part) => part.isMesh && this.casters.push(part))
+    this.shadowed = false
 
     stage.scene.add(this.root)
   }
@@ -2167,6 +2319,7 @@ class Figure {
     const look = schoolLook(spell.school)
     this.tint(look.main)
     this.stage.looks.flash(this.anchor('gem'), look.main, 1.3, 0.22, 0.6)
+    this.stage.glint(this.anchor('gem'), look.main, 0.45, 0.25)
     this.flare = 1
     this.recoil = 1
   }
@@ -2183,6 +2336,7 @@ class Figure {
     const chest = this.anchor('chest')
     this.stage.looks.shatter(chest, new THREE.Color('#ffe9a8'), 22)
     this.stage.looks.flash(chest, new THREE.Color('#fff6d8'), 2.6, 0.35, 0.9)
+    this.stage.glint(chest, FLOW_COLOR, 1, 0.4)
     this.stage.rings.spawn({ at: this.anchor('feet'), radius: 3.2, color: new THREE.Color('#ffd166'), life: 0.5, thick: 0.1, time: this.stage.sparks.time })
   }
 
@@ -2231,11 +2385,16 @@ class Figure {
     if (this.nimbus.visible) this.nimbus.position.y = this.crest + Math.sin(time * 2.2) * 0.04
 
     const opacity = ghost ? (down ? 0.35 : 0.45) : 1
+    const shadowed = !ghost && this.stage.tier > 0
+    if (this.shadowed !== shadowed) {
+      this.shadowed = shadowed
+      for (const part of this.casters) part.castShadow = shadowed
+    }
     this.robeMaterial.opacity = this.hatMaterial.opacity = opacity
     const stone = looks.has('stone') || looks.has('time')
     const status = this.tintRim(dt, time, state, down)
     this.robeMaterial.emissive.copy(this.flash > 0 ? TINTS.flash : stone ? (looks.has('time') ? TINTS.time : TINTS.stone) : (status ?? this.glow))
-    this.robeMaterial.emissiveIntensity = 0.05 + this.flash * this.flash * 0.22 + (stone ? 0.35 : status ? 0.1 + 0.05 * Math.sin(time * 5 + this.phase) : 0)
+    this.robeMaterial.emissiveIntensity = 0.015 + this.flash * this.flash * 0.22 + (stone ? 0.35 : status ? 0.1 + 0.05 * Math.sin(time * 5 + this.phase) : 0)
 
     const casting = Boolean(state?.cast)
     const target = casting ? 0.9 : 0
@@ -2326,7 +2485,7 @@ class Figure {
       if (!look?.tint || down) continue
       if (!tinted || (aura.kind === 'bane' && tinted.kind !== 'bane')) tinted = { kind: aura.kind, color: look.tint === 'school' ? schoolLook(aura.school).main : look.tint }
     }
-    const goal = RIM_GOAL.copy(tinted ? tinted.color : this.glow).multiplyScalar(tinted ? 0.85 + 0.35 * Math.sin(time * 5 + this.phase) : 0.4)
+    const goal = RIM_GOAL.copy(tinted ? tinted.color : this.rimRest).multiplyScalar(tinted ? 0.85 + 0.35 * Math.sin(time * 5 + this.phase) : 0.32)
     const k = Math.min(1, dt * 8)
     this.robeMaterial.userData.rim.value.lerp(goal, k)
     this.hatMaterial.userData.rim.value.lerp(goal.multiplyScalar(0.8), k)
@@ -2534,74 +2693,218 @@ const SKY_FRAGMENT = /* glsl */ `
   void main() {
     vec3 d = normalize(vDir);
     float h = d.y;
-    vec3 col = mix(vec3(0.07, 0.025, 0.12), vec3(0.03, 0.018, 0.09), smoothstep(-0.05, 0.3, h));
-    col = mix(col, vec3(0.008, 0.008, 0.03), smoothstep(0.3, 0.95, h));
-    float drift = uTime * 0.012;
-    float teal = pow(fbm(d * 2.6 + vec3(drift, 0.0, 0.0)), 3.0);
-    float rose = pow(fbm(d * 3.1 + vec3(5.0, drift, 2.0)), 3.0);
-    float lift = smoothstep(-0.1, 0.55, h);
-    col += vec3(0.05, 0.5, 0.65) * teal * lift * 1.0;
-    col += vec3(0.6, 0.1, 0.5) * rose * lift * 0.8;
-    col += vec3(0.8, 0.3, 0.6) * exp(-abs(h - 0.02) * 18.0) * 0.12;
-    col += vec3(1.0, 0.1, 0.25) * uSurge * 0.25 * exp(-abs(h) * 4.0);
+    // A cold night: a near-black zenith over a faint haze at the horizon, and the void below.
+    vec3 col = mix(vec3(0.022, 0.025, 0.033), vec3(0.003, 0.004, 0.007), smoothstep(0.0, 0.6, h));
+    col = mix(col, vec3(0.005, 0.005, 0.007), smoothstep(0.02, -0.3, h));
+    // Banks of cloud on a dome over the arena, their edges lit from the moon's side.
+    vec3 moon = normalize(vec3(-0.6, 0.62, -0.3));
+    vec2 dome = d.xz / (max(h, 0.0) + 0.2);
+    float drift = uTime * 0.008;
+    float cloud = fbm(vec3(dome * 0.9 + vec2(drift, 0.0), 1.7));
+    float lit = fbm(vec3(dome * 0.9 + vec2(drift, 0.0) - moon.xz * 0.15, 1.7));
+    float cover = smoothstep(0.4, 0.75, cloud) * smoothstep(-0.02, 0.1, h);
+    float edge = clamp((cloud - lit) * 4.0 + 0.3, 0.0, 1.0);
+    float m = max(dot(d, moon), 0.0);
+    vec3 cloudCol = mix(vec3(0.014, 0.015, 0.019), vec3(0.06, 0.064, 0.078), edge) * (0.6 + 0.8 * pow(m, 3.0));
+    col = mix(col, cloudCol, cover * 0.85);
+    // The moon's halo, veiled by the clouds.
+    col += vec3(0.55, 0.62, 0.8) * (pow(m, 60.0) * 0.1 + pow(m, 8.0) * 0.015) * (1.0 - cover * 0.6);
+    // Far fires low on the horizon, warm against the cold sky.
+    col += vec3(0.03, 0.012, 0.005) * exp(-abs(h - 0.01) * 30.0) * smoothstep(0.45, 0.7, fbm(d * 4.0));
+    // The surge stains the horizon red.
+    col += vec3(0.9, 0.08, 0.12) * uSurge * 0.22 * exp(-abs(h) * 4.0);
     gl_FragColor = vec4(col, 1.0);
   }
 `
 
-const FLOOR_VERTEX = /* glsl */ `
-  varying vec3 vWorld;
-  void main() { vec4 w = modelMatrix * vec4(position, 1.0); vWorld = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }
+/** Fine surface detail on (1) or off (0), shared by every weathered material and set by the quality tier. */
+const DETAIL = { value: 1 }
+
+/**
+ * Lit procedural stone, shared by the floor and the ruins: hashes, value
+ * noise with its gradient (after Inigo Quilez) and a 3D value noise.
+ */
+const NOISE_GLSL = /* glsl */ `
+  float hash12(vec2 p) {
+    vec3 q = fract(vec3(p.xyx) * 0.1031);
+    q += dot(q, q.yzx + 33.33);
+    return fract((q.x + q.y) * q.z);
+  }
+  float hash13(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.zyx + 31.32);
+    return fract((p.x + p.y) * p.z);
+  }
+  // (value, d/dx, d/dy)
+  vec3 noised(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    vec2 du = 6.0 * f * (1.0 - f);
+    float a = hash12(i);
+    float b = hash12(i + vec2(1.0, 0.0));
+    float c = hash12(i + vec2(0.0, 1.0));
+    float d = hash12(i + vec2(1.0, 1.0));
+    float k = a - b - c + d;
+    return vec3(a + (b - a) * u.x + (c - a) * u.y + k * u.x * u.y, du * (vec2(b - a, c - a) + k * u.yx));
+  }
+  vec3 fbmd(vec2 p, int octaves) {
+    vec3 sum = vec3(0.0);
+    float amp = 0.5;
+    float freq = 1.0;
+    for (int k = 0; k < 4; k++) {
+      if (k >= octaves) break;
+      vec3 n = noised(p * freq + float(k) * 17.13);
+      sum += amp * vec3(n.x, n.yz * freq);
+      freq *= 2.03;
+      amp *= 0.5;
+    }
+    return sum / (1.0 - amp * 2.0);
+  }
+  float noise3(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(
+      mix(mix(hash13(i), hash13(i + vec3(1, 0, 0)), f.x), mix(hash13(i + vec3(0, 1, 0)), hash13(i + vec3(1, 1, 0)), f.x), f.y),
+      mix(mix(hash13(i + vec3(0, 0, 1)), hash13(i + vec3(1, 0, 1)), f.x), mix(hash13(i + vec3(0, 1, 1)), hash13(i + vec3(1, 1, 1)), f.x), f.y),
+      f.z);
+  }
 `
-const FLOOR_FRAGMENT = /* glsl */ `
+
+/**
+ * The arena floor, drawn into a standard material so it takes the lights,
+ * shadows, fog and environment: worn flagstones laid in rings, with joints,
+ * cracks, scorch marks and pooled rain; brass rings inlaid around the field;
+ * the rift as a fissure glowing from below; and the stone under each row
+ * faintly lit in its team's color. Lines are filtered by their size on
+ * screen, and fine relief fades out where a pixel spans too much floor to
+ * show it. GROUND_LITE, for the lowest tier, leaves out the fine grain,
+ * cracks, grime, scorch marks and rain.
+ */
+const GROUND_GLSL = /* glsl */ `
   uniform float uTime;
   uniform float uSurge;
   uniform vec3 uDawn;
   uniform vec3 uDusk;
-  varying vec3 vWorld;
+  varying vec3 vGround;
 
-  // A line of half-width w around v = 0. Lines thinner than a pixel draw a
-  // pixel wide but fainter, so far lines fade out instead of shimmering.
-  float line(float v, float w) {
-    float aa = max(fwidth(v), 1e-5);
-    float drawn = max(w, aa);
-    return (1.0 - smoothstep(drawn - aa, drawn + aa, abs(v))) * clamp(w / drawn, 0.0, 1.0);
-  }
+  struct Stone { float joint; vec2 away; float id; };
+  struct Ground { vec3 albedo; float rough; float metal; vec3 normal; vec3 glow; };
 
-  // Grid lines filtered by their on-screen size (after Ben Golus' pristine grid).
-  float grid(vec2 uv, float width) {
-    vec2 d = max(fwidth(uv), vec2(1e-5));
-    vec2 drawn = max(vec2(width), d);
-    vec2 g = 1.0 - abs(fract(uv) * 2.0 - 1.0);
-    vec2 lines = smoothstep(drawn + d * 1.5, drawn - d * 1.5, g) * clamp(width / drawn, 0.0, 1.0);
-    lines = mix(lines, vec2(width), clamp(d * 2.0 - 1.0, 0.0, 1.0));
-    return mix(lines.x, 1.0, lines.y);
-  }
+  // A line of half-width w around v = 0, antialiased over px.
+  float inlay(float v, float w, float px) { return 1.0 - smoothstep(w - px, w + px, abs(v)); }
 
-  void main() {
-    vec2 p = vWorld.xz;
+  // Flagstones in rings around the center: the distance to the nearest joint,
+  // the way out of it (a unit vector in xz) and a hash for the stone.
+  Stone flagstone(vec2 p) {
     float r = length(p);
+    vec2 radial = p / max(r, 1e-4);
+    vec2 tangent = vec2(-radial.y, radial.x);
+    if (r < 2.4) return Stone(2.4 - r, -radial, 0.37);
+    float ring = floor((r - 2.4) / 1.55);
+    float inner = 2.4 + ring * 1.55;
+    float count = floor(6.2832 * (inner + 0.775) / 1.7);
+    float t = atan(p.y, p.x) / 6.2832 * count + mod(ring, 2.0) * 0.5;
+    float along = fract(t) * 6.2832 * r / count;
+    float across = 6.2832 * r / count - along;
+    Stone s = Stone(r - inner, radial, hash12(vec2(ring, mod(floor(t), count))));
+    if (inner + 1.55 - r < s.joint) s = Stone(inner + 1.55 - r, -radial, s.id);
+    if (along < s.joint) s = Stone(along, tangent, s.id);
+    if (across < s.joint) s = Stone(across, -tangent, s.id);
+    return s;
+  }
+
+  Ground ground(vec2 p) {
+    float px = max(length(fwidth(p)), 1e-4);
+    float near = 1.0 - smoothstep(0.03, 0.12, px);
+    float r = length(p);
+    Stone s = flagstone(p);
+
+    // Each stone its own tone, warmth and slight tilt.
+    float tone = 0.82 + 0.36 * s.id;
+    float warm = hash12(vec2(s.id * 91.7, 3.1)) - 0.5;
+    vec2 tilt = (vec2(hash12(vec2(s.id, 7.7)), hash12(vec2(s.id, 1.3))) - 0.5) * 0.06;
+    #ifdef GROUND_LITE
+    vec3 broad = fbmd(p * 0.45 + s.id * 37.0, 2);
+    vec3 grain = vec3(0.5, 0.0, 0.0);
+    #else
+    vec3 broad = fbmd(p * 0.45 + s.id * 37.0, 3);
+    vec3 grain = noised(p * 7.0 + s.id * 13.0);
+    #endif
+
+    // Worn, rounded edges falling into the joints.
+    float edge = clamp(s.joint / 0.1, 0.0, 1.0);
+    vec2 slope = s.away * (1.0 - edge) * 0.5 * near + tilt + broad.yz * 0.04 + grain.yz * 0.01 * near;
+    float joint = inlay(s.joint, 0.02, px);
+
+    vec3 albedo = vec3(0.075, 0.07, 0.064) * tone * (0.62 + 0.76 * broad.x) * (0.86 + 0.28 * mix(0.5, grain.x, near));
+    albedo *= vec3(1.0 + warm * 0.14, 1.0, 1.0 - warm * 0.14);
+    albedo *= 0.7 + 0.3 * smoothstep(0.0, 0.35, s.joint);
+    float rough = 0.74 + 0.2 * grain.x;
+    float wet = 0.0;
+
+    #ifndef GROUND_LITE
+    // Grime in broad drifts across the whole floor.
+    albedo *= 0.55 + 0.6 * noised(p * 0.08 + 5.0).x;
+    // Cracks through one stone in five, antialiased by the noise's own slope.
+    if (hash12(vec2(s.id, 4.2)) > 0.8) {
+      vec3 crackLine = noised(p * 1.4 + s.id * 9.0);
+      float spread = length(crackLine.yz) * 1.4 * px * 1.5;
+      albedo *= 1.0 - 0.5 * (1.0 - smoothstep(0.004, 0.004 + spread, abs(crackLine.x - 0.5)));
+    }
+    // Old scorch marks, and rain pooled in the hollows.
+    albedo *= 1.0 - 0.55 * smoothstep(0.62, 0.85, noised(p * 0.2 + 71.0).x);
+    wet = smoothstep(0.55, 0.63, fbmd(p * 0.15 + 13.0, 2).x);
+    albedo *= 1.0 - 0.3 * wet;
+    #endif
+    rough = mix(rough, 0.14, wet * (1.0 - joint));
+    slope *= 1.0 - 0.85 * wet;
+    // Mortar.
+    albedo = mix(albedo, vec3(0.022, 0.02, 0.018), joint);
+    rough = mix(rough, 0.95, joint);
+    slope *= 1.0 - joint;
+
+    // Brass inlay: two rings with engraved ticks between them over dark polished
+    // stone, and a third ring far out.
     float ang = atan(p.y, p.x);
-    vec3 base = vec3(0.035, 0.03, 0.085) * (1.25 - smoothstep(0.0, 22.0, r) * 0.6);
-    vec3 side = p.y > 0.0 ? uDawn : uDusk;
-    float sideFade = smoothstep(0.0, 2.0, abs(p.y)) * (1.0 - smoothstep(6.0, 14.0, abs(p.y)));
-    float cells = grid(p * 0.5, 0.06) * (1.0 - smoothstep(8.0, 18.0, r));
-    vec3 col = base + side * (cells * 0.07 + sideFade * 0.025);
-    float spin = ang + uTime * 0.05;
-    float ringA = line(r - 10.2, 0.05) + line(r - 10.7, 0.03);
-    // Tick marks: distance to the nearest tick in turns, filtered by how many turns a pixel spans.
-    float turns = spin * 24.0 / 6.2832;
-    float turnWidth = length(fwidth(p)) / max(r, 1e-3) * 24.0 / 6.2832;
-    float tick = abs(fract(turns + 0.54) - 0.5);
-    float ticks = line(r - 10.45, 0.22) * (1.0 - smoothstep(0.04 - turnWidth, 0.04 + turnWidth, tick));
-    float ringB = line(r - 15.5, 0.06) * (0.6 + 0.4 * sin(spin * 6.0 + uTime));
-    col += mix(vec3(0.45, 0.35, 1.0), vec3(1.0, 0.75, 0.35), 0.5 + 0.5 * sin(ang * 2.0 + uTime * 0.3)) * (ringA + ticks) * 0.55;
-    col += vec3(0.6, 0.4, 1.0) * ringB * 0.35;
-    float rift = exp(-abs(p.y) * 2.6) * (1.0 - smoothstep(9.0, 16.0, abs(p.x)));
-    float flow = 0.6 + 0.4 * sin(p.x * 1.7 - uTime * 2.0);
-    col += mix(uDawn, uDusk, 0.5 + 0.5 * sin(p.x * 0.6 + uTime * 0.4)) * rift * flow * (0.3 + uSurge * 1.2);
-    col += vec3(1.0, 0.95, 1.0) * exp(-abs(p.y) * 14.0) * (1.0 - smoothstep(8.0, 15.0, abs(p.x))) * 0.18;
-    float edge = 1.0 - smoothstep(19.0, 24.0, r);
-    gl_FragColor = vec4(col * edge, 1.0);
+    float turns = abs(fract(ang / 6.2832 * 24.0) - 0.5);
+    float turnPx = px / max(r, 1.0) * 24.0 / 6.2832;
+    float tick = (1.0 - smoothstep(0.035 - turnPx, 0.035 + turnPx, turns)) * inlay(r - 10.45, 0.18, px);
+    float brass = max(max(inlay(r - 10.2, 0.045, px), inlay(r - 10.7, 0.03, px)), max(inlay(r - 15.5, 0.04, px), tick));
+    float channel = inlay(r - 10.45, 0.25, px) * (1.0 - brass);
+    albedo = mix(albedo, vec3(0.022, 0.021, 0.022) * (0.8 + 0.4 * broad.x), channel);
+    rough = mix(rough, 0.32, channel);
+    albedo = mix(albedo, vec3(0.3, 0.21, 0.11) * (0.6 + 0.6 * broad.x), brass);
+    rough = mix(rough, 0.3 + 0.25 * grain.x, brass);
+    slope *= 1.0 - 0.85 * max(brass, channel);
+
+    vec3 glow = vec3(0.0);
+    // The rift: a jagged fissure across the middle, lit from below.
+    if (abs(p.y) < 2.5 && abs(p.x) < 15.0) {
+      float wander = (noised(vec2(p.x * 0.6, 3.0)).x - 0.5) * 0.45 + (noised(vec2(p.x * 2.7, 9.0)).x - 0.5) * 0.12;
+      float dz = abs(p.y - wander);
+      float reach = 1.0 - smoothstep(9.0, 15.0, abs(p.x));
+      float fissure = inlay(dz, 0.03, px) * reach;
+      albedo *= (1.0 - 0.75 * exp(-dz * 2.5) * reach) * (1.0 - fissure);
+      vec3 riftTint = mix(mix(uDawn, uDusk, 0.5 + 0.5 * sin(p.x * 0.6 + uTime * 0.4)), vec3(1.0), 0.3);
+      float flow = 0.75 + 0.25 * sin(p.x * 1.7 - uTime * 2.0);
+      glow += riftTint * reach * flow * (fissure * 1.1 + exp(-dz * 6.0) * 0.05) * (0.45 + uSurge * 1.6);
+    }
+    // Each team's side: the joints under its row faintly lit in its color.
+    float side = smoothstep(1.5, 3.0, abs(p.y)) * (1.0 - smoothstep(4.5, 7.0, abs(p.y))) * (1.0 - smoothstep(10.0, 14.0, abs(p.x)));
+    vec3 team = p.y > 0.0 ? uDawn : uDusk;
+    glow += team * side * (joint * 0.02 + 0.0025);
+    // A faint warm thread in the ring's channel, brighter in the surge.
+    glow += vec3(1.0, 0.6, 0.25) * inlay(r - 10.45, 0.012, px) * (0.06 + 0.08 * pow(0.5 + 0.5 * sin(ang * 3.0 - uTime * 0.4), 8.0)) * (1.0 + uSurge * 4.0);
+
+    // Rubble beyond the curb, fading into the dark at the edge.
+    float outside = smoothstep(19.1, 19.6, r);
+    albedo *= 1.0 - 0.5 * outside;
+    rough = mix(rough, 0.95, outside);
+    albedo *= 1.0 - smoothstep(20.5, 24.0, r);
+
+    return Ground(albedo, rough, brass * 0.6, normalize(vec3(-slope.x, 1.0, -slope.y)), glow);
   }
 `
 const RIFT_FRAGMENT = /* glsl */ `
@@ -2624,10 +2927,88 @@ const RIFT_FRAGMENT = /* glsl */ `
     float fadeX = smoothstep(0.0, 0.18, vUv.x) * smoothstep(1.0, 0.82, vUv.x);
     vec3 col = mix(uDawn, uDusk, 0.5 + 0.5 * sin(vUv.x * 14.0 + uTime * 0.8));
     col = mix(col, vec3(1.0), streak * 0.6);
-    float a = (0.05 + 0.3 * n * n + 0.6 * streak) * fadeY * fadeX * (0.6 + uSurge * 1.5);
+    float a = (0.05 + 0.3 * n * n + 0.6 * streak) * fadeY * fadeX * (0.22 + uSurge * 1.6);
     gl_FragColor = vec4(col * a, a);
   }
 `
+
+/**
+ * The floor's material, its color, roughness, metal, normal and glow drawn by
+ * GROUND_GLSL: a standard material, or with `lite` a diffuse-only one with
+ * less detail, for the lowest tier.
+ */
+function groundMaterial(shared, lite = false) {
+  const material = lite ? new THREE.MeshLambertMaterial() : new THREE.MeshStandardMaterial({ roughness: 1, metalness: 0 })
+  material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, shared)
+    shader.vertexShader = 'varying vec3 vGround;\n' + shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n  vGround = (modelMatrix * vec4(transformed, 1.0)).xyz;')
+    shader.fragmentShader =
+      (lite ? '#define GROUND_LITE\n' : '') +
+      NOISE_GLSL +
+      GROUND_GLSL +
+      shader.fragmentShader
+        .replace('#include <color_fragment>', '#include <color_fragment>\n  Ground stone = ground(vGround.xz);\n  diffuseColor.rgb = stone.albedo;')
+        .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = stone.rough;')
+        .replace('#include <metalnessmap_fragment>', 'float metalnessFactor = stone.metal;')
+        .replace('#include <normal_fragment_maps>', 'normal = normalize((viewMatrix * vec4(stone.normal, 0.0)).xyz);')
+        .replace('#include <emissivemap_fragment>', 'totalEmissiveRadiance = stone.glow;')
+  }
+  material.customProgramCacheKey = () => (lite ? 'ground-lite' : 'ground')
+  return material
+}
+
+/**
+ * Weather a standard material: mottle its color and roughness with noise and
+ * give it a fine relief. The noise sits in world space for things that stand
+ * still, or in the model's own space (`local`) for things that move, so it
+ * does not swim. `stretch` scales it per axis, as grain along a staff; `bump`
+ * is the relief's height and `stain` how much the color mottles. The lowest
+ * tier turns it off through the shared DETAIL uniform, without recompiling.
+ */
+function weathered(material, { scale = 1.5, bump = 0.03, stain = 0.6, local = false, stretch = [1, 1, 1] } = {}) {
+  const uniforms = { uWeather: { value: new THREE.Vector3(scale, bump, stain) }, uStretch: { value: new THREE.Vector3(...stretch) }, uDetail: DETAIL }
+  const place = local
+    ? 'vWeather = transformed;'
+    : 'vWeather = (modelMatrix * vec4(transformed, 1.0)).xyz;\n  #ifdef USE_INSTANCING\n  vWeather = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;\n  #endif'
+  material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms)
+    shader.vertexShader = 'varying vec3 vWeather;\n' + shader.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>\n  ${place}`)
+    shader.fragmentShader =
+      'uniform vec3 uWeather;\nuniform vec3 uStretch;\nuniform float uDetail;\nvarying vec3 vWeather;\n' +
+      NOISE_GLSL +
+      shader.fragmentShader
+        .replace(
+          '#include <color_fragment>',
+          `#include <color_fragment>
+  float wBroad = 0.5;
+  float wFine = 0.5;
+  float wHeight = 0.0;
+  if (uDetail > 0.5) {
+    vec3 wq = vWeather * uStretch * uWeather.x;
+    wBroad = noise3(wq * 0.4);
+    wFine = noise3(wq * 2.1) * 0.65 + noise3(wq * 5.3) * 0.35;
+    wHeight = wBroad * 0.4 + wFine * 0.6;
+  }
+  diffuseColor.rgb *= mix(1.0, 0.5 + wBroad, uWeather.z) * (0.82 + 0.36 * wFine);`,
+        )
+        .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\n  roughnessFactor = clamp(roughnessFactor * (0.82 + 0.3 * wFine), 0.0, 1.0);')
+        .replace(
+          '#include <normal_fragment_maps>',
+          `#include <normal_fragment_maps>
+  if (uDetail > 0.5) {
+    vec3 dpx = dFdx(-vViewPosition);
+    vec3 dpy = dFdy(-vViewPosition);
+    vec3 r1 = cross(dpy, normal);
+    vec3 r2 = cross(normal, dpx);
+    float det = dot(dpx, r1);
+    vec2 dh = vec2(dFdx(wHeight), dFdy(wHeight)) * uWeather.y;
+    normal = normalize(abs(det) * normal - sign(det) * (dh.x * r1 + dh.y * r2));
+  }`,
+        )
+  }
+  material.customProgramCacheKey = () => `weathered-${local}`
+  return material
+}
 
 /**
  * Bloom's bright pass, rewritten: brightness is the brightest channel, not
@@ -2649,24 +3030,35 @@ const BRIGHT_PASS = /* glsl */ `
   }
 `
 
-/** The final pass: tone mapping and sRGB, plus a little noise so dark gradients do not band. */
+/**
+ * The final pass: tone mapping and sRGB, then a fine film grain that shifts
+ * every frame, strongest in the mid tones, for a little grit; it also keeps
+ * dark gradients from banding.
+ */
 function ditheredOutput() {
   const pass = new OutputPass()
-  const dither = 'gl_FragColor.rgb += (fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) - 0.5) / 255.0;'
-  pass.material.fragmentShader = pass.material.fragmentShader.replace(/}\s*$/, `  ${dither}\n}`)
+  pass.uniforms.uGrain = { value: 0 }
+  const grain = [
+    'float grain = fract(sin(dot(gl_FragCoord.xy + uGrain * vec2(37.0, 17.0), vec2(12.9898, 78.233))) * 43758.5453) - 0.5;',
+    'float mids = 1.0 - abs(dot(gl_FragColor.rgb, vec3(0.299, 0.587, 0.114)) * 2.0 - 1.0);',
+    'gl_FragColor.rgb += grain * (1.5 + 7.0 * mids) / 255.0;',
+  ].join('\n  ')
+  pass.material.fragmentShader = pass.material.fragmentShader.replace('uniform sampler2D tDiffuse;', 'uniform sampler2D tDiffuse;\n\t\tuniform float uGrain;').replace(/}\s*$/, `  ${grain}\n}`)
   return pass
 }
 
 /**
  * Render quality tiers. Each caps the pixel ratio, sets the MSAA samples of
- * the scene buffer and thins small particles. The stage starts from a guess
- * about the device and the governor moves between tiers as frames allow.
+ * the scene buffer and the size of the moon's shadow map, and thins small
+ * particles; the lowest also draws a plainer floor without weathering and
+ * refreshes shadows every third frame. The stage starts from a guess about
+ * the device and the governor moves between tiers as frames allow.
  */
 const QUALITY = [
-  { name: 'low', ratio: 0.85, samples: 0, density: 0.5 },
-  { name: 'medium', ratio: 1, samples: 2, density: 0.75 },
-  { name: 'high', ratio: 1.5, samples: 4, density: 1 },
-  { name: 'ultra', ratio: 2, samples: 4, density: 1 },
+  { name: 'low', ratio: 0.85, samples: 0, density: 0.5, shadow: 1024 },
+  { name: 'medium', ratio: 1, samples: 2, density: 0.75, shadow: 1024 },
+  { name: 'high', ratio: 1.5, samples: 4, density: 1, shadow: 2048 },
+  { name: 'ultra', ratio: 2, samples: 4, density: 1, shadow: 2048 },
 ]
 
 /** The tier to start on: `?quality=` pins one, else a guess from the GPU and device. */
@@ -2681,6 +3073,10 @@ function startQuality(renderer) {
   const touch = matchMedia('(pointer: coarse)').matches
   return { tier: small ? 1 : touch ? 2 : 3, pinned: false }
 }
+
+/** Rift dust: the two teams' colors and a pale grey, washed toward white. */
+const RIFT_DUST = [TEAM_GLOW[0], TEAM_GLOW[1], '#d6d3e4'].map((hex) => new THREE.Color(hex).lerp(new THREE.Color('#ffffff'), 0.45))
+const EMBER = new THREE.Color('#ff9a52')
 
 /** The 3D world: arena, mages, particles, flights, camera and post effects. */
 class Stage {
@@ -2703,11 +3099,14 @@ class Stage {
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' })
     // Neutral tone mapping keeps hues and saturation where ACES bleaches bright colors toward white.
     renderer.toneMapping = THREE.NeutralToneMapping
-    renderer.toneMappingExposure = 1
+    renderer.toneMappingExposure = 1.1
+    // Moonlight casts soft shadows: the mages and the ruins stand on the stone instead of floating over it.
+    renderer.shadowMap.enabled = true
+    renderer.shadowMap.type = THREE.PCFShadowMap
     this.renderer = renderer
 
     this.scene = new THREE.Scene()
-    this.scene.fog = new THREE.FogExp2('#090520', 0.012)
+    this.scene.fog = new THREE.FogExp2('#0a0b0f', 0.013)
     this.camera = new THREE.PerspectiveCamera(40, 1, 0.1, 500)
     this.camera.position.set(0, 7, 15)
 
@@ -2723,7 +3122,8 @@ class Stage {
     const sizeBloom = this.bloom.setSize.bind(this.bloom)
     this.bloom.setSize = (width, height) => sizeBloom(Math.max(2, Math.round(this.width || width)), Math.max(2, Math.round(this.height || height)))
     this.composer.addPass(this.bloom)
-    this.composer.addPass(ditheredOutput())
+    this.output = ditheredOutput()
+    this.composer.addPass(this.output)
 
     const gl = renderer.getContext()
     this.focus = new Focus()
@@ -2751,30 +3151,26 @@ class Stage {
     this.shared = shared
     this.bakeSky()
 
-    // Stars: many faint ones and a few bright ones, drawn as soft round points.
-    for (const [count, size, opacity] of [
-      [1500, 2.2, 0.75],
-      [140, 4.2, 0.95],
-    ]) {
-      const stars = new Float32Array(count * 3)
-      const colors = new Float32Array(count * 3)
-      for (let i = 0; i < count; i++) {
-        const dir = randomDirection()
-        dir.y = Math.abs(dir.y) * 0.9 + 0.05
-        dir.normalize().multiplyScalar(260)
-        stars.set(point(dir), i * 3)
-        const c = new THREE.Color().setHSL(rand(0.5, 0.95), 0.6, rand(0.7, 1))
-        colors.set([c.r, c.g, c.b], i * 3)
-      }
-      const geometry = new THREE.BufferGeometry()
-      geometry.setAttribute('position', new THREE.BufferAttribute(stars, 3))
-      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
-      const material = new THREE.PointsMaterial({ size, map: textures().glow, sizeAttenuation: false, vertexColors: true, fog: false, transparent: true, opacity, depthWrite: false, blending: THREE.AdditiveBlending })
-      this.scene.add(new THREE.Points(geometry, material))
+    // A few faint stars between the clouds.
+    const count = 420
+    const stars = new Float32Array(count * 3)
+    const colors = new Float32Array(count * 3)
+    for (let i = 0; i < count; i++) {
+      const dir = randomDirection()
+      dir.y = Math.abs(dir.y) * 0.85 + 0.15
+      stars.set(point(dir.normalize().multiplyScalar(260)), i * 3)
+      const c = new THREE.Color().setHSL(rand(0.55, 0.65), 0.3, rand(0.6, 0.9))
+      colors.set([c.r, c.g, c.b], i * 3)
     }
+    const sky = new THREE.BufferGeometry()
+    sky.setAttribute('position', new THREE.BufferAttribute(stars, 3))
+    sky.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+    this.scene.add(new THREE.Points(sky, new THREE.PointsMaterial({ size: 2, map: textures().glow, sizeAttenuation: false, vertexColors: true, fog: false, transparent: true, opacity: 0.4, depthWrite: false, blending: THREE.AdditiveBlending })))
 
-    const floor = new THREE.Mesh(new THREE.CircleGeometry(24, 160).rotateX(-Math.PI / 2), new THREE.ShaderMaterial({ uniforms: shared, vertexShader: FLOOR_VERTEX, fragmentShader: FLOOR_FRAGMENT }))
-    this.scene.add(floor)
+    this.grounds = [groundMaterial(shared), groundMaterial(shared, true)]
+    this.floor = new THREE.Mesh(new THREE.CircleGeometry(24, 160).rotateX(-Math.PI / 2), this.grounds[0])
+    this.floor.receiveShadow = true
+    this.scene.add(this.floor)
 
     // The underside of the floating arena: a craggy cone, its top ring kept true to the floor edge.
     const crag = new THREE.ConeGeometry(24, 14, 72, 6, true).rotateX(Math.PI)
@@ -2788,7 +3184,7 @@ class Stage {
       const swell = 1 + (seed - Math.floor(seed) - 0.5) * 0.12 * depth
       corner.setXYZ(i, x * swell, y + Math.sin(seed) * 0.35, z * swell)
     }
-    const rock = new THREE.Mesh(crag, new THREE.MeshStandardMaterial({ color: '#15112b', roughness: 0.9, flatShading: true }))
+    const rock = new THREE.Mesh(crag, weathered(new THREE.MeshStandardMaterial({ color: '#2b2825', roughness: 0.95, flatShading: true }), { scale: 0.8, bump: 0.08 }))
     rock.position.y = -7.02
     this.scene.add(rock)
 
@@ -2799,53 +3195,84 @@ class Stage {
     rift.position.y = 1.6
     this.scene.add(rift)
 
-    // Pillars: a turned column with a plinth and capital, a glowing band and a floating crystal.
-    const stone = new THREE.MeshStandardMaterial({ color: '#1a1733', roughness: 0.5, metalness: 0.3 })
-    const column = lathe(
-      profile(
-        [
-          [0.001, 0],
-          [0.92, 0],
-          [0.95, 0.2],
-          [0.8, 0.34],
-          [0.62, 0.5],
-          [0.5, 3.55],
-          [0.66, 3.78],
-          [0.74, 3.98],
-          [0.56, 4.14],
-          [0.001, 4.2],
-        ],
-        40,
-      ),
-      24,
-    )
-    const ringGeometry = new THREE.TorusGeometry(0.58, 0.035, 8, 48).rotateX(Math.PI / 2)
-    const crystalGeometry = new THREE.OctahedronGeometry(0.6, 0)
-    const glows = TEAM_GLOW.map((hex) => {
-      const color = new THREE.Color(hex)
-      return {
-        band: new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 1, roughness: 0.3 }),
-        crystal: new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 1.6, roughness: 0.15, metalness: 0.1, flatShading: true }),
-      }
+    this.buildRuins()
+
+    // The moon breaks through over the field: a broad beam from high above one
+    // flank that lights both rows alike, casts their shadows sideways and falls
+    // off before the ruins, so the edges sink into the dark. A dim sky light
+    // and a warm low fill from the far fires on the other flank fill the rest.
+    this.scene.add(new THREE.HemisphereLight('#8794b8', '#1d1813', 0.45))
+    const skylight = new THREE.DirectionalLight('#b8c6f0', 0.5)
+    skylight.position.set(-6, 16, 1.5)
+    const moon = new THREE.SpotLight('#c8d4ff', 2.6, 0, 0.78, 0.6, 0)
+    moon.position.set(-8, 25, 0)
+    moon.castShadow = true
+    moon.shadow.camera.near = 10
+    moon.shadow.camera.far = 50
+    moon.shadow.bias = -0.0005
+    moon.shadow.normalBias = 0.03
+    this.moon = moon
+    const embers = new THREE.DirectionalLight('#ff8a4a', 0.3)
+    embers.position.set(10, 3, -1)
+    this.scene.add(skylight, moon, moon.target, embers)
+    // Flashes of spell light: two lights lent out in turn as spells leave and land.
+    this.glints = Array.from({ length: 2 }, () => {
+      const light = new THREE.PointLight('#ffffff', 0, 9, 2)
+      this.scene.add(light)
+      return { light, peak: 0, life: 1, age: 1 }
     })
-    this.crystals = []
+  }
+
+  /**
+   * Weathered stone around the field: a curb of fitted blocks, some sunk or
+   * missing, and a colonnade of fluted columns, most of them broken, their
+   * fallen drums lying outside the curb. Nothing out here glows, so the eye
+   * stays on the fight.
+   */
+  buildRuins() {
+    const stone = weathered(new THREE.MeshStandardMaterial({ color: '#3a3732', roughness: 0.92 }), { scale: 1.3, bump: 0.035 })
+    const lay = (mesh) => {
+      mesh.castShadow = mesh.receiveShadow = true
+      this.scene.add(mesh)
+      return mesh
+    }
+    const blocks = 44
+    const curb = new THREE.InstancedMesh(new RoundedBoxGeometry(2.62, 0.34, 0.9, 2, 0.07), stone, blocks)
+    const place = new THREE.Object3D()
+    let laid = 0
+    for (let i = 0; i < blocks; i++) {
+      if (i % 13 === 5) continue // a gap where a block was carried off
+      const a = (i / blocks) * Math.PI * 2 + rand(-0.004, 0.004)
+      const sunk = rand(0.02, 0.12) + (i % 9 === 2 ? 0.14 : 0)
+      place.position.set(Math.cos(a) * 19.75, 0.17 - sunk, Math.sin(a) * 19.75)
+      place.rotation.set(rand(-0.025, 0.025), -a + Math.PI / 2 + rand(-0.015, 0.015), rand(-0.03, 0.03))
+      place.updateMatrix()
+      curb.setMatrixAt(laid++, place.matrix)
+    }
+    curb.count = laid
+    lay(curb)
+
+    const whole = column(3.4)
+    const tall = column(2.5, 1.3)
+    const short = column(1.35, 4.1)
+    const drum = column(0.9, 0, true)
+    // The columns straight behind each row stand lowest, so the far row's skyline stays clear.
+    const kinds = [whole, short, short, tall, whole, short, short, whole]
     for (let i = 0; i < 8; i++) {
       const a = (i / 8) * Math.PI * 2 + Math.PI / 8
-      const glow = glows[Math.sin(a) > 0 ? 0 : 1]
-      const pillar = new THREE.Mesh(column, stone)
-      pillar.position.set(Math.cos(a) * 17, 0, Math.sin(a) * 17)
-      const band = new THREE.Mesh(ringGeometry, glow.band)
-      band.position.set(pillar.position.x, 3.62, pillar.position.z)
-      this.scene.add(pillar, band)
-      const crystal = new THREE.Mesh(crystalGeometry, glow.crystal)
-      crystal.position.set(pillar.position.x, 5.3, pillar.position.z)
-      crystal.scale.y = 1.7
-      this.scene.add(crystal)
-      this.crystals.push({ mesh: crystal, phase: i })
+      const pillar = lay(new THREE.Mesh(kinds[i], stone))
+      pillar.position.set(Math.cos(a) * 17, -0.04, Math.sin(a) * 17)
+      pillar.rotation.set(rand(-0.02, 0.02), rand(0, Math.PI * 2), rand(-0.02, 0.02))
+      if (kinds[i] === whole) continue
+      // A fallen drum, rolled out past the curb.
+      const fallen = lay(new THREE.Mesh(drum, stone))
+      const b = a + rand(-0.06, 0.06)
+      fallen.position.set(Math.cos(b) * 21.4, 0.45, Math.sin(b) * 21.4)
+      fallen.rotation.set(0, -b + rand(-0.6, 0.6), Math.PI / 2)
     }
 
-    // Drifting rocks far out: a few craggy shapes shared by all of them.
-    const rocks = Array.from({ length: 5 }, (_, k) => {
+    // Drifting rocks far out and low, faded by the fog.
+    const shapes = Array.from({ length: 4 }, (_, k) => {
       const shape = new THREE.IcosahedronGeometry(1, 1)
       const corners = shape.attributes.position
       for (let i = 0; i < corners.count; i++) {
@@ -2856,30 +3283,27 @@ class Stage {
       shape.computeVertexNormals()
       return shape
     })
-    const rockMaterial = new THREE.MeshStandardMaterial({ color: '#1d1838', roughness: 0.8, flatShading: true })
-    for (let i = 0; i < 26; i++) {
+    const rockMaterial = weathered(new THREE.MeshStandardMaterial({ color: '#34302b', roughness: 0.95, flatShading: true }), { scale: 0.7, bump: 0.06 })
+    this.drifters = []
+    for (let i = 0; i < 14; i++) {
       const a = Math.random() * Math.PI * 2
-      const r = rand(26, 46)
-      const shard = new THREE.Mesh(pickOne(rocks), rockMaterial)
-      shard.scale.setScalar(rand(0.6, 2.2))
-      shard.position.set(Math.cos(a) * r, rand(-6, 8), Math.sin(a) * r)
+      const r = rand(34, 58)
+      const shard = new THREE.Mesh(pickOne(shapes), rockMaterial)
+      shard.scale.setScalar(rand(0.8, 2.6))
+      shard.position.set(Math.cos(a) * r, rand(-14, 1), Math.sin(a) * r)
       shard.rotation.set(rand(0, 3), rand(0, 3), rand(0, 3))
       this.scene.add(shard)
-      this.crystals.push({ mesh: shard, phase: i * 1.7, drift: true })
+      this.drifters.push({ mesh: shard, phase: i * 1.7 })
     }
-
-    this.scene.add(new THREE.HemisphereLight('#8c7dff', '#0b2a3a', 0.9))
-    const key = new THREE.DirectionalLight('#ffe2c4', 2.2)
-    key.position.set(6, 14, 9)
-    this.scene.add(key)
-    const dawn = new THREE.PointLight(TEAM_GLOW[0], 14, 30, 1.6)
-    dawn.position.set(0, 3.5, 9)
-    const dusk = new THREE.PointLight(TEAM_GLOW[1], 14, 30, 1.6)
-    dusk.position.set(0, 3.5, -9)
-    this.scene.add(dawn, dusk)
   }
 
-  /** Render the procedural sky once into a cube map and use it as the background. */
+  /**
+   * Render the procedural sky once into a cube map for the background, and
+   * light a small stand-in of the night (the sky, a moon, the far fires, the
+   * dark ground) into an environment map, so brass has something to
+   * reflect. Only brass takes it: cloth and stone are too rough to show it,
+   * and the floor's wet patches catch the moon and spell light instead.
+   */
   bakeSky() {
     const sky = new THREE.Scene()
     const material = new THREE.ShaderMaterial({ uniforms: { uTime: { value: 40 }, uSurge: { value: 0 } }, vertexShader: SKY_VERTEX, fragmentShader: SKY_FRAGMENT, side: THREE.BackSide, depthWrite: false })
@@ -2887,15 +3311,56 @@ class Stage {
     const target = new THREE.WebGLCubeRenderTarget(512, { type: THREE.HalfFloatType })
     new THREE.CubeCamera(1, 200, target).update(this.renderer, sky)
     this.scene.background = target.texture
-    material.dispose()
+
+    const card = (color, size, at) => {
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshBasicMaterial({ color: new THREE.Color(color), side: THREE.DoubleSide }))
+      mesh.position.set(...at)
+      mesh.lookAt(0, 0, 0)
+      sky.add(mesh)
+    }
+    card(new THREE.Color('#c8d4ff').multiplyScalar(6), 14, [-48, 50, -24])
+    card(new THREE.Color('#ff8a4a').multiplyScalar(2.5), 18, [70, 4, -10])
+    card(new THREE.Color('#ff7a3a').multiplyScalar(1.5), 14, [-60, 3, 40])
+    const ground = new THREE.Mesh(new THREE.CircleGeometry(90, 32).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: '#0d0b0a' }))
+    ground.position.y = -2
+    sky.add(ground)
+    const pmrem = new THREE.PMREMGenerator(this.renderer)
+    this.environment = pmrem.fromScene(sky, 0.02, 1, 200, { size: 64 }).texture
+    pmrem.dispose()
+    sky.traverse((part) => {
+      part.geometry?.dispose()
+      part.material?.dispose()
+    })
   }
 
-  /** Switch to a quality tier: pixel ratio, MSAA samples and particle density. */
+  /** A flash of spell light at a point, fading over `life` seconds, dimmer for effects that are not about you. */
+  glint(at, color, strength = 1, life = 0.35) {
+    const glint = this.glints.reduce((dim, next) => (next.light.intensity < dim.light.intensity ? next : dim))
+    glint.light.position.copy(at)
+    glint.light.color.copy(color)
+    glint.peak = 16 * strength * this.focus.weight
+    glint.life = life
+    glint.age = 0
+  }
+
+  /** Switch to a quality tier: pixel ratio, MSAA samples, floor detail, shadows and particle density. */
   setQuality(tier) {
     const quality = QUALITY[tier]
     this.tier = tier
     this.quality = quality.name
     this.sparks.density = quality.density
+    // The lowest tier draws a plainer floor without weathering, and its mages
+    // cast no shadows, so the shadow map holds only still things and is drawn
+    // once, not every frame.
+    this.floor.material = this.grounds[tier === 0 ? 1 : 0]
+    DETAIL.value = tier === 0 ? 0 : 1
+    this.renderer.shadowMap.autoUpdate = tier > 0
+    this.renderer.shadowMap.needsUpdate = true
+    if (this.moon.shadow.mapSize.x !== quality.shadow) {
+      this.moon.shadow.mapSize.setScalar(quality.shadow)
+      this.moon.shadow.map?.dispose()
+      this.moon.shadow.map = null
+    }
     for (const target of [this.composer.renderTarget1, this.composer.renderTarget2]) {
       if (target.samples === quality.samples) continue
       target.samples = quality.samples
@@ -2988,6 +3453,7 @@ class Stage {
     this.viewer = viewer
     this.span = Math.max(...sizes, 1)
     this.mode = mode
+    this.renderer.shadowMap.needsUpdate = true // new pedestals for a still shadow map
     this.flights = []
     this.surge = 0
     this.reach = 0
@@ -3042,6 +3508,8 @@ class Stage {
     const caster = this.figures.get(casterId)
     const friendly = caster && caster.team === to.team
     const power = 0.6 + spell.tier * 0.25
+    // The landing lights the stone and the mages around it in the school's color.
+    this.glint(chest, look.main, friendly ? 0.5 : power, friendly ? 0.5 : 0.35)
     if (spell.flight === 'nova') this.looks.ground(feet, spell.school, 2.6 * power)
     if (roles.includes('revive')) this.looks.pillar(feet, 'holy', 1.6)
     else if (friendly && roles.includes('heal')) {
@@ -3137,17 +3605,17 @@ class Stage {
     return { x: (v.x * 0.5 + 0.5) * this.width, y: (-v.y * 0.5 + 0.5) * this.height, visible: v.z < 1 }
   }
 
+  /** Quiet life in the air: dust lifting off the rift (much more in the surge) and a few stray embers. */
   ambient(dt) {
-    this.motes += dt * (30 + this.surge * 80)
+    this.motes += dt * (10 + this.surge * 70)
     while (this.motes >= 1) {
       this.motes--
-      const color = new THREE.Color(pickOne([TEAM_GLOW[0], TEAM_GLOW[1], '#ffffff', '#b59bff']))
-      this.sparks.emit({ at: [rand(-11, 11), 0.1, rand(-0.25, 0.25)], velocity: [rand(-0.2, 0.2), rand(0.8, 2.2), rand(-0.1, 0.1)], color, size: rand(0.06, 0.16), life: rand(1.2, 2.4), shape: 'glow', drag: 0.2 })
+      this.sparks.emit({ at: [rand(-11, 11), 0.05, rand(-0.2, 0.2)], velocity: [rand(-0.15, 0.15), rand(0.5, 1.6), rand(-0.08, 0.08)], color: pickOne(RIFT_DUST), alpha: 0.55, size: rand(0.04, 0.1), life: rand(1.2, 2.2), shape: 'glow', drag: 0.2 })
     }
-    if (Math.random() < dt * 6) {
+    if (Math.random() < dt * 2.5) {
       const a = Math.random() * Math.PI * 2
-      const r = rand(4, 18)
-      this.sparks.emit({ at: [Math.cos(a) * r, rand(0.5, 6), Math.sin(a) * r], velocity: [rand(-0.3, 0.3), rand(-0.1, 0.3), rand(-0.3, 0.3)], color: new THREE.Color(pickOne(['#ffe680', '#8fe8ff', '#ff9ae8'])), size: rand(0.06, 0.12), life: rand(3, 5), shape: 'star' })
+      const r = rand(5, 18)
+      this.sparks.emit({ at: [Math.cos(a) * r, rand(0.3, 2.5), Math.sin(a) * r], velocity: [rand(-0.25, 0.25), rand(0.15, 0.5), rand(-0.25, 0.25)], color: EMBER, alpha: 0.7, size: rand(0.035, 0.07), life: rand(2.5, 4.5), shape: 'glow', drag: 0.3 })
     }
   }
 
@@ -3157,9 +3625,13 @@ class Stage {
     this.focus.refill(dt)
     this.shared.uTime.value = this.time
     this.shared.uSurge.value += (this.surge - this.shared.uSurge.value) * Math.min(1, dt * 2)
-    for (const { mesh, phase, drift } of this.crystals) {
-      mesh.rotation.y += dt * (drift ? 0.05 : 0.6)
-      mesh.position.y += Math.sin(this.time * 0.8 + phase) * dt * (drift ? 0.2 : 0.3)
+    for (const { mesh, phase } of this.drifters) {
+      mesh.rotation.y += dt * 0.04
+      mesh.position.y += Math.sin(this.time * 0.5 + phase) * dt * 0.12
+    }
+    for (const glint of this.glints) {
+      glint.age += dt
+      glint.light.intensity = glint.peak * Math.max(0, 1 - glint.age / glint.life) ** 2
     }
     for (const figure of this.figures.values()) figure.update(dt, this.time)
     this.flights = this.flights.filter((flight) => !flight.done && flight.update(this.time, dt))
@@ -3176,6 +3648,7 @@ class Stage {
     this.marks.flush()
     this.rings.update(this.time)
     this.bolts.update(this.time, this.camera.aspect)
+    this.output.uniforms.uGrain.value = (this.output.uniforms.uGrain.value + 1) % 64
     this.composer.render()
   }
 }
@@ -3192,7 +3665,7 @@ const spikes = (count, outer, inner) =>
 
 const solid = (d, extra = '') => `<path d="${d}" fill="currentColor"${extra}/>`
 const circle = (r, width = 2, extra = '') => `<circle cx="12" cy="12" r="${r}" fill="none" stroke="currentColor" stroke-width="${width}"${extra}/>`
-const eyehole = (cx, cy, r) => `<circle cx="${cx}" cy="${cy}" r="${r}" fill="#0b0820"/>`
+const eyehole = (cx, cy, r) => `<circle cx="${cx}" cy="${cy}" r="${r}" fill="#0a0b10"/>`
 
 /** One small icon for every kind of aura, drawn in currentColor so the school can tint it. */
 const AURA_ICONS = {
@@ -3222,7 +3695,7 @@ const AURA_ICONS = {
   ankh: stroke('M12 11.5c-2.7-1.6-3.9-3.4-3.9-5.4a3.9 3.9 0 0 1 7.8 0c0 2-1.2 3.8-3.9 5.4zM12 11.5V22M5.8 13.8h12.4', 2.3),
   heart: solid('M12 20.8s-8.2-5-8.2-10.9A4.5 4.5 0 0 1 12 7.2a4.5 4.5 0 0 1 8.2 2.7c0 5.9-8.2 10.9-8.2 10.9z'),
   flask: stroke('M8.8 2.5h6.4M10 2.5v5.3L4.6 18a2.4 2.4 0 0 0 2.1 3.5h10.6a2.4 2.4 0 0 0 2.1-3.5L14 7.8V2.5', 1.9) + solid('M7 14.6h10l1.9 3.6a1.3 1.3 0 0 1-1.2 1.9H6.3a1.3 1.3 0 0 1-1.2-1.9z'),
-  skull: solid('M12 2.5a8.2 8.2 0 0 0-8.2 8.2c0 2.6 1.2 4.7 3.1 6v3.3h10.2v-3.3c1.9-1.3 3.1-3.4 3.1-6A8.2 8.2 0 0 0 12 2.5z') + eyehole(8.9, 11, 2.1) + eyehole(15.1, 11, 2.1) + '<path d="M10.3 20v-2.2M13.7 20v-2.2" stroke="#0b0820" stroke-width="1.5"/>',
+  skull: solid('M12 2.5a8.2 8.2 0 0 0-8.2 8.2c0 2.6 1.2 4.7 3.1 6v3.3h10.2v-3.3c1.9-1.3 3.1-3.4 3.1-6A8.2 8.2 0 0 0 12 2.5z') + eyehole(8.9, 11, 2.1) + eyehole(15.1, 11, 2.1) + '<path d="M10.3 20v-2.2M13.7 20v-2.2" stroke="#0a0b10" stroke-width="1.5"/>',
   bomb: '<circle cx="10.5" cy="14" r="7" fill="currentColor"/>' + stroke('M15.2 8.8l2.3-2.3M17.5 6.5c.6-1.8 2-2.6 3.6-2.2', 1.8) + eyehole(8.2, 11.6, 1.6),
   anchor: '<circle cx="12" cy="4.4" r="2" fill="none" stroke="currentColor" stroke-width="2"/>' + stroke('M12 6.4V21M7.8 10h8.4M4.6 13.6a7.4 7.4 0 0 0 14.8 0', 2.1),
   rewind: stroke('M4.2 12a7.8 7.8 0 1 0 2.3-5.5M4.2 3.5v5h5', 2.3),
@@ -4181,7 +4654,7 @@ class Game {
         this.quick = false
         this.link.send('start')
       }
-    } else if (this.results && room.phase === 'after') {
+    } else if (this.results && this.setup && room.phase === 'after') {
       renderResult(this.results, this.setup.roster, this.myTeam(), room.owner === this.you)
     }
   }

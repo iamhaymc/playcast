@@ -579,23 +579,28 @@ Start it with `npm start`, or import it: `const host = await openHost({ port: 0 
 
 ### Rendering
 
-- Three.js with Neutral tone mapping, which keeps hues and saturation where ACES bleaches bright colors toward white. The scene renders into a multisampled half-float buffer (MSAA) and the output pass adds a faint dither so dark gradients do not band.
-- Bloom is selective. Its bright pass measures the brightest channel instead of luminance, so a saturated red or blue glows as readily as white, and only the part above a high threshold (0.9, with a soft knee) blooms. Spell cores, gems while casting and the pillar crystals glow; trims, floor lines, robes and the HUD stay crisp. Bloom runs at CSS-pixel size so it spreads the same on every screen.
-- The sky is a procedural nebula shader, baked once into a cube map.
-- The floor shader draws team-tinted grids, rotating rune rings and the glowing rift line. Its lines are filtered by their size on screen (`fwidth`), so distant grid lines fade instead of shimmering. A translucent curtain marks the rift itself.
-- Turned pillars with glowing bands and floating crystals ring the arena; craggy rocks drift in the distance.
-- Each mage is built from smooth shapes: a lathed robe, a hat, glowing eyes, arms hung from shoulder pivots, a staff and a chamfered hexagonal pedestal in team colors. Robes and hats get a soft rim light in the team color. The garb picks the parts (`garbShapes`): a drooping pointed hat, a wide brim, a hood drawn into a peak, or a crown; a plain robe, one with a shoulder mantle, glowing hem bands, or split in two shades with a glowing seam; a staff topped by a gem in an orbiting ring, an orb in a claw, a crook holding a small gem, or a forked branch with glowing buds. Every style is a list of parts (geometry, paint, place), so adding one is data.
+- Three.js with Neutral tone mapping, which keeps hues and saturation where ACES bleaches bright colors toward white. The scene renders into a multisampled half-float buffer (MSAA). The output pass adds a fine film grain that shifts every frame, strongest in the mid tones, which also keeps dark gradients from banding.
+- The look is a value hierarchy: the background is dark and quiet, the mages are lit, and spells are the brightest and most saturated things on screen. Nothing outside the field glows.
+- Bloom is selective. Its bright pass measures the brightest channel instead of luminance, so a saturated red or blue glows as readily as white, and only the part above a high threshold (0.9, with a soft knee) blooms. Spell cores and gems glow; trims, the floor, robes and the HUD stay crisp. Bloom runs at CSS-pixel size so it spreads the same on every screen.
+- The sky is a procedural night: a near-black dome with banks of cloud lit from a veiled moon and a faint warm glow of far fires on the horizon, baked once into a cube map. A small stand-in of the night (the sky, a moon, the far fires, the dark ground) is baked into a prefiltered environment map, so brass has something to reflect. Only brass ornaments take it: cloth and stone are too rough to show it, and the floor's wet patches catch the moon and spell light instead.
+- Light: a moonbeam (a spotlight with soft shadows) lights both rows fully and falls off before the ruins, so the edges sink into the dark. A hemisphere fill, a dim sky light and a warm low fill from the far fires light the rest. Two pooled lights flash in a spell's color as it leaves the staff and as it lands, lighting the stone and the mages around it.
+- The floor is a standard material whose color, roughness, metal, relief and glow come from a shader (`GROUND_GLSL`): worn flagstones laid in rings, with rounded edges, joints, a few cracks, old scorch marks and pooled rain; brass rings inlaid around the field over dark polished stone; the rift as a jagged fissure glowing from below; and the stone under each row faintly lit in its team's color. Lines are filtered by their size on screen (`fwidth`) and fine relief fades with distance, so nothing shimmers. A translucent curtain marks the rift itself.
+- Weathered ruins ring the field: a curb of fitted blocks, some sunk or missing, and a colonnade of fluted columns, most of them broken, with fallen drums outside the curb. The columns straight behind each row are the lowest, so the far row's skyline stays clear. Craggy rocks drift far out in the fog.
+- Stone, wood and cloth take a `weathered` patch: noise that mottles color and roughness and adds a fine relief, in world space for things that stand still and in the model's own space for things that move.
+- Each mage is built from smooth shapes: a lathed robe that hangs in folds from the belt (its vertex colors darken the folds and dirty the hem), a hat, glowing eyes, flared sleeves hung from shoulder pivots, a gnarled staff and a worn stone pedestal with a rune ring inlaid in the team's color. Robes and hats are wool and felt with a soft sheen, worn and streaked, and a rim light washed between the team's color and moonlight; trims are embroidered in the team's color, metal is aged brass. Solid parts cast shadows (not while the mage is a ghost), and a soft contact shadow sits under each pedestal. The garb picks the parts (`garbShapes`): a drooping pointed hat, a wide brim, a hood drawn into a peak, or a crown; a plain robe, one with a shoulder mantle, hem bands that follow its folds, or split in two shades with a seam; a staff topped by a gem in an orbiting ring, an orb in a claw, a crook holding a small gem, or a forked branch with glowing buds. Felt crowns are crumpled and brims droop with a soft wave. Every style is a list of parts (geometry, paint, place), so adding one is data.
 - Casting gestures (`Figure.gesture`): while a cast fills, the staff arm lifts the staff up and out and the free arm reaches forward, its hand glowing brighter in the school's color as the cast fills. When the spell leaves, staff and hand thrust toward the target and the body rocks back. The staff always follows the hand that holds it.
-- Static parts that share a material are merged (brim and crown, both eyes), and the world shares geometry and materials, so a mage costs about twenty draw calls.
+- Static parts that share a material are merged (brim and crown, both eyes), the curb is one instanced mesh, and the world shares geometry and materials, so a mage costs about twenty draw calls.
 
 ### Quality
 
-| Tier | Pixel ratio cap | MSAA | Small particles |
-|---|---|---|---|
-| low | 0.85 | off | half |
-| medium | 1 | 2× | three quarters |
-| high | 1.5 | 4× | all |
-| ultra | 2 | 4× | all |
+| Tier | Pixel ratio cap | MSAA | Shadow map | Small particles |
+|---|---|---|---|---|
+| low | 0.85 | off | 1024 | half |
+| medium | 1 | 2× | 1024 | three quarters |
+| high | 1.5 | 4× | 2048 | all |
+| ultra | 2 | 4× | 2048 | all |
+
+- The low tier also draws a plainer, diffuse-only floor (`GROUND_LITE`: no grain, cracks, grime, scorch marks or rain), turns off weathering through a shared uniform, and lets only still things (ruins and pedestals) cast shadows, so the shadow map is drawn once per roster instead of every frame. Changing tiers recompiles nothing; the plain floor's shader is compiled once, the first time it is used.
 
 - The start tier is a guess: software renderers start low, small devices (≤ 4 cores or ≤ 3 GB) medium, touch devices high, others ultra. `?quality=low|medium|high|ultra` pins a tier.
 - The governor drops a tier when frames stay slower than 40 per second for 1.5 seconds. If the drop does not speed frames up (a capped display or a busy CPU), it is undone and that tier becomes the floor. After 10 seconds of fast frames it climbs back, never above a tier that just failed.
@@ -659,8 +664,8 @@ The new mechanics draw on the figure too: flow stacks as gold stars circling the
 | Event | Visual |
 |---|---|
 | `cast` | The school's sigil circle under the caster, growing with the cast; the staff rises and the free hand reaches out, glowing; gem, gem glow, hand and the plate's cast bar in the school color; school shapes rise from the circle and are drawn into the gem |
-| `fire` | Gem flash, a thrust of staff and hand with a recoil, and a `Flight` timed to land on the `land` tick |
-| `land` | Impact by role: burst, school signature and shockwave (damage), rising crosses and pillar (heal), spiral and rising chevrons (boon), implosion and sinking chevrons (bane) |
+| `fire` | Gem flash and a brief flash of light, a thrust of staff and hand with a recoil, and a `Flight` timed to land on the `land` tick |
+| `land` | Impact by role: burst, school signature and shockwave (damage), rising crosses and pillar (heal), spiral and rising chevrons (boon), implosion and sinking chevrons (bane); a flash of light in the school's color on the stone and nearby mages |
 | `hit` | Flinch and a brief white flash (faint for damage over time), small burst, damage number in the school color; red vignette when you are hit hard |
 | `jump` | A forked lightning bolt between the two mages |
 | `mend` | Green number |
@@ -673,7 +678,7 @@ The new mechanics draw on the figure too: flow stacks as gold stars circling the
 | `fade` (break) | Shield shatters into shards |
 | `fall` | Shadow burst, camera shake, the mage tips over and fades, and its wisp rises |
 | `rise` | Golden pillar |
-| `surge` | Rift and floor glow brighter, small shake |
+| `surge` | The rift and the thread in the brass ring glow brighter, more dust lifts off the rift, small shake |
 | `over` | Confetti over the winners, then the results card |
 
 A hidden tab draws nothing, so it skips effects and applies only events that leave lasting state (`fizzle`, `surge`, `shift`, `over`); otherwise every effect from the time away would burst out at once on return.
