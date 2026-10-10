@@ -18,6 +18,7 @@
  *   10  Pilot   drafts, turns brain plans into key presses, raises wards
  *   11  Arena   runs a match with pilots
  *   12  Wire    the message protocol
+ *   13  Solo    rooms for one player that need no host: a lesson and a drill
  */
 
 // ─── 1 · Kit ────────────────────────────────────────────────────────────────
@@ -103,6 +104,15 @@ export function dampenAt(tick, fightAt, surgeAt) {
 }
 
 export const RULES = { teams: [1, 1], book: 16, kit: 8, life: 800, surge: 90, skill: 'normal' }
+
+/** Quick match: the team sizes you can ask for, and the seconds a room waits for players before bots fill the open seats. */
+export const QUICK = { sizes: [1, 2, 3], wait: 15 }
+
+/** A tick that never comes: a calm match has no surge and no rift shifts. */
+export const NEVER = 2 ** 31 - 1
+
+/** The most spells a chosen book (a drill's) may hold, so its chords always fit. */
+export const BOOK_MOST = 12
 export const LIMITS = { team: [1, 8], book: [12, 24], kit: [4, 12], life: [400, 3000], surge: [20, 600] }
 
 /**
@@ -416,8 +426,10 @@ const SPELL_LIST = [
   { id: 'pyroblast', name: 'Pyroblast', kind: O, school: 'fire', tier: 3, cast: 1.8, cool: 18, cost: 32, flight: 'bolt', acts: [harm(300), dot(20, 6, 'Burning')] },
   { id: 'meteor', name: 'Meteor', kind: O, school: 'fire', tier: 3, cast: 1.4, cool: 24, cost: 36, flight: 'fall', acts: [harm(240), side(harm(90))] },
   { id: 'fire-wall', name: 'Fire Wall', kind: O, school: 'fire', tier: 3, reach: 'side', cast: 1, cool: 20, cost: 30, flight: 'rise', acts: [dot(25, 6, 'Fire Wall')] },
+  { id: 'burning-hands', name: 'Burning Hands', kind: O, school: 'fire', tier: 1, reach: 'side', cast: 0, cool: 12, cost: 12, flight: 'nova', acts: [harm(30)] },
   { id: 'rebuke', name: 'Rebuke', kind: D, school: 'fire', tier: 1, aim: 'self', cast: 0, cool: 14, cost: 8, flight: 'aura', acts: [thorns(50, 8, 'Rebuke')] },
   { id: 'cauterize', name: 'Cauterize', kind: D, school: 'fire', tier: 2, aim: 'self', cast: 0, cool: 20, cost: 12, flight: 'rise', acts: [heal(220), dot(15, 4, 'Cauterized')] },
+  { id: 'blazing-barrier', name: 'Blazing Barrier', kind: D, school: 'fire', tier: 2, cast: 0, cool: 16, cost: 14, flight: 'aura', acts: [shield(130, 8, 'Blazing Barrier', { thorns: 20 })] },
 
   // Frost ─────────────────────────────────────────────────────────────────
   { id: 'frost-ray', name: 'Frost Ray', kind: O, school: 'frost', tier: 1, cast: 0.7, cool: 3, cost: 8, flight: 'beam', acts: [harm(60), slow(0.3, 4, 'Chilled')] },
@@ -428,6 +440,7 @@ const SPELL_LIST = [
   { id: 'ice-storm', name: 'Ice Storm', kind: O, school: 'frost', tier: 2, reach: 'side', cast: 0.8, cool: 12, cost: 22, flight: 'fall', acts: [harm(100)] },
   { id: 'blizzard', name: 'Blizzard', kind: O, school: 'frost', tier: 3, reach: 'side', cast: 1.4, cool: 20, cost: 30, flight: 'fall', acts: [dot(22, 6, 'Blizzard'), slow(0.3, 6, 'Chilled')] },
   { id: 'glacial-spike', name: 'Glacial Spike', kind: O, school: 'frost', tier: 3, cast: 1.8, cool: 20, cost: 30, flight: 'bolt', acts: [harm(260), stun(2.5, 'Frozen', 'ice')] },
+  { id: 'frozen-orb', name: 'Frozen Orb', kind: O, school: 'frost', tier: 2, cast: 0.7, cool: 14, cost: 20, flight: 'volley', acts: [scatter(5, harm(30), slow(0.2, 3, 'Chilled'))] },
   { id: 'ice-block', name: 'Ice Block', kind: D, school: 'frost', tier: 3, aim: 'self', cast: 0, cool: 40, cost: 10, flight: 'aura', acts: [cleanse(9), mark(4, { name: 'Ice Block', kind: 'boon', immune: true, lock: 'stun', look: 'ice' })] },
   { id: 'ice-barrier', name: 'Ice Barrier', kind: D, school: 'frost', tier: 2, cast: 0, cool: 14, cost: 16, flight: 'aura', acts: [shield(180, 10, 'Ice Barrier')] },
   { id: 'frost-armor', name: 'Frost Armor', kind: D, school: 'frost', tier: 2, aim: 'self', cast: 0, cool: 16, cost: 14, flight: 'aura', acts: [shield(120, 12, 'Frost Armor', { thorns: 30 })] },
@@ -446,6 +459,8 @@ const SPELL_LIST = [
   { id: 'tailwind', name: 'Tailwind', kind: D, school: 'storm', tier: 2, cast: 0, cool: 16, cost: 14, flight: 'aura', acts: [haste(0.4, 8, 'Tailwind')] },
   { id: 'lightning-shield', name: 'Lightning Shield', kind: D, school: 'storm', tier: 1, aim: 'self', cast: 0, cool: 12, cost: 10, flight: 'aura', acts: [thorns(40, 10, 'Lightning Shield')] },
   { id: 'grounding', name: 'Grounding', kind: D, school: 'storm', tier: 2, cast: 0, cool: 18, cost: 12, flight: 'aura', acts: [mark(8, { name: 'Grounded', kind: 'boon', evade: true, charges: 1, look: 'mirror' })] },
+  { id: 'wind-wall', name: 'Wind Wall', kind: D, school: 'storm', tier: 2, reach: 'side', cast: 0.7, cool: 30, cost: 20, flight: 'nova', acts: [mark(4, { name: 'Wind Wall', kind: 'boon', evade: true, charges: 1, look: 'mirror' })] },
+  { id: 'heroism', name: 'Heroism', kind: D, school: 'storm', tier: 3, reach: 'side', cast: 0, cool: 45, cost: 26, flight: 'nova', acts: [haste(0.3, 8, 'Heroism')] },
 
   // Shadow ────────────────────────────────────────────────────────────────
   { id: 'chill-touch', name: 'Chill Touch', kind: O, school: 'shadow', tier: 1, cast: 0, cool: 6, cost: 8, flight: 'bolt', acts: [harm(50), mark(4, { name: 'No Healing', kind: 'bane', mended: 0, look: 'blight' })] },
@@ -461,6 +476,7 @@ const SPELL_LIST = [
   { id: 'fear', name: 'Fear', kind: O, school: 'shadow', tier: 2, cast: 0.8, cool: 14, cost: 14, flight: 'bolt', acts: [sleep(5, 'Feared', 'fear')] },
   { id: 'blight', name: 'Blight', kind: O, school: 'shadow', tier: 2, cast: 0.7, cool: 8, cost: 18, flight: 'rise', acts: [harm(130), mark(4, { name: 'Blighted', kind: 'bane', mended: 0.5, look: 'blight' })] },
   { id: 'mind-blast', name: 'Mind Blast', kind: O, school: 'shadow', tier: 2, cast: 0.8, cool: 6, cost: 16, flight: 'bolt', acts: [harm(120), burn(10)] },
+  { id: 'ray-of-enfeeblement', name: 'Ray of Enfeeblement', kind: O, school: 'shadow', tier: 2, cast: 0.7, cool: 14, cost: 12, flight: 'beam', acts: [weaken(0.35, 6, 'Enfeebled')] },
   { id: 'contagion', team: true, name: 'Contagion', kind: O, school: 'shadow', tier: 2, cast: 0, cool: 16, cost: 16, flight: 'nova', acts: [spread()] },
   { id: 'howl-of-terror', name: 'Howl of Terror', kind: O, school: 'shadow', tier: 3, reach: 'side', cast: 0, cool: 30, cost: 26, flight: 'nova', acts: [sleep(3, 'Feared', 'fear')] },
   { id: 'doom', name: 'Doom', kind: O, school: 'shadow', tier: 3, cast: 0, cool: 24, cost: 30, flight: 'aura', acts: [mark(6, { name: 'Doom', kind: 'bane', look: 'doom', expire: [harm(340)] })] },
@@ -470,15 +486,20 @@ const SPELL_LIST = [
   { id: 'soul-swap', name: 'Soul Swap', kind: O, school: 'shadow', tier: 3, cast: 1, cool: 40, cost: 30, flight: 'beam', acts: [swap()] },
   { id: 'life-tap', name: 'Life Tap', kind: D, school: 'shadow', tier: 1, aim: 'self', cast: 0, cool: 10, cost: 0, flight: 'aura', acts: [harm(100, { pierce: true }), mana(30)] },
   { id: 'resolve', name: 'Resolve', kind: D, school: 'shadow', tier: 2, aim: 'self', cast: 0, cool: 24, cost: 12, flight: 'aura', acts: [mark(6, { name: 'Resolve', kind: 'boon', taken: 0.6, steady: true, look: 'steady' })] },
+  { id: 'vampiric-embrace', name: 'Vampiric Embrace', kind: D, school: 'shadow', tier: 2, aim: 'self', cast: 0, cool: 24, cost: 12, flight: 'aura', acts: [mark(10, { name: 'Vampiric Embrace', kind: 'boon', leech: 0.4, look: 'leech' })] },
 
   // Holy ──────────────────────────────────────────────────────────────────
   { id: 'smite', name: 'Smite', kind: O, school: 'holy', tier: 1, cast: 0.7, cool: 2, cost: 8, flight: 'fall', acts: [harm(70)] },
   { id: 'sacred-flame', name: 'Sacred Flame', kind: O, school: 'holy', tier: 1, cast: 0, cool: 4, cost: 8, flight: 'fall', acts: [harm(55, { pierce: true })] },
+  { id: 'hammer-of-wrath', name: 'Hammer of Wrath', kind: O, school: 'holy', tier: 1, cast: 0, cool: 8, cost: 10, flight: 'fall', acts: [harm(60, { bonus: { when: 'low', times: 2 } })] },
   { id: 'guiding-bolt', name: 'Guiding Bolt', kind: O, school: 'holy', tier: 2, cast: 0.8, cool: 8, cost: 16, flight: 'bolt', acts: [harm(120), expose(0.2, 4, 'Guided')] },
   { id: 'holy-fire', name: 'Holy Fire', kind: O, school: 'holy', tier: 2, cast: 1, cool: 10, cost: 18, flight: 'fall', acts: [harm(110), dot(12, 6, 'Holy Fire')] },
   { id: 'judgment', name: 'Judgment', kind: O, school: 'holy', tier: 2, cast: 0, cool: 14, cost: 14, flight: 'fall', acts: [harm(80), hush(2.5)] },
   { id: 'holy-shock', name: 'Holy Shock', kind: O, school: 'holy', tier: 2, aim: 'any', cast: 0, cool: 8, cost: 14, flight: 'beam', acts: { foe: [harm(110)], ally: [heal(140)] } },
+  { id: 'hammer-of-justice', name: 'Hammer of Justice', kind: O, school: 'holy', tier: 2, cast: 0, cool: 20, cost: 14, flight: 'bolt', acts: [harm(40), stun(2.5, 'Stunned')] },
+  { id: 'consecration', name: 'Consecration', kind: O, school: 'holy', tier: 2, reach: 'side', cast: 0.7, cool: 14, cost: 22, flight: 'rise', acts: [dot(11, 6, 'Consecration')] },
   { id: 'sunbeam', name: 'Sunbeam', kind: O, school: 'holy', tier: 3, cast: 1.4, cool: 18, cost: 30, flight: 'beam', acts: [harm(220), sleep(2, 'Blinded', 'daze')] },
+  { id: 'mass-dispel', name: 'Mass Dispel', kind: O, school: 'holy', tier: 3, reach: 'side', cast: 1, cool: 30, cost: 24, flight: 'nova', acts: [purge(2)] },
   { id: 'healing-word', name: 'Healing Word', kind: D, school: 'holy', tier: 1, cast: 0, cool: 4, cost: 8, flight: 'rise', acts: [heal(70)] },
   { id: 'flash-heal', name: 'Flash Heal', kind: D, school: 'holy', tier: 1, cast: 0.7, cool: 3, cost: 12, flight: 'rise', acts: [heal(110)] },
   { id: 'renew', name: 'Renew', kind: D, school: 'holy', tier: 1, cast: 0, cool: 4, cost: 8, flight: 'aura', acts: [hot(18, 8, 'Renew')] },
@@ -504,9 +525,11 @@ const SPELL_LIST = [
   { id: 'poison-spray', name: 'Poison Spray', kind: O, school: 'nature', tier: 1, cast: 0, cool: 5, cost: 8, flight: 'nova', acts: [harm(35), dot(10, 6, 'Poisoned')] },
   { id: 'acid-splash', name: 'Acid Splash', kind: O, school: 'nature', tier: 1, cast: 0, cool: 6, cost: 8, flight: 'bolt', acts: [harm(45), expose(0.1, 4, 'Corroded')] },
   { id: 'thorn-whip', name: 'Thorn Whip', kind: O, school: 'nature', tier: 1, cast: 0, cool: 8, cost: 10, flight: 'beam', acts: [harm(40), slow(0.25, 4, 'Snared')] },
+  { id: 'earth-shock', name: 'Earth Shock', kind: O, school: 'nature', tier: 2, cast: 0, cool: 8, cost: 16, flight: 'rise', acts: [harm(110)] },
   { id: 'entangle', name: 'Entangle', kind: O, school: 'nature', tier: 2, cast: 0.7, cool: 16, cost: 14, flight: 'rise', acts: [stun(2.5, 'Rooted', 'root'), dot(10, 4, 'Thorned')] },
   { id: 'insect-swarm', name: 'Insect Swarm', kind: O, school: 'nature', tier: 2, cast: 0.7, cool: 10, cost: 14, flight: 'nova', acts: [dot(18, 8, 'Swarmed'), weaken(0.2, 8)] },
   { id: 'earthquake', name: 'Earthquake', kind: O, school: 'nature', tier: 3, reach: 'side', cast: 1.4, cool: 22, cost: 32, flight: 'rise', acts: [harm(120), stun(1, 'Knocked Down')] },
+  { id: 'hurricane', name: 'Hurricane', kind: O, school: 'nature', tier: 3, reach: 'side', cast: 1.4, cool: 22, cost: 30, flight: 'fall', acts: [dot(14, 6, 'Hurricane'), slow(0.25, 6, 'Buffeted')] },
   { id: 'rejuvenate', name: 'Rejuvenate', kind: D, school: 'nature', tier: 1, cast: 0, cool: 4, cost: 8, flight: 'aura', acts: [hot(15, 10, 'Rejuvenate')] },
   { id: 'barkskin', name: 'Barkskin', kind: D, school: 'nature', tier: 1, aim: 'self', cast: 0, cool: 16, cost: 6, flight: 'aura', acts: [armor(0.25, 8, 'Barkskin')] },
   { id: 'thorns', name: 'Thorns', kind: D, school: 'nature', tier: 1, cast: 0, cool: 12, cost: 8, flight: 'aura', acts: [thorns(35, 12, 'Thorns')] },
@@ -526,6 +549,7 @@ const SPELL_LIST = [
   { id: 'moonfire', name: 'Moonfire', kind: O, school: 'arcane', tier: 1, cast: 0, cool: 5, cost: 8, flight: 'fall', acts: [harm(40), dot(12, 8, 'Moonfire')] },
   { id: 'purge', name: 'Purge', kind: O, school: 'arcane', tier: 1, cast: 0, cool: 8, cost: 8, flight: 'nova', acts: [purge(2)] },
   { id: 'mana-burn', name: 'Mana Burn', kind: O, school: 'arcane', tier: 1, cast: 0.7, cool: 8, cost: 10, flight: 'beam', acts: [burn(25, 2)] },
+  { id: 'sleep', name: 'Sleep', kind: O, school: 'arcane', tier: 1, cast: 1, cool: 18, cost: 10, flight: 'bolt', acts: [sleep(4)] },
   { id: 'arcane-blast', name: 'Arcane Blast', kind: O, school: 'arcane', tier: 2, cast: 1, cool: 4, cost: 20, flight: 'bolt', acts: [harm(160)] },
   { id: 'arcane-missiles', name: 'Arcane Missiles', kind: O, school: 'arcane', tier: 2, cast: 1, cool: 8, cost: 16, flight: 'volley', acts: [harm(35), harm(35), harm(35), harm(35), harm(35)] },
   { id: 'starfire', name: 'Starfire', kind: O, school: 'arcane', tier: 2, cast: 1.4, cool: 6, cost: 18, flight: 'fall', acts: [harm(190)] },
@@ -650,7 +674,7 @@ export function rolesOf(spell) {
   walkActs(spell.acts, (act) => {
     const aura = act.aura ?? {}
     if (['harm', 'drain', 'kill'].includes(act.op)) roles.add('damage')
-    if (act.op === 'heal' || act.op === 'drain') roles.add('heal')
+    if (act.op === 'heal' || act.op === 'drain' || aura.leech) roles.add('heal')
     if (act.op === 'revive') roles.add('revive')
     if (act.op === 'interrupt' || aura.lock) roles.add('control')
     if (act.op === 'purge' || act.op === 'steal') roles.add('dispel')
@@ -745,7 +769,14 @@ export function writeWisps(dice) {
 export function writeBook(dice, size = RULES.book, teams = RULES.teams) {
   const half = Math.max(1, Math.floor(size / 2))
   const solo = Math.min(...teams) < 2
-  const spells = KINDS.flatMap((kind) => drawKind(dice, kind, half, solo))
+  return chordBook(dice, KINDS.flatMap((kind) => drawKind(dice, kind, half, solo)))
+}
+
+/**
+ * Prefix-free chords for a list of spells, shortest chords drawn first, in
+ * book order: offense then defense, by tier, then by name.
+ */
+export function chordBook(dice, spells) {
   const taken = []
   const book = [...spells]
     .sort((a, b) => a.tier - b.tier)
@@ -921,6 +952,7 @@ function makeMage(seat, rules) {
     team: seat.team,
     slot: seat.slot,
     bot: Boolean(seat.bot),
+    stand: Boolean(seat.stand), // a solo room keeps it standing: at zero life it is saved at full
     garb: seat.garb,
     life: rules.life,
     lifeMax: rules.life,
@@ -954,7 +986,7 @@ function seatRoster(roster) {
     const team = seat.team === 1 ? 1 : 0
     const slot = Number.isInteger(seat.slot) ? seat.slot : used[team]
     used[team] = Math.max(used[team], slot + 1)
-    return { id: seat.id ?? `m${i}`, name: seat.name ?? `Mage ${i + 1}`, team, slot, bot: seat.bot, garb: tidyGarb(seat.garb) }
+    return { id: seat.id ?? `m${i}`, name: seat.name ?? `Mage ${i + 1}`, team, slot, bot: seat.bot, stand: seat.stand, garb: tidyGarb(seat.garb) }
   })
 }
 
@@ -964,11 +996,17 @@ function seatRoster(roster) {
  * Same seed, rules, roster and orders always give the same match.
  */
 export class Match {
-  constructor({ seed = 1, rules = {}, roster = [] } = {}) {
+  /**
+   * `book` (spell ids) deals those spells instead of drawing a book; `calm`
+   * turns off the surge and the rift shifts. Both are for solo rooms.
+   */
+  constructor({ seed = 1, rules = {}, roster = [], book = null, calm = false } = {}) {
     this.seed = typeof seed === 'number' ? seed >>> 0 : hashText(String(seed))
     this.rules = tidyRules(rules)
+    this.calm = calm
     this.dice = new Dice(this.seed)
-    this.book = writeBook(this.dice.fork('book'), this.rules.book, this.rules.teams)
+    const chosen = book && [...new Set(book)].map((id) => CODEX.find((spell) => spell.id === id)).filter(Boolean).slice(0, BOOK_MOST)
+    this.book = chosen?.length ? chordBook(this.dice.fork('book'), chosen) : writeBook(this.dice.fork('book'), this.rules.book, this.rules.teams)
     this.wisps = writeWisps(this.dice.fork('wisps'))
     this.tick = 0
     this.phase = 'ready'
@@ -982,11 +1020,11 @@ export class Match {
     this.events = []
   }
 
-  /** Set the tick the fight begins; the surge and the first reshuffle follow from it. */
+  /** Set the tick the fight begins; the surge and the first reshuffle follow from it (never, when calm). */
   time(fightAt) {
     this.fightAt = fightAt
-    this.surgeAt = fightAt + secs(this.rules.surge)
-    this.shiftAt = fightAt + secs(TIMING.shift)
+    this.surgeAt = this.calm ? NEVER : fightAt + secs(this.rules.surge)
+    this.shiftAt = this.calm ? NEVER : fightAt + secs(TIMING.shift)
   }
 
   // Messages in ──────────────────────────────────────────────────────────
@@ -1117,8 +1155,12 @@ export class Match {
   reshuffle() {
     const due = this.tick === this.shiftAt || this.tick === this.surgeAt
     if (this.tick === this.shiftAt) this.shiftAt += secs(TIMING.shift)
-    if (!due) return
-    const changes = shiftBook(this.dice.fork(`shift:${this.tick}`), this.book, Math.max(2, Math.round(this.book.length / 4)))
+    if (due) this.rewrite(Math.max(2, Math.round(this.book.length / 4)))
+  }
+
+  /** The rift rewrites the chords of `count` spells. Chords being typed are cleared. */
+  rewrite(count) {
+    const changes = shiftBook(this.dice.fork(`shift:${this.tick}`), this.book, count)
     for (const mage of this.mages) {
       if (!mage.chord.runes.length || mage.down) continue
       this.clearChord(mage)
@@ -1508,6 +1550,10 @@ export class Match {
   }
 
   downCheck(mage, by) {
+    if (mage.stand) {
+      mage.life = mage.lifeMax
+      return this.emit('save', { to: mage.id })
+    }
     const cheat = mage.auras.find((a) => a.def.cheat)
     if (cheat) {
       mage.life = Math.round(mage.lifeMax * cheat.def.cheat)
@@ -1629,6 +1675,7 @@ export class Match {
     return {
       seed: this.seed,
       rules: this.rules,
+      calm: this.calm,
       book: this.book.map(({ id, sigil }) => ({ id, sigil: [...sigil] })),
       wisps: this.wisps,
       fightAt: this.fightAt,
@@ -2342,6 +2389,8 @@ const CHECKS = {
   rules: (v) => (v && typeof v === 'object' ? tidyRules(v) : null),
   skill: (v) => (SKILLS[v] ? v : null),
   token: (v) => (typeof v === 'string' && /^[\w-]{16,64}$/.test(v) ? v : null),
+  flag: (v) => (typeof v === 'boolean' ? v : null),
+  size: (v) => (QUICK.sizes.includes(v) ? v : null),
   garb: (v) => (v === undefined ? undefined : tidyGarb(v)), // optional; anything else is tidied, never refused
   any: (v) => (v === undefined ? null : v),
   maybe: (v) => v ?? undefined, // optional: may be left out
@@ -2361,6 +2410,9 @@ export const WIRE = {
     lobby: {}, // owner: return everyone to the lobby
     leave: {}, // leave the room
     resume: { token: 'token' }, // after a reconnect: take back the seat held for this token
+    browse: { on: 'flag' }, // follow the list of public rooms (or stop)
+    list: { on: 'flag' }, // owner: show the room in the public list, or hide it
+    seek: { size: 'size' }, // quick match: join a public room of this team size that is filling up, or open one
   },
   host: {
     welcome: { you: 'any', token: 'any' }, // your peer id, and the token that takes your seat back after a drop
@@ -2371,6 +2423,7 @@ export const WIRE = {
     frame: { frame: 'maybe', delta: 'maybe', events: 'any', kits: 'maybe' }, // one tick: a whole frame or a delta, its events, and your team's kits when they changed
     end: { results: 'any' }, // the match is over
     fault: { text: 'any' }, // something went wrong
+    rooms: { rooms: 'any' }, // the public rooms, for peers that browse
   },
 }
 
@@ -2469,4 +2522,230 @@ export function patch(prev, change) {
   for (const [key, value] of Object.entries(change)) if (key !== '$gone') out[key] = patch(prev[key], value)
   for (const key of change.$gone ?? []) delete out[key]
   return out
+}
+
+// ─── 13 · Solo ──────────────────────────────────────────────────────────────
+//
+// Rooms for one player that need no host, so the page runs them itself: a
+// guided lesson and a drill (a practice room). Each wraps a calm Match (no
+// surge, no rift shifts) in an Arena with the player in seat 't0s0'. Every
+// tick the room first takes its own hand in the match (a trainer casting at
+// you, free mana), then pilots press their keys and the match advances, just
+// as the host runs a room. Mages marked `stand` never fall.
+
+const ME = 't0s0'
+const TRAINER = 't1s0'
+const DUMMY_GARB = { hat: 'hood', robe: 'plain', staff: 'branch' }
+const TRAINER_GARB = { hat: 'wide', robe: 'mantle', staff: 'crook' }
+
+class Solo {
+  constructor(match) {
+    this.match = match
+    this.arena = new Arena(match)
+    this.me = ME
+  }
+
+  get mine() {
+    return this.match.index.get(this.me)
+  }
+
+  /** One of the player's keys, as the host would queue it. */
+  press(key, seq) {
+    this.match.receive({ type: 'press', mage: this.me, key, seq })
+  }
+
+  /** One tick: the room acts, pilots press, the match advances. Returns the new events. */
+  step() {
+    this.tend()
+    const events = this.arena.step()
+    this.watch(events)
+    return events
+  }
+
+  tend() {}
+
+  watch() {}
+
+  /** The room casts for a mage it drives, with no keys, mana or cooldown to wait for: the cast bar shows as usual. */
+  cast(mage, spellId, targetId) {
+    mage.mana = mage.manaMax
+    mage.cools[spellId] = 0
+    if (!mage.kit.includes(spellId)) mage.kit.push(spellId)
+    this.match.order(mage, spellId, targetId)
+  }
+
+  /** True while no hostile spell is cast or flying at the player, and its ward will be ready for the next one. */
+  clear(lead) {
+    const { match } = this
+    const me = this.mine
+    const flying = match.flights.some((flight) => flight.targets.includes(me.id) && match.index.get(flight.mage).team !== me.team)
+    const casting = match.mages.some((m) => m.team !== me.team && m.cast)
+    return !flying && !casting && me.ward.ready <= match.tick + lead
+  }
+}
+
+/** What a drill's dummies cast at you when you practice wards. */
+export const DRILL_BOLTS = ['frostbolt', 'shadow-bolt', 'fireball', 'lightning-bolt']
+
+/**
+ * A practice room. The spells you choose (up to BOOK_MOST; a random book
+ * when none) are your whole kit, target dummies stand across the rift and
+ * never fall, and there is no clock. Options: `dummies` (1–3), `ward`
+ * (dummies cast bolts at you every few seconds, to parry), `free` (no mana
+ * costs and no cooldowns).
+ */
+export class Drill extends Solo {
+  constructor({ seed = 1, spells = [], dummies = 1, ward = false, free = false, name = 'You', garb } = {}) {
+    const count = clamp(Math.round(dummies) || 1, 1, 3)
+    const foes = Array.from({ length: count }, (_, slot) => ({ id: `t1s${slot}`, name: `Dummy ${slot + 1}`, team: 1, slot, bot: true, stand: true, garb: DUMMY_GARB }))
+    const roster = [{ id: ME, name, team: 0, slot: 0, garb, stand: true }, ...foes]
+    super(new Match({ seed, rules: { teams: [1, count], kit: LIMITS.kit[0] }, roster, book: spells, calm: true }))
+    this.ward = Boolean(ward)
+    this.free = Boolean(free)
+    this.dice = new Dice(this.match.seed).fork('drill')
+    this.boltAt = 0
+    // No draft: the whole book is the kit, and the fight starts at once.
+    this.mine.kit = this.match.book.map((entry) => entry.id)
+    this.match.time(1)
+  }
+
+  tend() {
+    const { match } = this
+    const me = this.mine
+    if (this.free) {
+      me.mana = me.manaMax
+      me.cools = {}
+    }
+    if (!this.ward || match.phase !== 'fight' || match.tick < this.boltAt || !this.clear(secs(1.6))) return
+    const dummy = this.dice.pick(match.mages.filter((m) => m.team === 1 && !lockOf(m)))
+    if (!dummy) return
+    this.cast(dummy, this.dice.pick(DRILL_BOLTS), me.id)
+    this.boltAt = match.tick + secs(this.dice.float(2.5, 4.5))
+  }
+
+  /** New chords for every spell in the book, to learn them again. */
+  rewrite() {
+    this.match.rewrite(this.match.book.length)
+  }
+}
+
+/**
+ * The lesson: a short book, a Trainer across the rift, and one step at a
+ * time. Text marks keys as {key} and spells as [spell-id], for the page to
+ * draw as key chips and chords. `spells` and `keys` are what to light up.
+ */
+export const LESSON = {
+  book: ['fire-bolt', 'frost-ray', 'frostbolt', 'spark', 'healing-word', 'power-shield', 'renew', 'barkskin'],
+  kit: ['fire-bolt', 'frost-ray', 'healing-word', 'power-shield'],
+  trainer: ['frostbolt', 'spark', 'renew', 'barkskin'],
+  steps: [
+    {
+      id: 'draft',
+      title: 'Draft your kit',
+      text: 'Every match deals a new book with new chords. Type a spell’s chord, or tap it, to take it. Take [fire-bolt], [frost-ray], [healing-word] and [power-shield].',
+      spells: ['fire-bolt', 'frost-ray', 'healing-word', 'power-shield'],
+    },
+    { id: 'aim', title: 'Aim', text: '{up} jumps to the foe row. Aim at the Trainer; your aim stays there between chords.', keys: ['up'] },
+    { id: 'cast', title: 'Cast', text: 'Type [fire-bolt]. A spell fires on its last rune, and the faster you type, the faster it casts.', spells: ['fire-bolt'] },
+    { id: 'mend', title: 'Heal without looking away', text: 'The Trainer hits back. Cast [healing-word]: an ally spell aimed at a foe lands on you, so your aim stays put.', spells: ['healing-word'] },
+    {
+      id: 'ward',
+      title: 'Ward',
+      text: 'Watch the Trainer’s cast bar. Press {ward} just as its bolt reaches you to send it back.',
+      keys: ['ward'],
+      tip: 'The bolt lands about half a second after the cast bar fills, as the rising tone peaks. A missed ward rests 5 seconds.',
+    },
+    { id: 'meta', title: 'Shape a spell', text: '{meta} then a rune shapes the next spell. Press {meta} {flame} to Empower, then type [fire-bolt].', keys: ['meta', 'flame'], spells: ['fire-bolt'] },
+    { id: 'react', title: 'Set off a reaction', text: 'Fire melts frost. Chill the Trainer with [frost-ray], then hit it with [fire-bolt].', spells: ['frost-ray', 'fire-bolt'] },
+    { id: 'duel', title: 'Duel', text: 'Now the Trainer fights back. Knock it down! [power-shield] soaks damage, and your ward still turns spells back.', spells: ['power-shield'] },
+  ],
+}
+
+export class Lesson extends Solo {
+  constructor({ seed = 1, name = 'You', garb } = {}) {
+    const roster = [
+      { id: ME, name, team: 0, slot: 0, garb, stand: true },
+      { id: TRAINER, name: 'Trainer', team: 1, slot: 0, bot: true, stand: true, garb: TRAINER_GARB },
+    ]
+    super(new Match({ seed, rules: { teams: [1, 1], kit: LESSON.kit.length }, roster, book: LESSON.book, calm: true }))
+    this.trainer = this.match.index.get(TRAINER)
+    this.trainer.kit = [...LESSON.trainer]
+    this.index = 0
+    this.misses = 0
+    this.boltAt = 0
+  }
+
+  /** The step to show: its text and what to light up, or null once the lesson is over. */
+  get goal() {
+    const step = LESSON.steps[this.index]
+    if (!step) return null
+    return { ...step, index: this.index, count: LESSON.steps.length, tip: this.misses >= 2 ? step.tip : undefined }
+  }
+
+  get drafted() {
+    const kit = this.mine.kit
+    return kit.length === LESSON.kit.length && LESSON.kit.every((id) => kit.includes(id))
+  }
+
+  tend() {
+    const { match, trainer } = this
+    // The draft waits for the lesson's kit; once it is whole, the fight starts in a moment.
+    if (match.phase === 'ready' && !this.drafted) match.time(match.tick + secs(TIMING.ready))
+    if (LESSON.steps[this.index]?.id !== 'ward' || match.tick < this.boltAt || !this.clear(secs(1.6))) return
+    this.cast(trainer, 'frostbolt', this.me)
+    this.boltAt = match.tick + secs(1.5)
+  }
+
+  watch(events) {
+    const step = LESSON.steps[this.index]
+    if (!step) return
+    const { match, me } = this
+    const fired = (test) => events.some((e) => e.type === 'fire' && e.mage === me && test(SPELL[e.spell], e))
+    if (step.id === 'ward') this.misses += events.filter((e) => e.type === 'hit' && e.from === TRAINER && e.to === me && e.direct).length
+    const met = {
+      draft: () => match.phase === 'fight',
+      aim: () => match.index.get(this.mine.aim)?.team === 1,
+      cast: () => fired((spell) => spell.kind === 'offense'),
+      mend: () => fired((spell) => spell.roles.includes('heal')),
+      ward: () => events.some((e) => e.type === 'void' && e.why === 'parry' && e.to === me),
+      meta: () => fired((spell, e) => e.metas.length > 0),
+      react: () => events.some((e) => e.type === 'react' && e.from === me),
+      duel: () => match.phase === 'over',
+    }[step.id]
+    if (met()) this.next()
+  }
+
+  next() {
+    this.index++
+    this.misses = 0
+    this.enter(LESSON.steps[this.index]?.id)
+  }
+
+  /** Move past the current step. Skipping the draft takes the lesson's kit, skipping the aim aims; the duel cannot be skipped. */
+  skip() {
+    const id = LESSON.steps[this.index]?.id
+    if (id === 'draft') {
+      this.mine.kit = [...LESSON.kit]
+      this.match.time(Math.min(this.match.fightAt, this.match.tick + 1))
+      return
+    }
+    if (id === 'aim') this.mine.aim = TRAINER
+    if (id && id !== 'duel') this.next()
+  }
+
+  enter(id) {
+    const { match, trainer } = this
+    const me = this.mine
+    if (id === 'mend') this.cast(trainer, 'frostbolt', me.id)
+    // Each of these starts from a Trainer with no banes, so the reaction is one you set up.
+    if (id === 'meta' || id === 'react') for (const aura of trainer.auras.filter((a) => a.kind === 'bane')) match.unmark(trainer, aura, 'end')
+    if (id === 'duel') {
+      // A real fight, short: the Trainer starts low and plays as an easy bot; nobody is kept standing.
+      me.stand = trainer.stand = false
+      me.life = me.lifeMax
+      me.mana = me.manaMax
+      trainer.life = Math.round(trainer.lifeMax * 0.45)
+      this.arena.seat(TRAINER, new Pilot({ skill: 'easy', seed: hashText(`${match.seed}:trainer`) }))
+    }
+  }
 }

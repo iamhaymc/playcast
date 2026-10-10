@@ -6,7 +6,9 @@
  * advances each match in fixed ticks and sends the same frames to everyone,
  * so all players always see the same game. A player whose connection drops
  * keeps their seat for a while, with a bot standing in, and takes it back
- * with the token they were given on arrival.
+ * with the token they were given on arrival. Public rooms are listed for
+ * anyone browsing, and a quick match seats strangers together, filling the
+ * seats still open with bots when its wait runs out.
  *
  *   1  Files   static files for the page
  *   2  Peers   one socket per browser tab
@@ -21,7 +23,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { WebSocketServer } from 'ws'
-import { Arena, Match, Pilot, CODE_LETTERS, RULES, TICK_MS, diff, hashText, pack, packFrame, pickGarb, tidyGarb, tidyRules, unpack } from './core.mjs'
+import { Arena, Match, Pilot, CODE_LETTERS, QUICK, RULES, TICK_MS, diff, hashText, pack, packFrame, pickGarb, tidyGarb, tidyRules, unpack } from './core.mjs'
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url))
 
@@ -117,6 +119,10 @@ class Room {
     this.results = null
     this.timer = null
     this.round = 0
+    this.listed = false // shown to everyone who browses
+    this.quick = false // opened by a quick match: it starts itself when its wait runs out
+    this.startAt = 0 // when a quick room starts itself (ms), 0 when it does not
+    this.clock = null
     this.fitSeats()
   }
 
@@ -160,11 +166,14 @@ class Room {
   // People ───────────────────────────────────────────────────────────────
 
   enter(peer) {
+    this.hall.browsers.delete(peer)
     this.peers.add(peer)
     peer.room = this
     peer.synced = false
     this.owner ??= peer
     if (this.phase === 'lobby') this.sitAnywhere(peer)
+    // A quick room full of people has nobody left to wait for.
+    if (this.startAt && !this.seats.flat().some((seat) => seat.kind === 'open')) this.startIn(QUICK_FULL)
     this.share()
     if (this.phase !== 'lobby' && this.match) {
       peer.send('begin', { setup: this.match.setup(), you: null })
@@ -213,8 +222,21 @@ class Room {
 
   close() {
     clearInterval(this.timer)
+    clearTimeout(this.clock)
     this.timer = null
+    this.startAt = 0
     this.hall.rooms.delete(this.code)
+    if (this.listed) this.hall.touch()
+  }
+
+  /** A quick room starts itself in `ms`, or sooner if it was already due. */
+  startIn(ms) {
+    const at = Date.now() + ms
+    if (this.startAt && this.startAt <= at) return
+    clearTimeout(this.clock)
+    this.startAt = at
+    this.clock = setTimeout(() => this.phase === 'lobby' && this.begin(), ms)
+    this.clock.unref?.()
   }
 
   // Lobby actions ────────────────────────────────────────────────────────
@@ -228,13 +250,13 @@ class Room {
 
   bench(peer, team, slot) {
     const seat = this.seats[team]?.[slot]
-    if (peer !== this.owner || this.phase !== 'lobby' || !seat || seat.kind === 'human') return
+    if (peer !== this.owner || this.phase !== 'lobby' || this.startAt || !seat || seat.kind === 'human') return
     this.seats[team][slot] = seat.kind === 'bot' ? OPEN : BOT
     this.share()
   }
 
   tune(peer, rules) {
-    if (peer !== this.owner || this.phase !== 'lobby') return
+    if (peer !== this.owner || this.phase !== 'lobby' || this.startAt) return
     this.rules = tidyRules(rules)
     this.fitSeats()
     this.share()
@@ -251,8 +273,36 @@ class Room {
     )
     const seated = new Set(seats.flat().map((seat) => seat.id))
     const watchers = [...this.peers].filter((peer) => !seated.has(peer.id)).map((peer) => ({ id: peer.id, name: peer.name, away: peer.away }))
-    const room = { code: this.code, owner: this.owner?.id ?? null, phase: this.phase, rules: this.rules, seats, watchers }
+    // A quick room's countdown goes out as the time left, so the page needs no shared clock.
+    const wait = this.startAt ? Math.max(0, this.startAt - Date.now()) : null
+    const room = { code: this.code, owner: this.owner?.id ?? null, phase: this.phase, rules: this.rules, seats, watchers, listed: this.listed, quick: this.quick, wait }
     for (const peer of this.peers) peer.send('room', { room })
+    if (this.listed) this.hall.touch()
+  }
+
+  /** Show the room to everyone who browses, or hide it. */
+  list(peer, on) {
+    if (peer !== this.owner || on === this.listed) return
+    this.listed = on
+    this.hall.touch()
+    this.share()
+  }
+
+  /** One line in the public list. */
+  summary() {
+    const seats = this.seats.flat()
+    const wait = this.startAt ? Math.max(0, this.startAt - Date.now()) : null
+    return {
+      code: this.code,
+      host: this.owner?.name ?? '',
+      phase: this.phase,
+      quick: this.quick,
+      teams: this.rules.teams,
+      skill: this.rules.skill,
+      people: seats.filter((seat) => seat.kind === 'human').length,
+      open: this.phase === 'lobby' ? seats.filter((seat) => seat.kind === 'open').length : 0,
+      wait,
+    }
   }
 
   botName(team, slot) {
@@ -272,7 +322,14 @@ class Room {
 
   start(peer) {
     if (peer !== this.owner || this.phase === 'match') return
+    this.begin()
+  }
+
+  /** Start the match: open seats become bots. A quick room's wait ends here too. */
+  begin() {
     clearInterval(this.timer)
+    clearTimeout(this.clock)
+    this.startAt = 0
     // Bots play under the names and garb the lobby showed; the next round deals new ones.
     const roster = this.seats.flatMap((team, t) =>
       team.map((seat, slot) => {
@@ -357,6 +414,7 @@ class Room {
     clearInterval(this.timer)
     this.timer = null
     this.phase = 'lobby'
+    this.quick = false
     this.match = null
     this.arena = null
     for (const peer of this.peers) {
@@ -376,6 +434,7 @@ class Room {
     clearInterval(this.timer)
     this.timer = null
     this.phase = 'after'
+    this.quick = false // from now on the owner runs the room, as in any other
     this.results = this.match.results()
     for (const peer of this.peers) peer.send('end', { results: this.results })
     this.share()
@@ -399,13 +458,62 @@ class Room {
 
 const MAX_ROOMS = 500
 
+const LIST_MOST = 40 // public rooms sent to a browser
+const LIST_DELAY = 250 // ms to gather changes before the list goes out again
+
 class Hall {
-  constructor({ hold, quiet }) {
+  constructor({ hold, quiet, wait }) {
     this.rooms = new Map()
     this.tokens = new Map() // token → peer, for every peer that can still come back
+    this.browsers = new Set() // peers following the public list
     this.count = 0
     this.hold = hold // ms a dropped peer's seat is held
+    this.wait = wait // ms a quick room waits for players
     this.quiet = quiet
+    this.listTimer = null
+  }
+
+  /** The public rooms: quick rooms filling up first, then lobbies with open seats, then the rest. */
+  listing() {
+    const rank = (room) => (room.phase !== 'lobby' ? 2 : room.open > 0 ? (room.quick ? 0 : 1) : 2)
+    return [...this.rooms.values()]
+      .filter((room) => room.listed && room.peers.size)
+      .map((room) => room.summary())
+      .sort((a, b) => rank(a) - rank(b) || b.people - a.people || a.code.localeCompare(b.code))
+      .slice(0, LIST_MOST)
+  }
+
+  /** A public room changed: send the list again soon, once for every change in the meantime. */
+  touch() {
+    if (!this.browsers.size || this.listTimer) return
+    this.listTimer = setTimeout(() => {
+      this.listTimer = null
+      this.sendList()
+    }, LIST_DELAY)
+    this.listTimer.unref?.()
+  }
+
+  sendList(peers = this.browsers) {
+    const text = pack('rooms', { rooms: this.listing() })
+    for (const peer of peers) peer.sendRaw(text)
+  }
+
+  /**
+   * Quick match: join the public quick room of this size that has the most
+   * people and a seat open, or open one that waits for players and then
+   * starts itself, bots taking the seats still open.
+   */
+  seek(peer, size) {
+    const fits = (room) => room.startAt && room.phase === 'lobby' && room.rules.teams.every((team) => team === size) && room.seats.flat().some((seat) => seat.kind === 'open')
+    const humans = (room) => room.seats.flat().filter((seat) => seat.kind === 'human').length
+    const found = [...this.rooms.values()].filter(fits).sort((a, b) => humans(b) - humans(a))[0]
+    if (found) return found.enter(peer)
+    const room = this.open({ ...RULES, teams: [size, size] })
+    if (!room) return peer.send('fault', { text: 'The host is full. Try again soon.' })
+    room.listed = true
+    room.quick = true
+    room.startIn(this.wait)
+    room.enter(peer)
   }
 
   report(text, error) {
@@ -453,6 +561,7 @@ class Hall {
 
   /** A peer's socket closed. In a room, its seat is held for a while; otherwise it is gone. */
   lose(peer) {
+    this.browsers.delete(peer)
     if (!peer.room || this.closed) return this.tokens.delete(peer.token)
     peer.room.drop(peer)
     clearTimeout(peer.timer)
@@ -524,6 +633,15 @@ class Hall {
         return room?.backToLobby(peer)
       case 'press':
         return room?.press(peer, message.key, message.seq)
+      case 'browse':
+        if (!message.on) return this.browsers.delete(peer)
+        this.browsers.add(peer)
+        return this.sendList([peer])
+      case 'list':
+        return room?.list(peer, message.on)
+      case 'seek':
+        room?.exit(peer)
+        return this.seek(peer, message.size)
     }
   }
 }
@@ -532,10 +650,11 @@ class Hall {
 
 const HOLD_MS = 60000 // a dropped player's seat is held this long
 const BEAT_MS = 15000 // time between pings; two missed in a row close the socket
+const QUICK_FULL = 1500 // a quick room full of people starts this soon
 
 /** Start the host. Resolves to { port, url, hall, close() }. */
-export async function openHost({ port = Number(process.env.PORT) || 8080, quiet = false, hold = HOLD_MS, beat = BEAT_MS } = {}) {
-  const hall = new Hall({ hold, quiet })
+export async function openHost({ port = Number(process.env.PORT) || 8080, quiet = false, hold = HOLD_MS, beat = BEAT_MS, wait = QUICK.wait * 1000 } = {}) {
+  const hall = new Hall({ hold, quiet, wait })
   const server = http.createServer(serveFile)
   // Frames are JSON that repeats itself, so compression pays. A small window keeps memory per socket low.
   const deflate = { threshold: 128, serverMaxWindowBits: 12, zlibDeflateOptions: { level: 6, memLevel: 6 } }
@@ -560,6 +679,7 @@ export async function openHost({ port = Number(process.env.PORT) || 8080, quiet 
   const close = () =>
     new Promise((resolve) => {
       clearInterval(beating)
+      clearTimeout(hall.listTimer)
       hall.closed = true
       for (const peer of hall.tokens.values()) clearTimeout(peer.timer)
       for (const room of hall.rooms.values()) room.close()

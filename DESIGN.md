@@ -22,10 +22,13 @@ A complete overview and reference. For setup, see [README.md](README.md).
 
 ```
 home ──► lobby ──► draft (≤15s) ──► fight ──► surge ──► results ──► rematch or lobby
+  │
+  ├──► find players ──► quick match or a public room ──► lobby
+  └──► tutorial or practice (in the page, no host)
 ```
 
-- **Home.** Pick a name. Start a quick duel against a bot, host a match, or join one with a four-letter code.
-- **Lobby.** The host sets the rules. Players pick open seats. The host can put bots in seats. Open seats become bots when the match starts.
+- **Home.** Pick a name. Start a quick duel against a bot, take the tutorial, practice, find players, host a match, or join one with a four-letter code.
+- **Lobby.** The host sets the rules and can make the room public. Players pick open seats. The host can put bots in seats. Open seats become bots when the match starts. A quick match's lobby counts down instead and starts itself.
 - **Draft.** The book for this match opens wide. Each mage drafts a kit from it by typing whole chords (or tapping spells). The draft lasts 15 seconds, or ends 3 seconds after every kit is full. Kits left short are filled for their owners.
 - **Fight.** Cast chords from your kit until one team has no mage standing. Every 45 seconds the rift rewrites a quarter of the chords.
 - **Surge.** After the surge time (90s by default) every mage takes rising damage each second until a team falls. The chords shift once more as it begins.
@@ -220,6 +223,50 @@ Each mage drafts a **kit** of 8 spells by default (4–12 allowed, and always at
 
 Every 45 seconds of fight, and when the surge begins, the rift rewrites the chords of a quarter of the book (at least two). New chords keep their length and the book stays prefix-free. Chords being typed are cleared. A warning shows 8 seconds before, the banner says how many of your chords changed, and the changed rows glow in the book.
 
+### Tutorial and practice
+
+Both run in the page, with no host, so they start at once and work offline. Neither has a clock: no surge, no rift shifts.
+
+**The tutorial** is a short match against a Trainer, one step at a time. A coach card under the top bar says what to do, shows the keys for the current input mode and the spells' chords, and the book rows, legend keys and touch buttons it is about glow. The clock shows the step. Each step can be skipped but the duel.
+
+| Step | You | Done when |
+|---|---|---|
+| Draft your kit | Take Fire Bolt, Frost Ray, Healing Word and Power Shield from an 8-spell book. The draft waits for you | The fight starts |
+| Aim | `up` to the foe row | Your aim is on the Trainer |
+| Cast | Fire Bolt | An offense spell fires |
+| Heal without looking away | The Trainer hits you; cast Healing Word with your aim still on it | A heal fires |
+| Ward | The Trainer casts Frostbolt at you, waiting for your ward to be ready each time | A parry. After two misses a tip explains the timing |
+| Shape a spell | `meta` `flame`, then Fire Bolt | A shaped spell fires |
+| Set off a reaction | Frost Ray, then Fire Bolt (Melt). The Trainer's banes are cleared first | A reaction of yours |
+| Duel | The Trainer, at 45% life, plays as an easy bot | The match ends |
+
+Until the duel, nobody can fall. A finished tutorial is remembered; until then the home page points new players at it. The results card offers it again, or practice.
+
+**Practice** is a room with target dummies that never fall. You pick up to 12 spells from the whole codex (filtered by school; team spells are left out), or none for a random 16-spell book, and they are your whole kit: there is no draft. Options: 1–3 dummies; a ward drill, where a dummy casts a bolt at you every few seconds (Frostbolt, Shadow Bolt, Fireball or Lightning Bolt) once your ward is ready; and free mana (no mana costs, no cooldowns). A bar under the top bar counts casts, fizzles and parries (of wards raised) and shows your chord speed: how much of the cast time your last ten chords saved, as a share of the most a chord can save. **New chords** rewrites every chord in the book, to learn them again. The picks and options are remembered.
+
+### Playing with strangers
+
+**Find players** lists every public room, with its host, size, people and open seats, and joins one (or watches one that is playing). A room is public when its host makes it so in the lobby ("Who can join: Code only / Public").
+
+**Quick match** asks for a team size (1 vs 1, 2 vs 2 or 3 vs 3). It seats you in the public quick room of that size that has the most people and an open seat, or opens a new one. A quick room waits 15 seconds for people, then starts itself and bots take the seats still open; it starts 1.5 seconds after its last seat is filled by a person. Its lobby counts down, its rules are fixed until it starts, and its first player may start it early. After its first match it is an ordinary public room.
+
+### Settings
+
+The gear (on the home card and in the top bar) opens the settings. They are kept in the browser.
+
+| Setting | Values | Effect |
+|---|---|---|
+| Effects, Music | 0–100% | The volume of each sound bus |
+| Haptics | On, Off | Gamepad rumble and phone vibration, including the tap on touch pads |
+| Quality | Auto, Low, Medium, High, Ultra | Auto lets the governor choose; a tier holds it. `?quality=` still wins |
+| Screen shake | On, Off | Camera shake |
+| Flashes | On, Soft | Soft dims the bright pops, the white flash on hit and spell light, and drops the red edge when you are hurt |
+| Motion | Full, Reduced | Reduced halves small particles, thins the rift's dust and stills the page's animations |
+| Colors | Standard, Colorblind | Colorblind swaps the teams' cyan and magenta for blue and amber, boons and heals to bluish green, harm to vermilion, nature to bluish green and holy to yellow, in the arena and the HUD |
+| Keyboard | Any key | Rebind each of the twelve keys. A key bound twice swaps places; Tab, Escape, M and modifiers stay with the page. The arrows and Backspace keep working unless bound elsewhere. Key chips, the legend and the guide follow |
+
+A first visit from a system that asks for less motion starts with screen shake off and reduced motion.
+
 ### Rules
 
 | Rule | Default | Range |
@@ -256,7 +303,7 @@ The game is built around messages. Nothing reaches the simulation except `press`
  browser ◄── frame {delta, events, kits?} ◄── host ◄── flush() + frame(team) + kits(team)
 ```
 
-- **One authority.** The host runs every match. Clients only send keys and draw what they receive, so every player sees the same game.
+- **One authority.** The host runs every match with people in it. Clients only send keys and draw what they receive, so every player sees the same game. The tutorial and practice, with one player, run the same core match in the page instead (see [Solo rooms](#solo-rooms)).
 - **Fixed ticks.** 20 ticks per second. Orders are applied at the start of the next tick, in arrival order.
 - **Determinism.** A match uses one seeded random generator. The same seed, rules, roster and orders always replay the same match.
 - **Bots are players.** Bots press the same keys through the same `press` orders, so they obey the same rules, timeouts and fizzles.
@@ -284,11 +331,15 @@ The game is built around messages. Nothing reaches the simulation except `press`
 | 10 | Pilot | `Pilot`: drafts, turns plans into timed key presses, raises wards |
 | 11 | Arena | `Arena`, `botRoster`, `simulate` |
 | 12 | Wire | `WIRE`, `pack`, `unpack`, `CODE_LETTERS`, and frame deltas: `packFrame`, `unpackFrame`, `diff`, `patch` |
+| 13 | Solo | `Lesson` and `LESSON` (the tutorial), `Drill` and `DRILL_BOLTS` (practice) |
+
+The Kit also holds `QUICK` (quick match sizes and wait), `NEVER` (the tick a calm match's surge and shifts never reach) and `BOOK_MOST` (the most spells a chosen book holds, so its chords always fit). The Book's `chordBook(dice, spells)` gives any list of spells prefix-free chords; `writeBook` draws spells, then calls it.
 
 ### Match API
 
 ```js
-const match = new Match({ seed, rules, roster }) // roster: [{ id, name, team, slot, bot }]
+const match = new Match({ seed, rules, roster }) // roster: [{ id, name, team, slot, bot, stand? }]
+new Match({ seed, rules, roster, book, calm })   // book: chosen spell ids; calm: no surge and no rift shifts
 match.receive({ type: 'press', mage, key, seq }) // queue an order
 match.advance()                                  // run one tick
 match.flush()                                    // events since the last flush (`only: team` marks private ones)
@@ -298,7 +349,24 @@ match.setup()                                    // fixed facts, sent once (the 
 match.view(id)                                   // what a brain may know
 match.usable(mage)                               // what a mage can cast now: its kit, or the wisp book when down
 match.results()                                  // final numbers
+match.rewrite(count)                             // the rift rewrites `count` chords now (practice's New chords)
 ```
+
+A roster entry marked `stand` never falls: at zero life it is saved at full (a `save` event). Solo rooms use it for dummies, and for everyone until the tutorial's duel.
+
+### Solo rooms
+
+`Lesson` and `Drill` wrap a calm match in an Arena with the player in seat `t0s0`, and give it the same surface the page needs: `step()` (one tick: the room acts, pilots press, the match advances; returns the events), `press(key, seq)`, `match` and `me`. The room acts through `cast(mage, spell, target)`, which orders a spell for a mage it drives, with full mana and no cooldown, so its cast bar shows like anyone's.
+
+```js
+const lesson = new Lesson({ seed, name, garb })
+lesson.goal  // { id, title, text, keys, spells, tip, index, count }, or null when over
+lesson.skip()
+const drill = new Drill({ seed, spells, dummies, ward, free, name, garb })
+drill.rewrite() // new chords for the whole book
+```
+
+Lesson text marks keys as `{key}` and spells as `[spell-id]`; the page draws them as key chips for the current input mode and as the spell's name with its chord.
 
 Tick order: orders → draft (chord timeouts, early start when every kit is full) → phase change (kits filled) → surge wave → rift shift → each standing mage (mana, auras, chord timeout, flow ebb, cast progress, queue) and each wisp (chord timeout) → landing flights (wards, reflects and dodges first) → end check.
 
@@ -507,6 +575,9 @@ Peer → host:
 | `lobby` | | host | Return everyone to the lobby |
 | `leave` | | anyone | Leave the room |
 | `resume` | `token` | anyone | After a reconnect or a reload: take back the seat held for this token |
+| `browse` | `on` | anyone | Follow the list of public rooms (`rooms` now and on every change), or stop |
+| `list` | `on` | host | Show the room in the public list, or hide it |
+| `seek` | `size` | anyone | Quick match: join the public quick room of this team size (1–3) that is filling up, or open one |
 
 Host → peer:
 
@@ -515,7 +586,8 @@ Host → peer:
 | `welcome` | `you, token` | On connect: your peer id, and the token that takes your seat back after a drop |
 | `back` | `you` | Answer to `resume`: your old peer id, or `null` if nothing was held |
 | `moved` | | Your seat was taken back on another connection (a copied tab); stop resuming it |
-| `room` | `room` | Lobby state changed: code, owner, phase, rules, seats (with `garb`, and `away` for dropped players), watchers. Bots play under the names and garb the lobby showed |
+| `room` | `room` | Lobby state changed: code, owner, phase, rules, seats (with `garb`, and `away` for dropped players), watchers, `listed`, `quick`, and `wait` (ms until a quick room starts itself, or `null`). Bots play under the names and garb the lobby showed |
+| `rooms` | `rooms` | For browsing peers: the public rooms, each `{ code, host, phase, quick, teams, skill, people, open, wait }`, quick rooms filling up first, at most 40 |
 | `begin` | `setup, you` | A match starts (or you are back in one); `you` is your mage id or `null` when watching |
 | `frame` | `frame` or `delta`, `events`, `kits?` | Every tick: your team's copy, with its private events (watchers get the public copy). `kits` only when they changed |
 | `end` | `results` | The match is over |
@@ -546,13 +618,15 @@ A frame is the whole changing state, so sending it every tick costs about 2 KB i
 - **Rooms.** A room has rules, two rows of seats (`open`, `human` or `bot`), peers and a phase: `lobby`, `match` or `after`. The first peer is the host; if they leave, the next peer takes over.
 - **Seats.** New peers sit on the team with fewer people. Peers without a seat watch. Shrinking a team turns extra players into watchers.
 - **The loop.** Every 25ms the room runs every tick that is due (catching up at most 10 ticks) and sends one frame with all their events: one copy per team (its kits, draft chords and private events) and a public copy for watchers. Peers that have the last frame get a delta; the rest get the whole frame.
+- **Public rooms.** A room's host can list it. Peers that `browse` get the list at once, then again a quarter second after any listed room changes (gathering changes in between). Entering a room stops browsing.
+- **Quick match.** `seek` seats the peer in the public quick room of that size with the most people and an open seat, or opens one: public, the size asked for, the default rules. It starts itself when its wait runs out (15 seconds, the `wait` option of `openHost`) or 1.5 seconds after a person fills its last seat; open seats become bots. Until then its rules and bots are fixed. Its owner can still start it early, and after its first match it is run by its owner like any room.
 - **Leaving mid-match.** A bot pilot takes over the mage, so the match is never broken.
 - **Dropping and coming back.** Every peer gets a token in `welcome`. When a socket closes while its peer is in a room, the seat and mage are held for 60 seconds with a bot playing for it; the room says the player is `away`, and if they owned it, ownership passes to someone present. A `resume` with the token on a new socket (the page sends it after a reconnect, and after a reload, since the token lives in `sessionStorage`) takes the seat back: the bot steps aside and a whole frame catches the page up. If the host had not noticed the old socket die, the new one takes over and the old one is told `moved`. After the hold, the player leaves as if they had pressed Leave.
 - **Dead connections.** The host pings every socket every 15 seconds; one that misses two pings in a row (30–45 seconds of silence) is closed, which starts its hold. Two, because a page whose main thread is busy stops reading its socket, and its browser stops answering pings until it catches up.
 - **Faults stay small.** A malformed request path is a 400. A message that throws gets a `fault` back. A match that throws is stopped, its players get a `fault` and return to the lobby, and every other room plays on.
 - **Limits.** 60 messages per second per peer, 4KB per message, 500 rooms.
 
-Start it with `npm start`, or import it: `const host = await openHost({ port: 0 })` returns `{ port, url, hall, close }`. Options: `quiet` (no logs), `hold` (ms a dropped seat is held) and `beat` (ms between pings).
+Start it with `npm start`, or import it: `const host = await openHost({ port: 0 })` returns `{ port, url, hall, close }`. Options: `quiet` (no logs), `hold` (ms a dropped seat is held), `beat` (ms between pings) and `wait` (ms a quick room waits for people).
 
 ---
 
@@ -573,9 +647,16 @@ Start it with `npm start`, or import it: `const host = await openHost({ port: 0 
 | 9 | Stage | Scene, world, camera, effects and the render loop |
 | 10 | Plates | Nameplates and floating numbers |
 | 11 | Hud | Clock, banner, book (draft and kit), chord tray, ward and flow status, wisp book |
-| 12 | Views | Lobby and result rendering, toasts |
-| 13 | Game | Client state: messages in, visuals and sounds out; music by view; resume after a drop |
-| 14 | Boot | Starts the game; `window.chordcast` is the game object |
+| 12 | Views | Lobby, public list and result rendering, toasts |
+| 13 | Solo | `Runner` (steps a core Lesson or Drill on the host's clock and speaks to the Game as a host would), lesson text, the practice `Tally` |
+| 14 | Game | Client state: messages in, visuals and sounds out; music by view; resume after a drop; settings, the tutorial's coach and the practice room |
+| 15 | Boot | Starts the game; `window.chordcast` is the game object |
+
+The Kit also holds the settings (`loadSettings`, the key binding in `BOUND_KEYS` and `bindKeys`, the palettes in `TEAM_TONES`, `SCHOOL_TONES` and `paintPalette`).
+
+### Solo rooms in the page
+
+A `Runner` steps a core `Lesson` or `Drill` on a 25 ms timer, the way the host steps a room (at most ten ticks to catch up, so a hidden tab pauses it), and hands the Game `begin`, `frame` (always whole) and `end` messages, passed through JSON like the wire. Presses go to the runner instead of the link, and messages from a host are ignored while it runs. The clock shows the tutorial's step or the practice time; the coach card and the practice bar sit under the top bar, and the camera fits the arena below them, shrinking it if it must, so the far row's plates stay in view.
 
 ### Rendering
 
@@ -602,7 +683,8 @@ Start it with `npm start`, or import it: `const host = await openHost({ port: 0 
 
 - The low tier also draws a plainer, diffuse-only floor (`GROUND_LITE`: no grain, cracks, grime, scorch marks or rain), turns off weathering through a shared uniform, and lets only still things (ruins and pedestals) cast shadows, so the shadow map is drawn once per roster instead of every frame. Changing tiers recompiles nothing; the plain floor's shader is compiled once, the first time it is used.
 
-- The start tier is a guess: software renderers start low, small devices (≤ 4 cores or ≤ 3 GB) medium, touch devices high, others ultra. `?quality=low|medium|high|ultra` pins a tier.
+- The start tier is a guess: software renderers start low, small devices (≤ 4 cores or ≤ 3 GB) medium, touch devices high, others ultra. The Quality setting holds a tier, or Auto goes back to the guess and the governor. `?quality=low|medium|high|ultra` pins a tier over both.
+- Reduced motion halves the small particles of every tier.
 - The governor drops a tier when frames stay slower than 40 per second for 1.5 seconds. If the drop does not speed frames up (a capped display or a busy CPU), it is undone and that tier becomes the floor. After 10 seconds of fast frames it climbs back, never above a tier that just failed.
 - Points under two pixels are drawn two pixels wide and fainter, so tiny sparks do not flicker.
 
@@ -691,7 +773,7 @@ The HUD is laid out symmetrically around the arena:
 - Book: offense pinned to the left edge and defense to the right, both centered in the band between the top bar and the tray. While you draft they meet side by side in the middle under a title and a kit counter; tapping a row types its chord for you. When the fight starts they part to their edges and show only your kit. Each page has its own detail line, with the reactions a spell's school sets off. On narrow screens the two pages stack in one centered sheet above the tray.
 - Chord tray: centered at the bottom. The target sits on the left, the keys typed dead center (metamagic as named chips; pending keys are dimmed until the host confirms them) and the spells that still match on the right, with the shaped cost when one is left. Over it, a status row shows the ward (warm when ready, a sweep while it rests, lit while up), the flow pips and a rift shift warning; while you are a wisp the wisp book sits above that. Under it, a legend shows which key types each rune and the meta, ward, call and clear keys.
 - Match camera: behind your row, pitched so your row sits low and the foe row high. It backs off until the widest row fits between the book's pages and centers the picture in the free band between the top bar and the tray or touch pads, easing when the book opens or closes.
-- Menus: one centered card (home, lobby, results) over a silent demo duel seen side-on, one team to each side of the card. In the lobby the duel wears every seat's garb and the gold arrow marks yours, so a pick in the garb row under the seats shows at once.
+- Menus: one centered card (home, find players, practice, lobby, results) over a silent demo duel seen side-on, one team to each side of the card. In the lobby the duel wears every seat's garb and the gold arrow marks yours, so a pick in the garb row under the seats shows at once.
 - Nameplates: under the feet for your row, above the halo line for the foe row; shrunk when neighbours would overlap. They show name, diminishing returns badges (½, ¼, ✕; gold for stuns, pink for silences), life with shield stripes, mana, flow pips, a cast bar in the spell's school color with its metamagic, the metamagic and runes being typed, and aura chips. A raised ward lights the plate; a fallen mage's plate reads WISP.
 - Aura chips: banes first, then boons. Each is an icon for its look (a flame for a burn, a flake for a chill, a shield, stars for a stun, a skull for doom…; damage over time takes its school's icon), tinted by the aura's school, inside a ring that empties as the aura runs out: green for boons, red for banes. Charges show as a count. Hovering a chip, or a long press on touch, opens its details: name, boon or bane, what it does (`describeAura` on the rules of the spell that put it there, with its real length), its school, time left and charges.
 - Book rows: chords in a fixed column (room for five runes) so names line up, cost after flow, target and a cooldown sweep. Rows that no longer match the typed runes dim; rows that would set off a reaction on your aimed foe show its name; rows the rift just rewrote glow.
@@ -713,8 +795,8 @@ The page keeps the token from `welcome` in `sessionStorage`. When the socket dro
 - **Incoming.** A wardable spell flying at you rises in pitch over its flight and ticks as it lands, panned toward its caster: ward on the tick.
 - **Moments.** Parry clang, reaction chord, flow arpeggio, fizzle buzz, the shift warning chime and the rift's swirl, falls, revives, death ward bells, the gong at the start, the surge, and a fanfare or lament at the end.
 - **Music.** A four-bar loop in D minor from a small step sequencer: slow pads and a sparse arpeggio under the menus; in the fight, bass, drums and pads that grow with intensity (draft 0.15, fight 0.5, surge 0.8 rising to 1), adding faster hats and a sixteenth arpeggio. The end sting plays alone before the menu music returns.
-- **Mixing.** Effects and music have their own buses into a compressor, with a little synthesized room reverb. Sounds about other mages are dropped when more than 72 voices sound or the same sound just played; sounds about you always play.
-- **Haptics.** Gamepads rumble and phones (when playing by touch) vibrate on big hits to you, your parries and reactions, and your fall.
+- **Mixing.** Effects and music have their own buses into a compressor, with a little synthesized room reverb. Their volumes are settings (`setVolume`). Sounds about other mages are dropped when more than 72 voices sound or the same sound just played; sounds about you always play.
+- **Haptics.** Gamepads rumble and phones (when playing by touch) vibrate on big hits to you, your parries and reactions, and your fall, unless haptics are off in the settings.
 
 ---
 
@@ -724,9 +806,9 @@ The page keeps the token from `welcome` in `sessionStorage`. When the socket dro
 
 | Group | Covers |
 |---|---|
-| Core | Frame deltas rebuilding every tick of whole matches exactly, at a fraction of the size; spell list shape and size; rule clamping; book balance, chord lengths, prefix-free chords and seeding; rune and chord reading; cursor paths for both sides and the snap home; a full cast; every fizzle reason; stuns and drop; reflect, dodge and never-miss; every spell in the codex cast and landed; chord speed; each metamagic and its cost; wards, rests and never-miss; diminishing returns and grace; reactions; flow; sticky aim; calls; the draft, private kits and the early start; rift shifts; wisps; determinism; bots finishing 1v1 to 8v8; bots using every mechanic; hard beating easy; async brains; wire validation; garb tidied, seeded and worn into the match; auras naming the spell that put them there; this document listing every spell |
-| Host | Hosting, bad codes, joining by code, tuning, garb in the lobby and the match (bots keep the name and garb the lobby showed), bots filling seats, shared books, kits and picks kept from foes, presses echoed by `seq`, leaving mid-match, match end; one whole frame then deltas, compressed; malformed paths and a match that throws; dropping, resuming, taking over a live seat and a hold running out; a connection that stops answering pings |
-| Views | A Playwright run through every screen, saved to `shots/`; picking garb in the lobby and wearing it into the match; aura details on hover; focus and particle budgets in 2 vs 2 and 8 vs 8; sound starting, muting and unmuting; a reload mid-match taking the seat back |
+| Core | Frame deltas rebuilding every tick of whole matches exactly, at a fraction of the size; spell list shape and size; rule clamping; book balance, chord lengths, prefix-free chords and seeding; rune and chord reading; cursor paths for both sides and the snap home; a full cast; every fizzle reason; stuns and drop; reflect, dodge and never-miss; every spell in the codex cast and landed; chord speed; each metamagic and its cost; wards, rests and never-miss; diminishing returns and grace; reactions; flow; sticky aim; calls; the draft, private kits and the early start; rift shifts; wisps; determinism; bots finishing 1v1 to 8v8; bots using every mechanic; hard beating easy; async brains; wire validation; garb tidied, seeded and worn into the match; auras naming the spell that put them there; this document listing every spell; the tutorial step by step (the draft waits, each step's check, skipping) and to the end of its duel; practice (chosen kits, dummies that never fall, no clock, free mana, the ward drill, new chords, the cap on chosen books) |
+| Host | Hosting, bad codes, joining by code, tuning, garb in the lobby and the match (bots keep the name and garb the lobby showed), bots filling seats, shared books, kits and picks kept from foes, presses echoed by `seq`, leaving mid-match, match end; one whole frame then deltas, compressed; malformed paths and a match that throws; dropping, resuming, taking over a live seat and a hold running out; a connection that stops answering pings; public rooms listed and hidden, and quick matches seating people together, starting when full, and filling with bots when the wait runs out |
+| Views | A Playwright run through every screen, saved to `shots/`; picking garb in the lobby and wearing it into the match; aura details on hover; focus and particle budgets in 2 vs 2 and 8 vs 8; sound starting, muting and unmuting; a reload mid-match taking the seat back; settings reaching the sound, quality, palette and keys (a key bound twice swaps) and resetting; the tutorial's coach from the draft to its duel and its results; a practice room with a chosen kit counting casts; a quick match counting down and joined from the public list |
 
 Screenshots in `shots/`:
 
@@ -749,6 +831,11 @@ Screenshots in `shots/`:
 | `15-watching.png` | Watching the phone's duel |
 | `16-big-fight.png` | 8 vs 8: your effects at full strength, the rest faded |
 | `17-aura.png` | An aura's details, hovered on a nameplate |
+| `18-settings.png` | Settings, with the colorblind palette on the duel behind |
+| `19-lesson.png` | The tutorial's coach at the Cast step, the spell to cast glowing |
+| `20-practice.png` | The practice room: two dummies, the bar counting a cast |
+| `21-quick-lobby.png` | A quick match's lobby counting down |
+| `22-find-players.png` | The public list with that quick match in it |
 
 The browser test uses software WebGL, so it keeps at most two pages open and freezes the one it is not driving. Pages play at the low tier; each screenshot is drawn at the top tier.
 
@@ -780,6 +867,10 @@ The browser test uses software WebGL, so it keeps at most two pages open and fre
 
 **Add a brain.** Implement `think(view)` (and `draft(view)` if it should pick its own kit) and seat it with `new Pilot({ brain })`.
 
+**Add a tutorial step.** Add a row to `LESSON.steps` (`id`, `title`, `text` with `{key}` and `[spell-id]` marks, the `keys` and `spells` to light up, and an optional `tip`), its check to the `met` table in `Lesson.watch`, and any setup to `Lesson.enter`. Its spells must be in `LESSON.book`.
+
+**Add a setting.** Add it to `loadSettings` (with a check for its saved value), a row to the settings dialog (`data-set` on a range input or a segmented control of `on`/`off` or named values) and its effect to `Game.applySettings`.
+
 ---
 
 ## 10. Naming
@@ -795,9 +886,9 @@ The browser test uses software WebGL, so it keeps at most two pages open and fre
 
 ## 11. Spell reference
 
-137 spells: 82 offense and 55 defense, plus 3 wisp spells. ¹ marks team spells, left out when a team has a single mage. Text is generated from each spell's acts.
+151 spells: 92 offense and 59 defense, plus 3 wisp spells. ¹ marks team spells, left out when a team has a single mage. Text is generated from each spell's acts.
 
-### Offense (82)
+### Offense (92)
 
 | Spell | School | Tier | Target | Cast | Cool | Mana | Effect |
 |---|---|---|---|---|---|---|---|
@@ -814,6 +905,7 @@ The browser test uses software WebGL, so it keeps at most two pages open and fre
 | Pyroblast | fire | 3 | Foe | 1.8s | 18s | 32 | Deal 300 fire. Burning: 20 fire per second for 6s. |
 | Meteor | fire | 3 | Foe | 1.4s | 24s | 36 | Deal 240 fire. Deal 90 fire to everyone on that side. |
 | Fire Wall | fire | 3 | Foe side | 1s | 20s | 30 | Fire Wall: 25 fire per second for 6s. Hits the whole side. |
+| Burning Hands | fire | 1 | Foe side | — | 12s | 12 | Deal 30 fire. Hits the whole side. |
 | Frost Ray | frost | 1 | Foe | 0.7s | 3s | 8 | Deal 60 frost. Chilled: cast 30% slower for 4s. |
 | Ice Lance | frost | 1 | Foe | — | 3s | 8 | Deal 45 frost (×3 on stunned or sleeping foes). |
 | Frostbolt | frost | 2 | Foe | 1s | 5s | 16 | Deal 140 frost. Chilled: cast 30% slower for 5s. |
@@ -822,6 +914,7 @@ The browser test uses software WebGL, so it keeps at most two pages open and fre
 | Ice Storm | frost | 2 | Foe side | 0.8s | 12s | 22 | Deal 100 frost. Hits the whole side. |
 | Blizzard | frost | 3 | Foe side | 1.4s | 20s | 30 | Blizzard: 22 frost per second for 6s. Chilled: cast 30% slower for 6s. Hits the whole side. |
 | Glacial Spike | frost | 3 | Foe | 1.8s | 20s | 30 | Deal 260 frost. Frozen: stunned for 2.5s. |
+| Frozen Orb | frost | 2 | Foe | 0.7s | 14s | 20 | 5 strikes on random foes: deal 30 frost, Chilled: cast 20% slower for 3s each. |
 | Shocking Grasp | storm | 1 | Foe | — | 10s | 10 | Deal 50 storm. Interrupt a cast and silence 1.5s. |
 | Thunderclap | storm | 1 | Foe side | — | 10s | 12 | Deal 40 storm. Interrupt a cast and silence 1s. Hits the whole side. |
 | Spark | storm | 1 | Foe | 0.4s | 2s | 6 | Deal 60 storm. |
@@ -844,6 +937,7 @@ The browser test uses software WebGL, so it keeps at most two pages open and fre
 | Fear | shadow | 2 | Foe | 0.8s | 14s | 14 | Feared: can’t act (breaks on damage) for 5s. |
 | Blight | shadow | 2 | Foe | 0.7s | 8s | 18 | Deal 130 shadow. Blighted: 50% less healing for 4s. |
 | Mind Blast | shadow | 2 | Foe | 0.8s | 6s | 16 | Deal 120 shadow. Burn 10 mana. |
+| Ray of Enfeeblement | shadow | 2 | Foe | 0.7s | 14s | 12 | Enfeebled: deal 35% less damage for 6s. |
 | Contagion | shadow | 2 | Foe ¹ | — | 16s | 16 | Copy its banes to its allies. |
 | Howl of Terror | shadow | 3 | Foe side | — | 30s | 26 | Feared: can’t act (breaks on damage) for 3s. Hits the whole side. |
 | Doom | shadow | 3 | Foe | — | 24s | 30 | Doom: after 6s, deal 340 shadow. |
@@ -853,22 +947,29 @@ The browser test uses software WebGL, so it keeps at most two pages open and fre
 | Soul Swap | shadow | 3 | Foe | 1s | 40s | 30 | Swap life shares with the target. |
 | Smite | holy | 1 | Foe | 0.7s | 2s | 8 | Deal 70 holy. |
 | Sacred Flame | holy | 1 | Foe | — | 4s | 8 | Deal 55 holy through shields. |
+| Hammer of Wrath | holy | 1 | Foe | — | 8s | 10 | Deal 60 holy (×2 below 30% life). |
 | Guiding Bolt | holy | 2 | Foe | 0.8s | 8s | 16 | Deal 120 holy. Guided: take 20% more damage for 4s. |
 | Holy Fire | holy | 2 | Foe | 1s | 10s | 18 | Deal 110 holy. Holy Fire: 12 holy per second for 6s. |
 | Judgment | holy | 2 | Foe | — | 14s | 14 | Deal 80 holy. Silenced for 2.5s. |
 | Holy Shock | holy | 2 | Anyone | — | 8s | 14 | On a foe: deal 110 holy. On an ally: heal 140. |
+| Hammer of Justice | holy | 2 | Foe | — | 20s | 14 | Deal 40 holy. Stunned for 2.5s. |
+| Consecration | holy | 2 | Foe side | 0.7s | 14s | 22 | Consecration: 11 holy per second for 6s. Hits the whole side. |
 | Sunbeam | holy | 3 | Foe | 1.4s | 18s | 30 | Deal 220 holy. Blinded: can’t act (breaks on damage) for 2s. |
+| Mass Dispel | holy | 3 | Foe side | 1s | 30s | 24 | Remove 2 boons. Hits the whole side. |
 | Wrath | nature | 1 | Foe | 0.7s | 2s | 8 | Deal 70 nature. |
 | Poison Spray | nature | 1 | Foe | — | 5s | 8 | Deal 35 nature. Poisoned: 10 nature per second for 6s. |
 | Acid Splash | nature | 1 | Foe | — | 6s | 8 | Deal 45 nature. Corroded: take 10% more damage for 4s. |
 | Thorn Whip | nature | 1 | Foe | — | 8s | 10 | Deal 40 nature. Snared: cast 25% slower for 4s. |
+| Earth Shock | nature | 2 | Foe | — | 8s | 16 | Deal 110 nature. |
 | Entangle | nature | 2 | Foe | 0.7s | 16s | 14 | Rooted: stunned for 2.5s. Thorned: 10 nature per second for 4s. |
 | Insect Swarm | nature | 2 | Foe | 0.7s | 10s | 14 | Swarmed: 18 nature per second for 8s. Weakened: deal 20% less damage for 8s. |
 | Earthquake | nature | 3 | Foe side | 1.4s | 22s | 32 | Deal 120 nature. Knocked Down: stunned for 1s. Hits the whole side. |
+| Hurricane | nature | 3 | Foe side | 1.4s | 22s | 30 | Hurricane: 14 nature per second for 6s. Buffeted: cast 25% slower for 6s. Hits the whole side. |
 | Magic Missile | arcane | 1 | Foe | 0.7s | 3s | 8 | Deal 25 arcane that never misses, 3 times. |
 | Moonfire | arcane | 1 | Foe | — | 5s | 8 | Deal 40 arcane. Moonfire: 12 arcane per second for 8s. |
 | Purge | arcane | 1 | Foe | — | 8s | 8 | Remove 2 boons. |
 | Mana Burn | arcane | 1 | Foe | 0.7s | 8s | 10 | Burn 25 mana and deal 2× that as arcane. |
+| Sleep | arcane | 1 | Foe | 1s | 18s | 10 | Asleep: can’t act (breaks on damage) for 4s. |
 | Arcane Blast | arcane | 2 | Foe | 1s | 4s | 20 | Deal 160 arcane. |
 | Arcane Missiles | arcane | 2 | Foe | 1s | 8s | 16 | Deal 35 arcane, 5 times. |
 | Starfire | arcane | 2 | Foe | 1.4s | 6s | 18 | Deal 190 arcane. |
@@ -884,12 +985,13 @@ The browser test uses software WebGL, so it keeps at most two pages open and fre
 | Feeblemind | arcane | 3 | Foe | 1.4s | 30s | 26 | Deal 100 arcane. Feebleminded: silenced for 4s. Burn 30 mana. |
 | Prismatic Spray | arcane | 3 | Foe side | 1s | 20s | 30 | One at random: deal 140 fire / deal 140 frost / deal 140 storm / deal 140 nature / silenced for 3s / Petrified: stunned for 2s / Slowed: cast 50% slower for 5s. Hits the whole side. |
 
-### Defense (55)
+### Defense (59)
 
 | Spell | School | Tier | Target | Cast | Cool | Mana | Effect |
 |---|---|---|---|---|---|---|---|
 | Rebuke | fire | 1 | Self | — | 14s | 8 | Rebuke: return 50 fire to attackers for 8s. |
 | Cauterize | fire | 2 | Self | — | 20s | 12 | Heal 220. Cauterized: 15 fire per second for 4s. |
+| Blazing Barrier | fire | 2 | Ally | — | 16s | 14 | Blazing Barrier: shield 130, return 20 fire to attackers for 8s. |
 | Ice Block | frost | 3 | Self | — | 40s | 10 | Remove all banes. Ice Block: stunned, immune to harm for 4s. |
 | Ice Barrier | frost | 2 | Ally | — | 14s | 16 | Ice Barrier: shield 180 for 10s. |
 | Frost Armor | frost | 2 | Self | — | 16s | 14 | Frost Armor: shield 120, return 30 frost to attackers for 12s. |
@@ -897,8 +999,11 @@ The browser test uses software WebGL, so it keeps at most two pages open and fre
 | Tailwind | storm | 2 | Ally | — | 16s | 14 | Tailwind: cast 40% faster for 8s. |
 | Lightning Shield | storm | 1 | Self | — | 12s | 10 | Lightning Shield: return 40 storm to attackers for 10s. |
 | Grounding | storm | 2 | Ally | — | 18s | 12 | Grounded: dodge the next spell for 8s. |
+| Wind Wall | storm | 2 | Ally side | 0.7s | 30s | 20 | Wind Wall: dodge the next spell for 4s. Hits the whole side. |
+| Heroism | storm | 3 | Ally side | — | 45s | 26 | Heroism: cast 30% faster for 8s. Hits the whole side. |
 | Life Tap | shadow | 1 | Self | — | 10s | 0 | Deal 100 shadow through shields. Restore 30 mana. |
 | Resolve | shadow | 2 | Self | — | 24s | 12 | Resolve: take 40% less damage, immune to stun and silence for 6s. |
+| Vampiric Embrace | shadow | 2 | Self | — | 24s | 12 | Vampiric Embrace: heal for 40% of damage dealt for 10s. |
 | Healing Word | holy | 1 | Ally | — | 4s | 8 | Heal 70. |
 | Flash Heal | holy | 1 | Ally | 0.7s | 3s | 12 | Heal 110. |
 | Renew | holy | 1 | Ally | — | 4s | 8 | Renew: heal 18 per second for 8s. |
