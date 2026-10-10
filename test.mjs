@@ -793,6 +793,10 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
     const keys = await offenseChord(ana)
     const typed = () => window.chordcast.chordView().keys.length > 3
     const shown = () => document.querySelectorAll('#tray-keys > *').length > 2
+    // A top-tier frame in software WebGL can outlast the chord timeout; the host runs in
+    // this process, so stretch the timeout for this one picture.
+    const idle = TIMING.idle
+    TIMING.idle = 30
     await shoot(
       ana,
       '06-chord',
@@ -804,6 +808,7 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
       },
       shown,
     )
+    TIMING.idle = idle
     // Slow software rendering can outlast the chord timeout, so clear and type it whole.
     await ana.keyboard.press(KEYBOARD.drop)
     for (const key of keys) await ana.keyboard.press(KEYBOARD[key])
