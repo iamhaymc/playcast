@@ -3692,9 +3692,9 @@ class Game {
     if (document.body.dataset.view !== 'match') return [0, height, 0, width]
     const now = performance.now()
     if (this.band && now - this.bandAt < 500) return this.band
-    const touch = inputMode === 'touch' && this.me
     // Leave room under the near row's feet for its plates (cast bar, chord and auras).
-    const bottom = !this.me ? height - 8 : touch ? $('#pads .pad').getBoundingClientRect().top - 70 : $('#tray').getBoundingClientRect().top - 48
+    // The tray (with its status row) sits above the touch pads, so it bounds the band either way.
+    const bottom = !this.me ? height - 8 : $('#tray').getBoundingClientRect().top - 56
     let [left, right] = [0, width]
     if (document.body.dataset.phase !== 'ready') {
       const offense = $('.page.offense').getBoundingClientRect()

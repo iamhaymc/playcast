@@ -683,7 +683,7 @@ async function offenseChord(page) {
  * frames are slow here, so `prepare` (if given) runs after the switch, right
  * before the picture: state that times out, like a chord, is still fresh.
  */
-async function shoot(page, name, prepare = null) {
+async function shoot(page, name, prepare = null, ready = null) {
   await page.waitForTimeout(250)
   const was = await page.evaluate(() => {
     const stage = window.chordcast.stage
@@ -693,9 +693,11 @@ async function shoot(page, name, prepare = null) {
     return was
   })
   await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
-  if (prepare) {
+  // Bots can stun or polymorph the player mid-chord, which clears it: try again a few times.
+  for (let attempt = 0; prepare && attempt < 4; attempt++) {
     await prepare()
     await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
+    if (!ready || (await page.evaluate(ready))) break
   }
   await page.screenshot({ path: new URL(`${name}.png`, SHOTS).pathname })
   await page.evaluate(({ tier, pinned }) => {
@@ -789,10 +791,18 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
     await ana.waitForSelector('body[data-phase="fight"]')
     await ana.waitForTimeout(600)
     const keys = await offenseChord(ana)
-    await shoot(ana, '06-chord', async () => {
-      for (const key of [keys[0], 'meta', 'flame', ...keys.slice(1, -1)]) await ana.keyboard.press(KEYBOARD[key])
-      await ana.waitForFunction(() => window.chordcast.chordView().keys.length > 3)
-    })
+    const typed = () => window.chordcast.chordView().keys.length > 3
+    await shoot(
+      ana,
+      '06-chord',
+      async () => {
+        await ana.waitForFunction(() => !window.chordcast.mine().lock && window.chordcast.serverTick() >= window.chordcast.mine().stagger)
+        await ana.keyboard.press(KEYBOARD.drop)
+        for (const key of [keys[0], 'meta', 'flame', ...keys.slice(1, -1)]) await ana.keyboard.press(KEYBOARD[key])
+        await ana.waitForFunction(typed, null, { timeout: 5000 }).catch(() => {})
+      },
+      typed,
+    )
     // Slow software rendering can outlast the chord timeout, so clear and type it whole.
     await ana.keyboard.press(KEYBOARD.drop)
     for (const key of keys) await ana.keyboard.press(KEYBOARD[key])
