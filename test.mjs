@@ -13,12 +13,13 @@ import fs from 'node:fs/promises'
 import WebSocket from 'ws'
 import { chromium } from 'playwright'
 import {
-  Arena, Brain, CODEX, Dice, KINDS, Match, Pilot, RULES, SCHOOLS, SPELL, TICK_RATE,
-  botRoster, moveCursor, pack, pathTo, readRunes, simulate, splitTiers, tidyRules, unpack, writeBook,
+  Arena, Brain, CHORD_LENGTH, CODEX, Dice, KINDS, METAS, Match, Pilot, RULES, SCHOOLS, SPELL, TICK_RATE, TIMING, WISPS,
+  botRoster, costOf, moveCursor, pack, pathTo, readChord, readRunes, simulate, splitTiers, tidyRules, unpack, writeBook,
 } from './core.mjs'
 import { openHost } from './host.mjs'
 
 const SHOTS = new URL('./shots/', import.meta.url)
+const RUNE_ROW = ['star', 'wave', 'flame', 'leaf']
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -29,6 +30,22 @@ function fightingMatch({ teams = [1, 1], seed = 7, life = 800 } = {}) {
   while (match.phase !== 'fight') match.advance()
   match.flush()
   return match
+}
+
+/** Give a match a hand-made book, and every mage all of it as a kit. */
+function useBook(match, book) {
+  match.book = book
+  for (const mage of match.mages) mage.kit = book.map((entry) => entry.id)
+}
+
+/** Advance some ticks and return every event seen. */
+function wait(match, ticks) {
+  const events = []
+  for (let i = 0; i < ticks; i++) {
+    match.advance()
+    events.push(...match.flush())
+  }
+  return events
 }
 
 /** Press keys for a mage, one per tick, and return every event seen. */
@@ -50,7 +67,7 @@ function play(match, mage, keys, extraTicks = 0) {
 function chordFor(match, caster, target, spellId) {
   const entry = match.book.find((e) => e.id === spellId)
   const team = match.index.get(caster).team
-  const moves = SPELL[spellId].aim === 'self' ? [] : pathTo(match.mages, team, caster, target)
+  const moves = SPELL[spellId].aim === 'self' ? [] : pathTo(match.mages, team, match.index.get(caster).aim, target, caster)
   return [...moves, ...entry.sigil]
 }
 
@@ -80,22 +97,25 @@ test('codex has a very large, well-formed spell list', () => {
 test('rules are clamped into range', () => {
   const rules = tidyRules({ teams: [0, 99], book: 7, life: 'lots', surge: 5, skill: 'godlike' })
   assert.deepEqual(rules.teams, [1, 8])
-  assert.equal(rules.book, 8)
+  assert.equal(rules.book, 12)
+  assert.equal(rules.kit, 8, 'a kit leaves at least four spells of the book behind')
   assert.equal(rules.life, RULES.life)
   assert.equal(rules.surge, 20)
   assert.equal(rules.skill, RULES.skill)
+  assert.equal(tidyRules({ book: 23, kit: 2 }).book, 22)
+  assert.equal(tidyRules({ book: 24, kit: 2 }).kit, 4)
 })
 
 test('books are balanced, prefix-free and seeded', () => {
   for (let seed = 1; seed <= 40; seed++) {
-    for (const size of [8, 12, 16, 20]) {
+    for (const size of [12, 16, 20, 24]) {
       const book = writeBook(new Dice(seed), size, [2, 2])
       assert.equal(book.length, size)
       for (const kind of KINDS) assert.equal(book.filter((e) => SPELL[e.id].kind === kind).length, size / 2)
       const tiers = splitTiers(size / 2)
       for (const tier of [1, 2, 3]) assert.equal(book.filter((e) => SPELL[e.id].tier === tier).length, tiers[tier] * 2)
       for (const entry of book) {
-        assert.equal(entry.sigil.length, SPELL[entry.id].tier + 1)
+        assert.equal(entry.sigil.length, CHORD_LENGTH[SPELL[entry.id].tier])
         for (const other of book) {
           if (other === entry) continue
           const prefix = other.sigil.slice(0, entry.sigil.length).join() === entry.sigil.join()
@@ -109,11 +129,13 @@ test('books are balanced, prefix-free and seeded', () => {
   for (let seed = 1; seed <= 40; seed++) assert.ok(writeBook(new Dice(seed), 20, [1, 3]).every((e) => !SPELL[e.id].team), 'no team spells in solo play')
 })
 
-test('runes read as whole, open or dead', () => {
+test('runes read as whole, open or dead; meta takes the next rune', () => {
   const book = [{ id: 'fire-bolt', sigil: ['star', 'wave'] }, { id: 'fireball', sigil: ['flame', 'leaf', 'star'] }]
   assert.equal(readRunes(book, ['star', 'wave']).id, 'fire-bolt')
   assert.equal(readRunes(book, ['flame', 'leaf']), 'open')
   assert.equal(readRunes(book, ['leaf']), null)
+  assert.deepEqual(readChord(['up', 'meta', 'flame', 'star', 'meta', 'star', 'meta', 'flame', 'wave']), { runes: ['star', 'wave'], metas: ['empower', 'quicken'], arming: false })
+  assert.equal(readChord(['star', 'meta']).arming, true)
 })
 
 test('the target cursor walks rows as each side sees them', () => {
@@ -130,11 +152,22 @@ test('the target cursor walks rows as each side sees them', () => {
   const [left, middle] = [match.index.get('t0s0'), match.index.get('t0s1')]
   assert.equal(moveCursor(match.mages, 0, left.id, 'right'), middle.id)
   assert.equal(moveCursor(match.mages, 1, 't1s1', 'right'), 't1s0', 'team 1 sees its row mirrored')
+  assert.equal(moveCursor(match.mages, 0, 't0s2', 'down', 't0s0'), 't0s0', 'down on your own row snaps home')
+  assert.deepEqual(pathTo(match.mages, 0, 't0s2', 't0s0', 't0s0'), ['down'], 'the snap is the shortest way home')
+  assert.deepEqual(pathTo(match.mages, 0, 't1s1', 't0s0', 't0s0'), ['down', 'down'])
+  for (const from of match.mages) {
+    for (const viewer of [0, 1]) {
+      const self = match.mages.find((m) => m.team === viewer).id
+      let cursor = from.id
+      for (const move of pathTo(match.mages, viewer, from.id, self, self)) cursor = moveCursor(match.mages, viewer, cursor, move, self)
+      assert.equal(cursor, self, `${from.id} → home for team ${viewer}`)
+    }
+  }
 })
 
 test('a chord aims, casts, flies and lands', () => {
   const match = fightingMatch()
-  match.book = [{ id: 'fireball', sigil: ['star', 'wave', 'flame'] }]
+  useBook(match, [{ id: 'fireball', sigil: ['star', 'wave', 'flame'] }])
   const events = play(match, 't0s0', ['up', 'star', 'wave', 'flame'], TICK_RATE * 3)
   const types = events.map((e) => e.type)
   for (const type of ['cast', 'fire', 'land', 'hit', 'mark']) assert.ok(types.includes(type), `missing ${type}`)
@@ -143,25 +176,30 @@ test('a chord aims, casts, flies and lands', () => {
   assert.ok(match.index.get('t0s0').mana < 100)
 })
 
-test('wrong chords, targets, cooldowns and silences fizzle', () => {
+test('wrong chords, targets, kits, cooldowns and silences fizzle', () => {
   const match = fightingMatch()
-  match.book = [
+  useBook(match, [
     { id: 'scorch', sigil: ['star', 'wave'] },
     { id: 'healing-word', sigil: ['flame', 'leaf'] },
-  ]
+    { id: 'fire-bolt', sigil: ['wave', 'wave'] },
+    { id: 'barkskin', sigil: ['star', 'star'] },
+  ])
+  match.index.get('t0s0').kit = ['scorch', 'healing-word', 'barkskin']
   const why = (keys) => play(match, 't0s0', keys, TICK_RATE).find((e) => e.type === 'fizzle')?.why
   assert.equal(why(['leaf']), 'Unknown chord')
   assert.equal(why(['star', 'wave']), 'Needs a foe', 'offense on yourself')
-  assert.equal(why(['up', 'flame', 'leaf']), 'Needs an ally', 'defense on a foe')
+  assert.equal(why(['wave', 'wave']), 'Not in kit', 'a book spell left out of the draft')
   assert.equal(why(['up', 'star', 'wave']), undefined, 'scorch lands')
-  assert.equal(why(['up', 'star', 'wave']), 'Not ready')
+  assert.equal(why(['star', 'wave']), 'Not ready', 'the aim stayed on the foe')
+  assert.equal(why(['meta', 'wave', 'star', 'star']), 'Can’t twin', 'Twin needs a single target')
+  assert.equal(why(['meta', 'leaf', 'flame', 'leaf']), 'Nothing to extend')
   match.mark(null, match.index.get('t0s0'), { time: 3, kind: 'bane', lock: 'hush', name: 'Silenced' }, {})
   assert.equal(why(['flame', 'leaf']), 'Silenced')
 })
 
 test('stuns block keys and break casts; drop cancels', () => {
   const match = fightingMatch()
-  match.book = [{ id: 'greater-heal', sigil: ['star', 'star', 'star', 'star'] }]
+  useBook(match, [{ id: 'greater-heal', sigil: ['star', 'star', 'star', 'star'] }])
   const me = match.index.get('t0s0')
   play(match, me.id, ['star', 'star', 'star', 'star'])
   assert.ok(me.cast, 'casting')
@@ -177,7 +215,7 @@ test('stuns block keys and break casts; drop cancels', () => {
 test('reflect sends a whole spell back; dodge cancels it; sure spells ignore both', () => {
   const cast = (spell, guard) => {
     const match = fightingMatch()
-    match.book = [{ id: spell, sigil: ['star', 'wave', 'flame'] }]
+    useBook(match, [{ id: spell, sigil: ['star', 'wave', 'flame'] }])
     match.mark(null, match.index.get('t1s0'), { time: 9, kind: 'boon', charges: 1, ...guard }, { name: 'Guard' })
     play(match, 't0s0', ['up', 'star', 'wave', 'flame'], TICK_RATE * 3)
     return match
@@ -194,7 +232,7 @@ test('reflect sends a whole spell back; dodge cancels it; sure spells ignore bot
 test('every spell in the codex can be cast', () => {
   for (const spell of CODEX) {
     const match = fightingMatch({ teams: [2, 2], seed: 11 })
-    match.book = [{ id: spell.id, sigil: ['star', 'wave', 'flame', 'leaf'].slice(0, spell.tier + 1) }]
+    useBook(match, [{ id: spell.id, sigil: Array.from({ length: CHORD_LENGTH[spell.tier] }, (_, i) => RUNE_ROW[i % 4]) }])
     const ally = match.index.get('t0s1')
     if (spell.aim === 'fallen') match.hurt(null, ally, 5000, { exact: true, pierce: true })
     match.index.get('t1s0').auras.push({ name: 'Test Boon', kind: 'boon', look: 'boon', school: 'holy', def: { time: 9 }, left: 99, total: 99, next: 20, pulses: 0, charges: 0, guard: 0 })
@@ -220,7 +258,7 @@ test('matches are deterministic for the same seed and orders', () => {
 })
 
 test('bots finish matches of every shape', () => {
-  for (const [teams, skill] of [[[1, 1], 'easy'], [[1, 1], 'hard'], [[2, 2], 'normal'], [[3, 2], 'normal'], [[4, 4], 'hard']]) {
+  for (const [teams, skill] of [[[1, 1], 'easy'], [[1, 1], 'hard'], [[2, 2], 'normal'], [[3, 2], 'normal'], [[4, 4], 'hard'], [[8, 8], 'normal']]) {
     const { match, results } = simulate({ seed: 21, rules: { teams, skill } })
     assert.equal(match.phase, 'over', `${teams} ${skill} did not finish`)
     assert.ok([0, 1, -1].includes(results.winner))
@@ -236,7 +274,7 @@ test('a stronger bot beats a weaker one most of the time', () => {
 
 test('brains can be swapped, including async ones', async () => {
   const match = fightingMatch()
-  match.book = [{ id: 'fire-bolt', sigil: ['star', 'wave'] }]
+  useBook(match, [{ id: 'fire-bolt', sigil: ['star', 'wave'] }])
   const asked = []
   const slowBrain = {
     think(view) {
@@ -256,6 +294,282 @@ test('brains can be swapped, including async ones', async () => {
   assert.ok(plan === null || SPELL[plan.spell], 'the built-in brain returns a plan or waits')
 })
 
+test('a chord typed quickly casts faster', () => {
+  const total = (gap) => {
+    const match = fightingMatch()
+    useBook(match, [{ id: 'fireball', sigil: ['star', 'wave', 'flame'] }])
+    const events = []
+    for (const key of ['up', 'star', 'wave', 'flame']) {
+      match.receive({ type: 'press', mage: 't0s0', key })
+      events.push(...wait(match, key === 'up' ? 1 : gap))
+    }
+    return events.find((e) => e.type === 'cast').total
+  }
+  const full = Math.round(SPELL.fireball.cast * TICK_RATE)
+  assert.equal(total(8), full, 'keys 0.4s apart: the whole cast bar')
+  assert.equal(total(1), Math.round(SPELL.fireball.cast * TIMING.quick * TICK_RATE), 'keys a tick apart: the shortest cast')
+  assert.ok(total(4) < full && total(4) > total(1), 'in between, in between')
+})
+
+test('metamagic quickens, empowers, twins and extends, and costs more mana', () => {
+  const cast = (keys, book) => {
+    const match = fightingMatch({ teams: [2, 2] })
+    useBook(match, book)
+    return { match, events: play(match, 't0s0', keys, TICK_RATE * 3) }
+  }
+  const scorch = [{ id: 'scorch', sigil: ['star', 'wave'] }]
+  const quick = cast(['up', 'meta', 'star', 'star', 'wave', 'flame'], [{ id: 'fireball', sigil: ['star', 'wave', 'flame'] }])
+  assert.ok(!quick.events.some((e) => e.type === 'cast'), 'Quicken: no cast bar')
+  assert.deepEqual(quick.events.find((e) => e.type === 'fire').metas, ['quicken'])
+  const hitOn = (run, id) => run.events.filter((e) => e.type === 'hit' && e.from === 't0s0' && e.to === id).map((e) => e.amount)
+  const plain = cast(['up', 'star', 'wave'], scorch)
+  const strong = cast(['up', 'meta', 'flame', 'star', 'wave'], scorch)
+  assert.deepEqual(hitOn(strong, 't1s0'), [Math.round(hitOn(plain, 't1s0')[0] * METAS.empower.power)], 'Empower: 40% more')
+  const twin = cast(['up', 'meta', 'wave', 'star', 'wave'], scorch)
+  assert.equal(hitOn(twin, 't1s1').length, 1, 'Twin: the mage beside the target is hit too')
+  const long = cast(['up', 'meta', 'leaf', 'star', 'wave'], [{ id: 'corruption', sigil: ['star', 'wave'] }])
+  assert.equal(long.events.find((e) => e.type === 'mark' && e.name === 'Corruption').time, 10 * 1.5 * TICK_RATE, 'Extend: half again as long')
+  assert.equal(costOf(SPELL.fireball, ['quicken']), Math.ceil(SPELL.fireball.cost * 1.5))
+  assert.equal(costOf(SPELL.fireball, ['quicken', 'twin']), Math.ceil(SPELL.fireball.cost * 1.5 * 2), 'stacked costs multiply')
+  assert.ok(costOf(SPELL['life-tap'], ['empower']) > 0, 'shaping a free spell is not free')
+  const spent = (keys) => {
+    const match = fightingMatch({ teams: [2, 2] })
+    useBook(match, scorch)
+    play(match, 't0s0', keys)
+    return Math.round(match.index.get('t0s0').manaMax - match.index.get('t0s0').mana)
+  }
+  assert.equal(spent(['up', 'meta', 'flame', 'star', 'wave']), costOf(SPELL.scorch, ['empower']), 'and the caster paid for it')
+})
+
+test('a ward turns a landing spell back on its caster; a missed ward rests; sure spells go through', () => {
+  const match = fightingMatch()
+  useBook(match, [{ id: 'scorch', sigil: ['star', 'wave'] }, { id: 'magic-missile', sigil: ['flame', 'leaf'] }])
+  const me = match.index.get('t0s0')
+  const foe = match.index.get('t1s0')
+  /** The foe casts a chord at me; I raise my ward two ticks before it lands. */
+  const incoming = (keys) => {
+    const events = []
+    for (const key of keys) events.push(...play(match, foe.id, [key]))
+    while (!events.some((e) => e.type === 'fire')) events.push(...wait(match, 1))
+    const fire = events.find((e) => e.type === 'fire')
+    events.push(...wait(match, fire.land - match.tick - 2))
+    return [...events, ...play(match, me.id, ['ward'], 6)]
+  }
+  const parried = incoming(['up', 'star', 'wave'])
+  assert.ok(parried.some((e) => e.type === 'void' && e.why === 'parry'))
+  assert.equal(me.life, me.lifeMax, 'the ward took it')
+  assert.ok(foe.life < foe.lifeMax, 'and turned it on the caster')
+  assert.equal(me.stats.parries, 1)
+  assert.ok(me.ward.ready - match.tick <= TIMING.wardRefund * TICK_RATE, 'a parry readies the ward quickly')
+  wait(match, TICK_RATE * 2)
+  assert.ok(play(match, me.id, ['ward']).some((e) => e.type === 'ward'))
+  assert.equal(me.ward.ready - match.tick, TIMING.wardCool * TICK_RATE, 'a ward with nothing to stop rests')
+  assert.ok(!play(match, me.id, ['ward']).some((e) => e.type === 'ward'), 'and cannot go up again yet')
+  wait(match, TIMING.wardCool * TICK_RATE)
+  const missiles = incoming(['flame', 'leaf'])
+  assert.ok(!missiles.some((e) => e.why === 'parry') && me.life < me.lifeMax, 'Magic Missile never misses, ward or not')
+})
+
+test('repeat stuns from foes diminish, then stop landing; a grace follows each stun', () => {
+  const match = fightingMatch({ teams: [2, 2] })
+  const [me, ally, foe] = ['t0s0', 't0s1', 't1s0'].map((id) => match.index.get(id))
+  const stun = { time: 2, kind: 'bane', lock: 'stun', name: 'Stunned' }
+  const land = (from = foe, def = stun) => {
+    match.mark(from, me, def, {})
+    return match.flush()
+  }
+  const total = (name = 'Stunned') => me.auras.find((a) => a.name === name)?.total ?? 0
+  const grace = TIMING.grace * TICK_RATE
+  land()
+  assert.equal(total(), 40)
+  wait(match, 40)
+  assert.ok(land().some((e) => e.type === 'void' && e.why === 'resist'), 'a moment of grace after a stun ends')
+  wait(match, grace)
+  land()
+  assert.equal(total(), 20, 'the second lands at half')
+  wait(match, 20 + grace)
+  land()
+  assert.equal(total(), 10, 'the third at a quarter')
+  wait(match, 10 + grace)
+  assert.ok(land().some((e) => e.why === 'resist'), 'the fourth not at all')
+  land(ally, { ...stun, name: 'Held' })
+  assert.equal(total('Held'), 40, 'locks from your own side never diminish')
+  land(foe, { time: 2, kind: 'bane', lock: 'hush', name: 'Silenced' })
+  assert.equal(total('Silenced'), 40, 'silences keep their own count')
+  wait(match, TIMING.fade * TICK_RATE + 40)
+  land()
+  assert.equal(total(), 40, 'after the fade window a stun lands in full again')
+})
+
+test('reactions: the right school on a foe’s bane hits harder, uses the bane up and adds a rider', () => {
+  const match = fightingMatch({ teams: [2, 2] })
+  useBook(match, [
+    { id: 'scorch', sigil: ['star', 'wave'] },
+    { id: 'thorn-whip', sigil: ['flame', 'leaf'] },
+    { id: 'eldritch-blast', sigil: ['leaf', 'leaf'] },
+  ])
+  const [me, ally, foe, beside] = ['t0s0', 't0s1', 't1s0', 't1s1'].map((id) => match.index.get(id))
+  match.mark(ally, foe, SPELL.frostbolt.acts[1].aura, { school: 'frost' })
+  const melt = play(match, me.id, ['up', 'star', 'wave'], TICK_RATE)
+  assert.equal(melt.find((e) => e.type === 'react')?.name, 'Melt')
+  assert.equal(melt.find((e) => e.type === 'hit' && e.to === foe.id).amount, Math.round(SPELL.scorch.acts[0].amount * 1.5))
+  assert.ok(!foe.auras.some((a) => a.school === 'frost'), 'the chill melted away')
+  assert.equal(me.stats.combos, 1)
+  match.mark(ally, foe, SPELL.fireball.acts[1].aura, { school: 'fire' })
+  const wildfire = play(match, me.id, ['flame', 'leaf'], TICK_RATE)
+  assert.equal(wildfire.find((e) => e.type === 'react')?.name, 'Wildfire')
+  assert.ok(foe.auras.some((a) => a.name === 'Burning') && beside.auras.some((a) => a.name === 'Burning'), 'the fire spread beside it')
+  match.mark(ally, foe, SPELL['guiding-bolt'].acts[1].aura, { school: 'holy' })
+  const eclipse = play(match, me.id, ['leaf', 'leaf'], 4)
+  assert.equal(eclipse.find((e) => e.type === 'react')?.name, 'Eclipse')
+  assert.ok(foe.auras.some((a) => a.def.lock === 'hush'), 'Eclipse silences')
+})
+
+test('flow builds with clean casts, speeds and cheapens them, and breaks on a fizzle', () => {
+  const match = fightingMatch()
+  useBook(match, [
+    { id: 'scorch', sigil: ['star', 'wave'] },
+    { id: 'ice-lance', sigil: ['flame', 'leaf'] },
+    { id: 'sacred-flame', sigil: ['leaf', 'leaf'] },
+    { id: 'fireball', sigil: ['star', 'star', 'star'] },
+  ])
+  const me = match.index.get('t0s0')
+  play(match, me.id, ['up', 'star', 'wave'], 10)
+  play(match, me.id, ['flame', 'leaf'], 10)
+  play(match, me.id, ['leaf', 'leaf'], 10)
+  assert.equal(me.flow, 3)
+  assert.ok(costOf(SPELL.fireball, [], 3) < SPELL.fireball.cost, 'flow makes spells cheaper')
+  const cast = play(match, me.id, ['star', 'star', 'star'], TICK_RATE * 2)
+  const begun = cast.find((e) => e.type === 'cast')
+  const fired = cast.find((e) => e.type === 'fire')
+  assert.ok(fired.tick - begun.tick < begun.total, 'and casts faster')
+  assert.equal(me.flow, 4)
+  play(match, me.id, ['wave', 'star'], TICK_RATE)
+  assert.equal(me.flow, 0, 'a fizzle breaks the flow')
+  me.flow = 3
+  me.flowAt = match.tick
+  wait(match, TIMING.flowFade * TICK_RATE)
+  assert.equal(me.flow, 2, 'flow ebbs without casts')
+  wait(match, 1.5 * TICK_RATE)
+  assert.equal(me.flow, 1)
+})
+
+test('the aim sticks; ally spells aimed at a foe land on you; aim moves off a fallen foe', () => {
+  const match = fightingMatch({ teams: [2, 2] })
+  useBook(match, [{ id: 'scorch', sigil: ['star', 'wave'] }, { id: 'healing-word', sigil: ['flame', 'leaf'] }])
+  const me = match.index.get('t0s0')
+  me.life -= 200
+  play(match, me.id, ['up', 'right', 'star', 'wave'], 10)
+  assert.equal(me.aim, 't1s1')
+  const healed = play(match, me.id, ['flame', 'leaf'], 10)
+  assert.ok(healed.some((e) => e.type === 'mend' && e.to === me.id && e.amount > 0), 'a heal aimed at a foe lands on you')
+  assert.equal(me.aim, 't1s1', 'and the aim stays put')
+  match.hurt(null, match.index.get('t1s1'), 5000, { exact: true, pierce: true })
+  assert.equal(me.aim, 't1s0', 'the aim moves off a fallen foe')
+  play(match, me.id, ['down', 'right', 'down'])
+  assert.equal(me.aim, me.id, 'down on your own row snaps home')
+})
+
+test('a call marks the aimed mage for the team only', () => {
+  const match = fightingMatch({ teams: [2, 2] })
+  const call = play(match, 't0s0', ['up', 'call']).find((e) => e.type === 'call')
+  assert.deepEqual([call.target, call.only], ['t1s0', 0])
+  assert.deepEqual(match.view('t0s1').call, { by: 't0s0', target: 't1s0' })
+  assert.equal(match.view('t1s0').call, null, 'foes do not hear it')
+})
+
+test('the draft: whole chords pick and unpick; kits stay private; the fight starts when every kit is full', () => {
+  const rules = tidyRules({ teams: [1, 1] })
+  const match = new Match({ seed: 4, rules, roster: botRoster(rules) })
+  const [me, foe] = match.mages
+  const press = (mage, keys) => {
+    for (const key of keys) match.receive({ type: 'press', mage: mage.id, key })
+    match.advance()
+    return match.flush()
+  }
+  const [first] = match.book
+  assert.equal(press(me, first.sigil).find((e) => e.type === 'pick').only, 0, 'picks are told to the team only')
+  assert.deepEqual(me.kit, [first.id])
+  press(me, first.sigil)
+  assert.deepEqual(me.kit, [], 'the same chord takes it out again')
+  for (const entry of match.book.slice(0, rules.kit)) press(me, entry.sigil)
+  assert.equal(me.kit.length, rules.kit)
+  assert.equal(press(me, match.book[rules.kit].sigil).find((e) => e.type === 'fizzle')?.why, 'Kit is full')
+  press(foe, [match.book[0].sigil[0]])
+  assert.equal(match.frame(0).mages[1].chord.keys.length, 0, 'a foe’s draft chord is hidden')
+  assert.equal(match.frame(1).mages[1].chord.keys.length, 1, 'but not from its own team')
+  assert.deepEqual(Object.keys(match.kits(0)), [me.id])
+  assert.equal(match.view(me.id).book.length, rules.kit, 'a brain sees its own kit')
+  press(foe, ['drop'])
+  for (const entry of match.book.slice(-rules.kit)) press(foe, entry.sigil)
+  const full = match.tick
+  wait(match, TIMING.early * TICK_RATE)
+  assert.equal(match.phase, 'fight', 'full kits start the fight early')
+  assert.ok(match.fightAt <= full + TIMING.early * TICK_RATE)
+  assert.equal(match.surgeAt, match.fightAt + rules.surge * TICK_RATE)
+  const idle = fightingMatch()
+  for (const mage of idle.mages) {
+    assert.equal(mage.kit.length, idle.rules.kit, 'an empty kit is filled when the fight begins')
+    assert.ok(mage.kit.every((id) => idle.book.some((e) => e.id === id)))
+    assert.equal(mage.kit.filter((id) => SPELL[id].kind === 'offense').length, idle.rules.kit / 2)
+  }
+})
+
+test('the rift rewrites a quarter of the chords, keeping the book prefix-free', () => {
+  const match = fightingMatch({ teams: [2, 2] })
+  const me = match.index.get('t0s0')
+  const before = match.book.map((e) => e.sigil.join())
+  wait(match, match.shiftAt - match.tick - 1)
+  match.receive({ type: 'press', mage: me.id, key: match.book.at(-1).sigil[0] })
+  const shift = wait(match, 1).find((e) => e.type === 'shift')
+  assert.equal(shift.changes.length, Math.round(match.book.length / 4))
+  assert.equal(match.book.filter((e, i) => e.sigil.join() !== before[i]).length, shift.changes.length)
+  assert.deepEqual(match.book.map((e) => e.sigil.length), before.map((s) => s.split(',').length))
+  for (const entry of match.book) {
+    for (const other of match.book) {
+      if (other !== entry) assert.notEqual(other.sigil.slice(0, entry.sigil.length).join(), entry.sigil.join())
+    }
+  }
+  assert.equal(me.chord.keys.length, 0, 'chords in progress are cleared')
+  assert.ok(wait(match, match.surgeAt - match.tick).some((e) => e.type === 'shift'), 'and again when the surge begins')
+})
+
+test('a fallen mage casts wisp spells until revived', () => {
+  const match = fightingMatch({ teams: [2, 2] })
+  const [me, ally] = ['t0s0', 't0s1'].map((id) => match.index.get(id))
+  ally.life = 300
+  match.hurt(null, me, 5000, { exact: true, pierce: true })
+  assert.ok(me.down)
+  assert.deepEqual(match.usable(me).map((e) => e.id), WISPS.map((s) => s.id))
+  const glimmer = match.wisps.find((e) => e.id === 'glimmer')
+  const healed = play(match, me.id, ['right', ...glimmer.sigil], 4)
+  assert.ok(healed.some((e) => e.type === 'mend' && e.from === me.id && e.to === ally.id && e.amount > 0), 'a wisp mends an ally')
+  assert.ok(!play(match, me.id, ['ward']).some((e) => e.type === 'ward'), 'wisps cannot ward')
+  match.apply([{ op: 'revive', share: 0.5 }], { from: ally, to: me })
+  assert.ok(!me.down)
+  assert.deepEqual(match.usable(me).map((e) => e.id), match.book.filter((e) => me.kit.includes(e.id)).map((e) => e.id))
+})
+
+test('bots draft, shape spells, parry, react and drift as wisps', () => {
+  const rules = tidyRules({ teams: [4, 4], skill: 'hard' })
+  const match = new Match({ seed: 5, rules, roster: botRoster(rules) })
+  const arena = new Arena(match)
+  for (const mage of match.mages) arena.seat(mage.id, new Pilot({ skill: 'hard', seed: mage.slot * 31 + mage.team }))
+  const seen = { pick: 0, shaped: 0, parry: 0, react: 0, wisp: 0 }
+  while (match.phase !== 'over' && match.tick < TICK_RATE * 400) {
+    for (const e of arena.step()) {
+      if (e.type === 'pick') seen.pick++
+      if (e.type === 'fire' && e.metas.length) seen.shaped++
+      if (e.type === 'void' && e.why === 'parry') seen.parry++
+      if (e.type === 'react') seen.react++
+      if (e.type === 'fire' && SPELL[e.spell].kind === 'wisp') seen.wisp++
+    }
+  }
+  assert.equal(match.phase, 'over')
+  for (const [what, count] of Object.entries(seen)) assert.ok(count > 0, `bots never did ${what}`)
+  assert.ok(match.fightAt < TIMING.ready * TICK_RATE, 'bots fill their kits early')
+})
+
 test('the design document lists every spell', async () => {
   const design = await fs.readFile(new URL('./DESIGN.md', import.meta.url), 'utf8')
   for (const spell of CODEX) assert.ok(design.includes(`| ${spell.name} | ${spell.school} | ${spell.tier} |`), `DESIGN.md is missing ${spell.name}`)
@@ -264,6 +578,7 @@ test('the design document lists every spell', async () => {
 
 test('wire messages are checked field by field', () => {
   assert.deepEqual(unpack(pack('press', { key: 'star', seq: 3 })), { type: 'press', key: 'star', seq: 3 })
+  for (const key of ['meta', 'ward', 'call', 'drop']) assert.equal(unpack(pack('press', { key, seq: 1 }))?.key, key)
   assert.equal(unpack(pack('press', { key: 'jump', seq: 3 })), null)
   assert.equal(unpack('not json'), null)
   assert.equal(unpack(pack('join', { code: 'AEIO' })), null, 'codes use consonants only')
@@ -328,9 +643,17 @@ test('rooms are hosted, joined by code and played over the wire', async () => {
     assert.equal(beginA.setup.roster.length, 3, 'the open seat was filled by a bot')
     assert.notEqual(beginA.you, beginB.you)
     assert.deepEqual(beginA.setup.book, beginB.setup.book, 'everyone reads the same book')
-    await ben.next((m) => m.type === 'frame' && m.frame.phase === 'fight', 12000)
-    ben.send('press', { key: 'up', seq: 1 })
-    const pressed = await ben.next((m) => m.type === 'frame' && m.frame.mages.find((x) => x.id === beginB.you).seq === 1)
+    // While drafting, a pick reaches your own team's frames and never a foe's.
+    const entry = beginB.setup.book[0]
+    entry.sigil.forEach((key, i) => ben.send('press', { key, seq: i + 1 }))
+    await ben.next((m) => m.type === 'frame' && m.kits[beginB.you]?.includes(entry.id))
+    const seen = await ana.next((m) => m.type === 'frame' && m.frame.mages.find((x) => x.id === beginB.you).seq === entry.sigil.length)
+    assert.ok(!(beginB.you in seen.kits), 'a foe’s kit never reaches you')
+    assert.ok(Object.keys(seen.kits).length > 0 && Object.keys(seen.kits).every((id) => id.startsWith(beginA.you.slice(0, 2))))
+    assert.ok(!ana.inbox.some((m) => m.type === 'frame' && m.events.some((e) => e.type === 'pick' && e.mage === beginB.you)), 'nor its picks')
+    await ben.next((m) => m.type === 'frame' && m.frame.phase === 'fight', 25000)
+    ben.send('press', { key: 'up', seq: 10 })
+    const pressed = await ben.next((m) => m.type === 'frame' && m.frame.mages.find((x) => x.id === beginB.you).seq === 10)
     assert.ok(pressed)
     ana.close()
     const end = await ben.next((m) => m.type === 'end', 60000)
@@ -343,21 +666,24 @@ test('rooms are hosted, joined by code and played over the wire', async () => {
 
 // ─── 3 · Views ──────────────────────────────────────────────────────────────
 
-const KEYBOARD = { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', star: 'KeyI', wave: 'KeyJ', flame: 'KeyL', leaf: 'KeyK', drop: 'Space' }
+const KEYBOARD = { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', star: 'KeyI', wave: 'KeyJ', flame: 'KeyL', leaf: 'KeyK', meta: 'KeyU', ward: 'Space', call: 'KeyE', drop: 'KeyQ' }
 const GL_FLAGS = ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist']
 
-/** Pick a single-target offense spell with a cast bar from the page's book. */
+/** Pick a single-target offense spell with a cast bar from the page player's kit. */
 async function offenseChord(page) {
-  const book = await page.evaluate(() => window.chordcast.setup.book)
-  const pick = book.find((e) => SPELL[e.id].kind === 'offense' && SPELL[e.id].aim === 'foe' && SPELL[e.id].cast > 0) ?? book.find((e) => SPELL[e.id].aim === 'foe')
+  const { book, kit } = await page.evaluate(() => ({ book: window.chordcast.setup.book, kit: window.chordcast.kits[window.chordcast.me] ?? [] }))
+  const mine = book.filter((e) => kit.includes(e.id))
+  const pick = mine.find((e) => SPELL[e.id].kind === 'offense' && SPELL[e.id].aim === 'foe' && SPELL[e.id].cast > 0) ?? mine.find((e) => SPELL[e.id].aim === 'foe')
   return ['up', ...pick.sigil]
 }
 
 /**
  * Save a screenshot. Software WebGL plays at the lowest render tier, but the
- * picture is drawn at the top tier, as a desktop GPU would show it.
+ * picture is drawn at the top tier, as a desktop GPU would show it. Top-tier
+ * frames are slow here, so `prepare` (if given) runs after the switch, right
+ * before the picture: state that times out, like a chord, is still fresh.
  */
-async function shoot(page, name) {
+async function shoot(page, name, prepare = null, ready = null) {
   await page.waitForTimeout(250)
   const was = await page.evaluate(() => {
     const stage = window.chordcast.stage
@@ -367,6 +693,12 @@ async function shoot(page, name) {
     return was
   })
   await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
+  // Bots can stun or polymorph the player mid-chord, which clears it: try again a few times.
+  for (let attempt = 0; prepare && attempt < 4; attempt++) {
+    await prepare()
+    await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
+    if (!ready || (await page.evaluate(ready))) break
+  }
   await page.screenshot({ path: new URL(`${name}.png`, SHOTS).pathname })
   await page.evaluate(({ tier, pinned }) => {
     const stage = window.chordcast.stage
@@ -443,20 +775,34 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
     await ben.waitForFunction(() => document.querySelectorAll('.seat.human').length === 2 && document.querySelectorAll('.seat.bot').length === 1)
     await shoot(ben, '04-lobby-joined')
 
-    // Study: the book opens wide before the fight
+    // Draft: the book opens wide before the fight; typing a chord or tapping a spell takes it
     await stage.focus(ana)
     await ana.click('#start-button')
     await ana.waitForSelector('body[data-view="match"][data-phase="ready"]')
-    await ana.waitForTimeout(500)
+    const book = await ana.evaluate(() => window.chordcast.setup.book)
+    for (const key of book[0].sigil) await ana.keyboard.press(KEYBOARD[key])
+    await ana.click('#book-defense .spell:nth-child(2)')
+    await ana.click('#book-offense .spell:nth-child(3)')
+    await ana.waitForFunction(() => (window.chordcast.kits[window.chordcast.me] ?? []).length === 3)
+    await ana.waitForTimeout(300)
     await shoot(ana, '05-study')
 
-    // Fight: type a chord on the keyboard
+    // Fight: type a chord on the keyboard, shaped with metamagic
     await ana.waitForSelector('body[data-phase="fight"]')
     await ana.waitForTimeout(600)
     const keys = await offenseChord(ana)
-    for (const key of keys.slice(0, -1)) await ana.keyboard.press(KEYBOARD[key])
-    await ana.waitForFunction(() => window.chordcast.chordView().keys.length + window.chordcast.chordView().pending.length > 1)
-    await shoot(ana, '06-chord')
+    const typed = () => window.chordcast.chordView().keys.length > 3
+    await shoot(
+      ana,
+      '06-chord',
+      async () => {
+        await ana.waitForFunction(() => !window.chordcast.mine().lock && window.chordcast.serverTick() >= window.chordcast.mine().stagger)
+        await ana.keyboard.press(KEYBOARD.drop)
+        for (const key of [keys[0], 'meta', 'flame', ...keys.slice(1, -1)]) await ana.keyboard.press(KEYBOARD[key])
+        await ana.waitForFunction(typed, null, { timeout: 5000 }).catch(() => {})
+      },
+      typed,
+    )
     // Slow software rendering can outlast the chord timeout, so clear and type it whole.
     await ana.keyboard.press(KEYBOARD.drop)
     for (const key of keys) await ana.keyboard.press(KEYBOARD[key])
@@ -467,7 +813,7 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
     await shoot(ana, '07-cast')
     await ana.waitForTimeout(4000)
     await shoot(ana, '08-battle')
-    await ana.hover('#book-offense .spell')
+    await ana.hover('#book-offense .spell:not(.out)')
     await shoot(ana, '09-book')
 
     // Gamepad: a stubbed pad drives the same chord keys
