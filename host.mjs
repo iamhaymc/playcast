@@ -21,7 +21,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { WebSocketServer } from 'ws'
-import { Arena, Match, Pilot, CODE_LETTERS, RULES, TICK_MS, diff, hashText, pack, packFrame, tidyRules, unpack } from './core.mjs'
+import { Arena, Match, Pilot, CODE_LETTERS, RULES, TICK_MS, diff, hashText, pack, packFrame, pickGarb, tidyGarb, tidyRules, unpack } from './core.mjs'
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url))
 
@@ -74,6 +74,7 @@ class Peer {
     this.id = id
     this.token = crypto.randomBytes(16).toString('base64url') // takes this peer back after a drop
     this.name = 'Mage'
+    this.garb = tidyGarb() // hat, robe and staff, picked in the lobby
     this.room = null
     this.mage = null
     this.away = false // the socket dropped; the seat is held until `timer` runs out
@@ -243,8 +244,9 @@ class Room {
   share() {
     const seats = this.seats.map((team, t) =>
       team.map((seat, slot) => {
-        if (seat.kind === 'human') return { kind: 'human', id: seat.peer.id, name: seat.peer.name, away: seat.peer.away }
-        return { kind: seat.kind, name: seat.kind === 'bot' ? this.botName(t, slot) : null }
+        if (seat.kind === 'human') return { kind: 'human', id: seat.peer.id, name: seat.peer.name, garb: seat.peer.garb, away: seat.peer.away }
+        if (seat.kind === 'bot') return { kind: 'bot', name: this.botName(t, slot), garb: this.botGarb(t, slot) }
+        return { kind: 'open', name: null }
       }),
     )
     const seated = new Set(seats.flat().map((seat) => seat.id))
@@ -257,6 +259,11 @@ class Room {
     return BOT_NAMES[hashText(`${this.code}:${this.round}:${team}:${slot}`) % BOT_NAMES.length]
   }
 
+  /** Each bot dresses its own way, seeded like its name. */
+  botGarb(team, slot) {
+    return pickGarb(hashText(`${this.code}:${this.round}:${team}:${slot}:garb`))
+  }
+
   // The match ────────────────────────────────────────────────────────────
 
   makePilot(mageId) {
@@ -266,13 +273,15 @@ class Room {
   start(peer) {
     if (peer !== this.owner || this.phase === 'match') return
     clearInterval(this.timer)
-    this.round++
+    // Bots play under the names and garb the lobby showed; the next round deals new ones.
     const roster = this.seats.flatMap((team, t) =>
       team.map((seat, slot) => {
         const human = seat.kind === 'human'
-        return { id: `t${t}s${slot}`, team: t, slot, bot: !human, name: human ? seat.peer.name : this.botName(t, slot), peer: human ? seat.peer : null }
+        const garb = human ? seat.peer.garb : this.botGarb(t, slot)
+        return { id: `t${t}s${slot}`, team: t, slot, bot: !human, name: human ? seat.peer.name : this.botName(t, slot), garb, peer: human ? seat.peer : null }
       }),
     )
+    this.round++
     this.match = new Match({ seed: (Date.now() ^ (Math.random() * 0x7fffffff)) >>> 0, rules: this.rules, roster })
     this.arena = new Arena(this.match)
     for (const peer of this.peers) {
@@ -486,6 +495,7 @@ class Hall {
     switch (message.type) {
       case 'hello':
         peer.name = message.name
+        if (message.garb) peer.garb = message.garb
         return room?.share()
       case 'open': {
         room?.exit(peer)

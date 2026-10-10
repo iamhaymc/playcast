@@ -13,9 +13,9 @@ import fs from 'node:fs/promises'
 import WebSocket from 'ws'
 import { chromium } from 'playwright'
 import {
-  Arena, Brain, CHORD_LENGTH, CODEX, Dice, KINDS, METAS, Match, Pilot, RULES, SCHOOLS, SPELL, TICK_RATE, TIMING, WISPS,
-  botRoster, costOf, diff, hashText, moveCursor, pack, packFrame, patch, pathTo, readChord, readRunes, simulate, splitTiers, tidyRules,
-  unpack, unpackFrame, writeBook,
+  Arena, Brain, CHORD_LENGTH, CODEX, Dice, GARB, KINDS, METAS, Match, Pilot, RULES, SCHOOLS, SPELL, TICK_RATE, TIMING, WISPS,
+  botRoster, costOf, diff, hashText, moveCursor, pack, packFrame, patch, pathTo, pickGarb, readChord, readRunes, simulate, splitTiers, tidyGarb,
+  tidyRules, unpack, unpackFrame, writeBook,
 } from './core.mjs'
 import { openHost } from './host.mjs'
 
@@ -585,11 +585,31 @@ test('wire messages are checked field by field', () => {
   assert.equal(unpack(pack('join', { code: 'AEIO' })), null, 'codes use consonants only')
   assert.deepEqual(unpack(pack('join', { code: 'bczd' })), { type: 'join', code: 'BCZD' })
   assert.equal(unpack(pack('hello', { name: '<script>' })).name, 'script')
+  assert.equal(unpack(pack('hello', { name: 'Ana' })).garb, undefined, 'garb is optional')
+  assert.deepEqual(unpack(pack('hello', { name: 'Ana', garb: { hat: 'hood', robe: 'gown' } })).garb, { hat: 'hood', robe: 'plain', staff: 'gem' }, 'and tidied, never refused')
   assert.equal(unpack(pack('frame', {})), null, 'peers cannot send host messages')
   assert.deepEqual(unpack(pack('tune', { rules: { teams: [3, 9] } })).rules.teams, [3, 8])
   assert.equal(unpack(pack('resume', { token: 'short' })), null)
   assert.equal(unpack(pack('resume', { token: 'abcdefghijklmnopqrstuv' })).token, 'abcdefghijklmnopqrstuv')
   assert.deepEqual(unpack(pack('frame', { delta: { tick: 3 }, events: [] }), 'host'), { type: 'frame', delta: { tick: 3 }, events: [] }, 'kits and the whole frame are optional')
+})
+
+test('garb is tidied, seeded and worn into the match; auras name the spell that put them there', () => {
+  assert.deepEqual(tidyGarb(), { hat: GARB.hat[0], robe: GARB.robe[0], staff: GARB.staff[0] })
+  assert.deepEqual(tidyGarb({ hat: 'hood', robe: 'gown', staff: 7 }), { hat: 'hood', robe: GARB.robe[0], staff: GARB.staff[0] })
+  const seeded = Array.from({ length: 64 }, (_, i) => pickGarb(hashText(`bot:${i}`)))
+  for (const garb of seeded) assert.deepEqual(tidyGarb(garb), garb, 'seeded garb is always valid')
+  assert.ok(new Set(seeded.map((garb) => Object.values(garb).join('.'))).size > 32, 'and varied')
+  assert.deepEqual(pickGarb(12345), pickGarb(12345), 'and repeatable')
+
+  const roster = [{ name: 'Ana', team: 0, garb: { hat: 'wide', robe: 'split', staff: 'orb' } }, { name: 'Ben', team: 1, garb: 'cape' }]
+  assert.deepEqual(new Match({ seed: 3, roster }).setup().roster.map((m) => m.garb), [{ hat: 'wide', robe: 'split', staff: 'orb' }, tidyGarb()])
+
+  const match = fightingMatch()
+  useBook(match, [{ id: 'fireball', sigil: ['star', 'wave', 'flame'] }])
+  play(match, 't0s0', chordFor(match, 't0s0', 't1s0', 'fireball'), TICK_RATE * 3)
+  const burning = match.frame().mages.find((m) => m.id === 't1s0').auras.find((a) => a.name === 'Burning')
+  assert.equal(burning?.spell, 'fireball', 'the page reads an aura’s rules from its spell')
 })
 
 test('deltas rebuild every frame exactly and cost a fraction of whole frames', () => {
@@ -690,11 +710,13 @@ test('rooms are hosted, joined by code and played over the wire', async () => {
   try {
     const ana = await connect(host.url)
     const ben = await connect(host.url)
-    ana.send('hello', { name: 'Ana' })
+    const garb = { hat: 'circlet', robe: 'mantle', staff: 'crook' }
+    ana.send('hello', { name: 'Ana', garb })
     ben.send('hello', { name: 'Ben' })
     ana.send('open', { rules: { teams: [1, 1] } })
     const { room } = await ana.next((m) => m.type === 'room')
     assert.match(room.code, /^[A-Z]{4}$/)
+    assert.deepEqual(room.seats[0][0].garb, garb, 'the lobby shows what each player wears')
     ben.send('join', { code: 'ZZZZ' })
     assert.match((await ben.next((m) => m.type === 'fault')).text, /No match/)
     ben.send('join', { code: room.code })
@@ -703,9 +725,13 @@ test('rooms are hosted, joined by code and played over the wire', async () => {
     ben.send('start')
     ana.send('tune', { rules: { teams: [2, 1], life: 500 } })
     await ana.next((m) => m.type === 'room' && m.room.rules.teams[0] === 2)
+    ana.send('bench', { team: 0, slot: 1 })
+    const bot = (await ana.next((m) => m.type === 'room' && m.room.seats[0][1]?.kind === 'bot')).room.seats[0][1]
+    assert.deepEqual(tidyGarb(bot.garb), bot.garb, 'bots dress too')
     ana.send('start')
     const [beginA, beginB] = await Promise.all([ana.next((m) => m.type === 'begin'), ben.next((m) => m.type === 'begin')])
-    assert.equal(beginA.setup.roster.length, 3, 'the open seat was filled by a bot')
+    assert.equal(beginA.setup.roster.length, 3, 'the bot took its seat')
+    assert.deepEqual(beginA.setup.roster.map((m) => [m.name, m.garb]), [['Ana', garb], [bot.name, bot.garb], ['Ben', tidyGarb()]], 'everyone plays in the name and garb the lobby showed')
     assert.notEqual(beginA.you, beginB.you)
     assert.deepEqual(beginA.setup.book, beginB.setup.book, 'everyone reads the same book')
     // While drafting, a pick reaches your own team's frames and never a foe's.
@@ -913,7 +939,7 @@ function makeStage(browser, errors) {
   }
 }
 
-test('views: every essential screen renders and responds', { timeout: 600000 }, async () => {
+test('views: every essential screen renders and responds', { timeout: 900000 }, async () => {
   await fs.mkdir(SHOTS, { recursive: true })
   // Frozen pages stop reading their sockets, so they cannot answer pings: don't ping during this test.
   const host = await openHost({ port: 0, quiet: true, beat: 3600000 })
@@ -937,6 +963,15 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
     await ana.waitForSelector('body[data-view="lobby"]')
     const code = await ana.textContent('#room-code')
     assert.match(code, /^[A-Z]{4}$/)
+    // Garb: a pick reaches the lobby at once, and the duel behind the card wears it under your marker
+    await ana.click('[data-garb="hat"] [data-value="wide"]')
+    await ana.click('[data-garb="staff"] [data-value="orb"]')
+    await ana.waitForFunction(() => {
+      const game = window.chordcast
+      const garb = game.room.seats.flat().find((seat) => seat.id === game.you)?.garb
+      const figure = game.stage.figure('d00')
+      return garb?.hat === 'wide' && garb.staff === 'orb' && figure?.garb.hat === 'wide' && figure.garb.staff === 'orb' && game.stage.cursor.visible
+    })
     await shoot(ana, '03-lobby')
     const ben = await stage.open('ben', desk)
     await ben.addInitScript(() => localStorage.setItem('chordcast.name', 'Ben'))
@@ -963,6 +998,12 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
     await ana.click('#book-defense .spell:nth-child(2)')
     await ana.click('#book-offense .spell:nth-child(3)')
     await ana.waitForFunction(() => (window.chordcast.kits[window.chordcast.me] ?? []).length === 3)
+    const worn = await ana.evaluate(() => {
+      const { stage, me } = window.chordcast
+      return { garb: stage.figure(me).garb, focus: [stage.focus.me === me, stage.focus.fade] }
+    })
+    assert.deepEqual([worn.garb.hat, worn.garb.staff], ['wide', 'orb'], 'the garb is worn into the match')
+    assert.deepEqual(worn.focus, [true, 0.9], 'in 2 vs 2, effects that do not touch you draw at 90%')
     await ana.waitForTimeout(300)
     await shoot(ana, '05-study')
 
@@ -982,16 +1023,23 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
       },
       typed,
     )
-    // Slow software rendering can outlast the chord timeout, so clear and type it whole.
-    await ana.keyboard.press(KEYBOARD.drop)
-    for (const key of keys) await ana.keyboard.press(KEYBOARD[key])
-    await ana.waitForFunction(() => {
+    // Slow software rendering can outlast the chord timeout, so clear and type it whole. A stun
+    // from a bot clears it too, so try again once it wears off.
+    const cast = () => {
       const mine = window.chordcast.mine()
       return Boolean(mine.cast) || Object.keys(mine.cools).length > 0
-    })
+    }
+    for (let attempt = 0; attempt < 4 && !(await ana.evaluate(cast)); attempt++) {
+      await ana.waitForFunction(() => !window.chordcast.mine().lock && window.chordcast.serverTick() >= window.chordcast.mine().stagger)
+      await ana.keyboard.press(KEYBOARD.drop)
+      for (const key of keys) await ana.keyboard.press(KEYBOARD[key])
+      await ana.waitForFunction(cast, null, { timeout: 15000 }).catch(() => {})
+    }
+    await ana.waitForFunction(cast)
     await shoot(ana, '07-cast')
     await ana.waitForTimeout(4000)
     await shoot(ana, '08-battle')
+
     await ana.hover('#book-offense .spell:not(.out)')
     await shoot(ana, '09-book')
 
@@ -1032,7 +1080,8 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
 
     // Results: a short, lopsided match ends quickly
     await stage.focus(ana)
-    await ana.locator('[data-action="leave"]:visible').first().click()
+    // Any leave button will do. (A match ending right now would cover the top bar's with the results.)
+    await ana.locator('.topbar [data-action="leave"]').dispatchEvent('click')
     await ana.waitForSelector('body[data-view="home"]')
     await ana.click('#host-button')
     await ana.waitForSelector('body[data-view="lobby"]')
@@ -1082,6 +1131,42 @@ test('views: every essential screen renders and responds', { timeout: 600000 }, 
     await cat.waitForSelector('body.watching[data-view="match"][data-phase="fight"]')
     await cat.waitForTimeout(2000)
     await shoot(cat, '15-watching')
+
+    // A big fight: 8 vs 8, where effects that do not touch you fade to 40% and every mage's particles are capped
+    await cat.locator('.topbar [data-action="leave"]').dispatchEvent('click')
+    await cat.click('#host-button')
+    await cat.waitForSelector('body[data-view="lobby"]')
+    await cat.evaluate(() => window.chordcast.link.send('tune', { rules: { ...window.chordcast.room.rules, teams: [8, 8], life: 3000 } }))
+    await cat.waitForFunction(() => window.chordcast.room.rules.teams.join() === '8,8')
+    await cat.click('#start-button')
+    await cat.waitForSelector('body[data-phase="fight"]', { timeout: 60000 })
+    await cat.keyboard.press('Tab')
+    const fought = await cat.evaluate(() => window.chordcast.stage.time)
+    await cat.waitForFunction((at) => window.chordcast.stage.time > at + 3, fought, { timeout: 120000 })
+    const focus = await cat.evaluate(() => ({ ...window.chordcast.stage.focus, budgets: null }))
+    assert.deepEqual([focus.fade, focus.rate], [0.4, 337.5], 'sixteen mages: others fade to 40%, 337 particles a second each')
+    assert.ok(focus.spent > 0, 'particles are charged to budgets')
+    await shoot(cat, '16-big-fight')
+
+    // Aura details: hovering a chip on a nameplate shows what the aura does and how long it has left
+    await cat.waitForSelector('.plate-auras .aura', { timeout: 60000 })
+    assert.ok(await cat.locator('.plate-auras .aura svg').count(), 'aura chips are icons')
+    const hoverChip = async () => {
+      // Plates can overlap in a big fight: hover a chip that is on top.
+      const at = await cat.evaluate(() => {
+        for (const chip of document.querySelectorAll('.plate-auras .aura')) {
+          const box = chip.getBoundingClientRect()
+          const [x, y] = [box.left + box.width / 2, box.top + box.height / 2]
+          if (document.elementFromPoint(x, y)?.closest('.aura') === chip) return { x, y }
+        }
+        return null
+      })
+      if (at) await cat.mouse.move(at.x, at.y)
+    }
+    const tipOpen = () => !document.querySelector('#aura-tip').hidden && /s left/.test(document.querySelector('#aura-tip').textContent)
+    await hoverChip()
+    await cat.waitForFunction(tipOpen)
+    await shoot(cat, '17-aura', hoverChip, tipOpen)
 
     assert.deepEqual(errors, [], 'no page errors')
   } finally {
