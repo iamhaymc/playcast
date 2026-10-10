@@ -28,8 +28,8 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js'
 import {
-  AIM_TEXT, CODEX, DIMINISH, LAYOUT, METAS, META_OF_RUNE, MOVES, REACTIONS, RULES, RUNES, SPELL, TEAMS, TICK_MS, TICK_RATE, TIMING,
-  costOf, dampenAt, moveCursor, pack, patch, place, reactionOn, readChord, readRunes, unpackFrame, walkActs,
+  AIM_TEXT, CODEX, DIMINISH, GARB, LAYOUT, METAS, META_OF_RUNE, MOVES, REACTIONS, RULES, RUNES, SPELL, TEAMS, TICK_MS, TICK_RATE, TIMING,
+  costOf, dampenAt, describeAura, moveCursor, pack, patch, pickGarb, place, reactionOn, readChord, readRunes, tidyGarb, unpackFrame, walkActs,
 } from '/core.mjs'
 import { Sound } from '/sound.mjs'
 
@@ -687,7 +687,8 @@ class SparkLayer {
     this.points.frustumCulled = false
   }
 
-  write(p, time) {
+  /** Write one particle; `weight` below 1 draws it fainter and a little smaller. */
+  write(p, time, weight = 1) {
     const i = this.head
     this.head = (i + 1) % this.capacity
     const { position, aOffset, aVelocity, aColor, aLife, aForce } = this.attributes
@@ -695,8 +696,8 @@ class SparkLayer {
     position.array.set(p.at, i * 3)
     aOffset.array.set(p.offset ?? ZERO3, i * 3)
     aVelocity.array.set(p.velocity ?? ZERO3, i * 3)
-    aColor.array.set([color.r, color.g, color.b, p.alpha ?? 1], i * 4)
-    aLife.array.set([time + (p.delay ?? 0), p.life ?? 0.6, p.size ?? 0.3, SHAPES[p.shape ?? 'glow']], i * 4)
+    aColor.array.set([color.r, color.g, color.b, (p.alpha ?? 1) * weight], i * 4)
+    aLife.array.set([time + (p.delay ?? 0), p.life ?? 0.6, (p.size ?? 0.3) * (0.6 + 0.4 * weight), SHAPES[p.shape ?? 'glow']], i * 4)
     aForce.array.set([p.gravity ?? 0, p.drag ?? 0, p.swirl ?? 0, p.grow ?? 0], i * 4)
     const last = this.dirty[this.dirty.length - 1]
     if (last && last[0] + last[1] === i) last[1]++
@@ -721,14 +722,94 @@ const ZERO = new THREE.Vector3()
 const SOLID_SHAPES = new Set(['smoke', 'leaf'])
 
 /**
+ * Who the effect being drawn is about, and how strongly to draw it. In a big
+ * fight a player must still read their own spells and the spells flying at
+ * them, so effects that touch the viewer's mage draw at full strength and
+ * the rest fade as the field fills. Every mage also has a particle budget
+ * that refills each second and shrinks as mages are added, so no one mage's
+ * effects can bury the others; effects that touch you share one larger
+ * budget. Effects drawn outside about() (the arena's own motes) are free.
+ */
+class Focus {
+  constructor() {
+    this.me = null // the viewer's mage, or null when watching
+    this.fade = 1 // strength of effects that do not touch you
+    this.rate = FOCUS.most // particles a second each mage may emit
+    this.owner = null // the mage the current effect is charged to
+    this.mine = false // the current effect touches you
+    this.weight = 1 // strength of the current effect
+    this.budgets = new Map()
+    this.spent = 0 // particles charged to a budget, and dropped for want of one: for tests and tuning
+    this.dropped = 0
+  }
+
+  /** Size the fade and the budgets for a field of `count` mages seen by `me`. */
+  field(count, me) {
+    this.me = me ?? null
+    this.fade = clamp(Math.round((1.1 - count * 0.05) * 100) / 100, FOCUS.faintest, 1)
+    this.rate = clamp(FOCUS.field / Math.max(1, count), FOCUS.least, FOCUS.most)
+    this.budgets.clear()
+  }
+
+  /** How full a budget may get: half a second of particles, three times that for yours. */
+  cap(key) {
+    return this.rate * (key === 'you' ? 1.5 : 0.5)
+  }
+
+  /** Strength for an effect touching these mages. Watchers see everything at full strength. */
+  weightOf(ids) {
+    return !this.me || ids.includes(this.me) ? 1 : this.fade
+  }
+
+  /** Run draw() as an effect about `owner` that touches `ids`, no fainter than `floor`. Returns what draw() returns. */
+  about(owner, ids, draw, floor = 0) {
+    const was = [this.owner, this.mine, this.weight]
+    this.owner = owner
+    this.mine = Boolean(this.me) && ids.includes(this.me)
+    this.weight = Math.max(floor, this.weightOf(ids))
+    try {
+      return draw()
+    } finally {
+      ;[this.owner, this.mine, this.weight] = was
+    }
+  }
+
+  /** Charge one particle to the current effect's budget. Small ones are dropped when it runs dry; big flashes always draw. */
+  spend(small) {
+    if (this.owner === null) return true
+    const key = this.mine ? 'you' : this.owner
+    const left = this.budgets.get(key) ?? this.cap(key)
+    if (left < 1 && small) {
+      this.dropped++
+      return false
+    }
+    this.budgets.set(key, left - 1)
+    this.spent++
+    return true
+  }
+
+  refill(dt) {
+    for (const [key, left] of this.budgets) this.budgets.set(key, Math.min(this.cap(key), left + this.rate * (key === 'you' ? 3 : 1) * dt))
+  }
+}
+
+/**
+ * Particle budgets: the whole field shares about `field` particles a second,
+ * split between its mages, each between `least` and `most`; effects that do
+ * not touch you fade down to `faintest`.
+ */
+const FOCUS = { field: 5400, least: 300, most: 1200, faintest: 0.4 }
+
+/**
  * Glowing (additive) and solid (alpha) particles. emit() takes one particle
  * spec. Smoke and leaves go to the solid layer unless `haze` says otherwise,
  * so clouds of them stay dark or green instead of adding up to white.
  */
 class Sparks {
-  constructor(scene, capacity = 24000) {
+  constructor(scene, focus, capacity = 24000) {
     this.time = 0
     this.density = 1
+    this.focus = focus
     this.uniforms = { uTime: { value: 0 }, uScale: { value: 800 }, uAspect: { value: 1 }, uMaxPoint: { value: 600 } }
     this.glow = new SparkLayer(capacity, THREE.AdditiveBlending, this.uniforms)
     this.haze = new SparkLayer(Math.floor(capacity / 2), THREE.NormalBlending, this.uniforms)
@@ -738,9 +819,12 @@ class Sparks {
   }
   /** p: { at, offset?, velocity?, color, alpha?, life?, size?, shape?, gravity?, drag?, swirl?, grow?, delay?, haze? } */
   emit(p) {
-    // Lower quality tiers thin out small bits; big flashes always draw.
-    if (this.density < 1 && (p.size ?? 0.3) < 0.5 && Math.random() > this.density) return
-    ;((p.haze ?? SOLID_SHAPES.has(p.shape)) ? this.haze : this.glow).write(p, this.time)
+    // Lower quality tiers and faded effects thin out small bits; big flashes always draw.
+    const small = (p.size ?? 0.3) < 0.5
+    const weight = this.focus.weight
+    if (small && Math.random() > this.density * weight) return
+    if (!this.focus.spend(small)) return
+    ;((p.haze ?? SOLID_SHAPES.has(p.shape)) ? this.haze : this.glow).write(p, this.time, weight)
   }
   update(time, scale, aspect) {
     this.time = time
@@ -784,8 +868,9 @@ const MARK_VERTEX = /* glsl */ `
  * marks draw after glowing ones, so a dark core sits on top of its halo.
  */
 class Marks {
-  constructor(scene, uniforms, capacity = 800) {
+  constructor(scene, uniforms, focus, capacity = 800) {
     this.capacity = capacity
+    this.focus = focus
     this.layers = [THREE.AdditiveBlending, THREE.NormalBlending].map((blending, i) => {
       const geometry = new THREE.BufferGeometry()
       const attributes = {}
@@ -811,7 +896,7 @@ class Marks {
     const { position, aColor, aDir, aMark } = layer.attributes
     const dir = m.dir ?? ZERO
     position.setXYZ(i, m.at.x, m.at.y, m.at.z)
-    aColor.setXYZW(i, m.color.r, m.color.g, m.color.b, m.alpha ?? 1)
+    aColor.setXYZW(i, m.color.r, m.color.g, m.color.b, (m.alpha ?? 1) * this.focus.weight)
     aDir.setXYZ(i, dir.x, dir.y, dir.z)
     aMark.setXYZ(i, m.size ?? 0.4, SHAPES[m.shape ?? 'glow'], m.angle ?? 0)
   }
@@ -852,9 +937,10 @@ const RING_FRAGMENT = /* glsl */ `
   }
 `
 
-/** A pool of flat expanding rings for ground shockwaves. */
+/** A pool of flat expanding rings for ground shockwaves, faded like the effect that spawned them. */
 class Rings {
-  constructor(scene, count = 48) {
+  constructor(scene, focus, count = 48) {
+    this.focus = focus
     const geometry = new THREE.PlaneGeometry(2, 2).rotateX(-Math.PI / 2)
     this.pool = Array.from({ length: count }, () => {
       const material = new THREE.ShaderMaterial({
@@ -869,7 +955,7 @@ class Rings {
       mesh.visible = false
       mesh.renderOrder = 3
       scene.add(mesh)
-      return { mesh, start: -Infinity, life: 1, radius: 1 }
+      return { mesh, start: -Infinity, life: 1, radius: 1, weight: 1 }
     })
     this.next = 0
   }
@@ -879,7 +965,7 @@ class Rings {
     ring.mesh.position.set(at.x, (at.y ?? 0) + 0.04, at.z)
     ring.mesh.material.uniforms.uColor.value.copy(color)
     ring.mesh.material.uniforms.uThick.value = thick
-    Object.assign(ring, { start: time + delay, life, radius })
+    Object.assign(ring, { start: time + delay, life, radius, weight: this.focus.weight })
   }
   update(time) {
     for (const ring of this.pool) {
@@ -887,7 +973,7 @@ class Rings {
       ring.mesh.visible = u >= 0 && u < 1
       if (!ring.mesh.visible) continue
       ring.mesh.scale.setScalar(ring.radius * (0.12 + 0.88 * ease(u)))
-      ring.mesh.material.uniforms.uFade.value = (1 - u) * 1.15
+      ring.mesh.material.uniforms.uFade.value = (1 - u) * 1.15 * ring.weight
     }
   }
 }
@@ -937,7 +1023,8 @@ const BOLT_FRAGMENT = /* glsl */ `
  * tethers. Each holds a polyline drawn as a strip with a hot core and soft edges.
  */
 class Bolts {
-  constructor(scene, count = 48, capacity = 48) {
+  constructor(scene, focus, count = 48, capacity = 48) {
+    this.focus = focus
     this.aspect = { value: 1 }
     this.capacity = capacity
     const index = []
@@ -962,7 +1049,7 @@ class Bolts {
       mesh.visible = false
       mesh.renderOrder = 3
       scene.add(mesh)
-      return { mesh, start: -Infinity, life: 1, flicker: 0 }
+      return { mesh, start: -Infinity, life: 1, flicker: 0, weight: 1 }
     })
     this.next = 0
   }
@@ -999,7 +1086,7 @@ class Bolts {
     uniforms.uColor.value.copy(color)
     uniforms.uHot.value.copy(hot)
     uniforms.uWidth.value = width
-    Object.assign(bolt, { start: time, life, flicker })
+    Object.assign(bolt, { start: time, life, flicker, weight: this.focus.weight })
     return bolt
   }
 
@@ -1010,7 +1097,7 @@ class Bolts {
       bolt.mesh.visible = u >= 0 && u < 1
       if (!bolt.mesh.visible) continue
       const flicker = 1 - bolt.flicker * (0.5 + 0.5 * Math.sin(time * 90 + bolt.start * 50))
-      bolt.mesh.material.uniforms.uFade.value = (1 - u * u) * flicker
+      bolt.mesh.material.uniforms.uFade.value = (1 - u * u) * flicker * bolt.weight
     }
   }
 }
@@ -1554,26 +1641,23 @@ function hexPrism(radius, height, chamfer) {
   return new THREE.ExtrudeGeometry(hex, options).rotateX(-Math.PI / 2).translate(0, chamfer, 0)
 }
 
+/** The robe's outline as [radius, height] points, turned into the robe. */
+const ROBE_OUTLINE = [
+  [0.001, 0],
+  [0.62, 0],
+  [0.68, 0.05],
+  [0.6, 0.32],
+  [0.47, 0.82],
+  [0.37, 1.22],
+  [0.45, 1.38],
+  [0.33, 1.55],
+  [0.14, 1.64],
+  [0.001, 1.66],
+]
+
 function shapes() {
   if (GEOMETRY.robe) return GEOMETRY
-  const robe = lathe(
-    profile(
-      [
-        [0.001, 0],
-        [0.62, 0],
-        [0.68, 0.05],
-        [0.6, 0.32],
-        [0.47, 0.82],
-        [0.37, 1.22],
-        [0.45, 1.38],
-        [0.33, 1.55],
-        [0.14, 1.64],
-        [0.001, 1.66],
-      ],
-      32,
-    ),
-    32,
-  )
+  const robe = lathe(profile(ROBE_OUTLINE, 32), 32)
   const heights = robe.attributes.position
   const shade = new Float32Array(heights.count * 3)
   for (let i = 0; i < heights.count; i++) {
@@ -1606,6 +1690,7 @@ function shapes() {
     knob: new THREE.TorusGeometry(0.06, 0.03, 6, 12),
     gem: new THREE.OctahedronGeometry(0.18, 0).scale(1, 1.25, 1),
     orbit: new THREE.TorusGeometry(0.3, 0.018, 6, 40),
+    hand: new THREE.SphereGeometry(0.075, 12, 8),
     mote: new THREE.IcosahedronGeometry(0.06, 1),
     collar: new THREE.TorusGeometry(0.3, 0.05, 8, 32),
     belt: new THREE.TorusGeometry(0.44, 0.035, 6, 40),
@@ -1619,7 +1704,175 @@ function shapes() {
     arrow: new THREE.ConeGeometry(0.16, 0.34, 4).rotateX(Math.PI),
     nimbus: new THREE.TorusGeometry(0.3, 0.032, 8, 40),
   })
+  GEOMETRY.garb = garbShapes(robe)
   return GEOMETRY
+}
+
+/** Drop uv so pieces built from different three.js shapes can be merged. */
+const bare = (geometry) => {
+  geometry.deleteAttribute('uv')
+  return geometry
+}
+
+/** A thin cylinder from `from` to `to` ([x, y, z]), for prongs and tines. */
+function rod(from, to, radius, tip = radius) {
+  const a = new THREE.Vector3(...from)
+  const b = new THREE.Vector3(...to)
+  const geometry = bare(new THREE.CylinderGeometry(tip, radius, a.distanceTo(b), 8))
+  geometry.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.clone().sub(a).normalize()))
+  return geometry.translate(...a.lerp(b, 0.5).toArray())
+}
+
+/**
+ * Every garb style as a list of parts: a geometry, the material it takes
+ * (`hat` is the robe's darker shade, `trim` glows in the team color, `gold`,
+ * `wood`, `gem` the staff's glowing focus), an optional place and turn, and
+ * `bright` to lighten the material.
+ * Hats and robes sit in the body's space; staff heads in the staff's, whose
+ * shaft runs from -1.25 to 1.25. Each staff names one `gem` part: the point
+ * spells leave from. `crest` is how high the hat reaches, for the nimbus.
+ */
+function garbShapes(robe) {
+  const top = SEAT_Y + 1.99 // where a hat sits on the head
+  const flat = [Math.PI / 2, 0, 0]
+  const crown = (height, base, bend) =>
+    lathe(
+      Array.from({ length: 16 }, (_, i) => new THREE.Vector2(Math.max(0.001, base * Math.pow(1 - i / 15, 1.15)), (i / 15) * height)),
+      24,
+      (v) => v.set(v.x, v.y, v.z - bend * Math.pow(v.y / height, 2.2)),
+    ).translate(0, top, 0)
+
+  // A hood: an open shell around the head, drawn up into a peak at the back and flared over the shoulders.
+  const opening = 1.0
+  const hood = bare(new THREE.SphereGeometry(0.3, 32, 20, Math.PI / 2 + opening, Math.PI * 2 - opening * 2, 0, 2.3))
+  const shell = hood.attributes.position
+  const v = new THREE.Vector3()
+  for (let i = 0; i < shell.count; i++) {
+    v.fromBufferAttribute(shell, i)
+    const peak = Math.max(0, (v.y * 0.75 - v.z * 0.66) / 0.3) ** 4
+    const drape = Math.max(0, -v.y / 0.3)
+    v.x *= 1 + drape * 0.55
+    v.z *= 1 + drape * 0.4
+    v.add(new THREE.Vector3(0, 0.75, -0.66).multiplyScalar(peak * 0.2))
+    shell.setXYZ(i, v.x, v.y * 1.15, v.z)
+  }
+  hood.computeVertexNormals()
+  hood.translate(0, SEAT_Y + 1.87, -0.03)
+
+  // A crown: a band with five points and a jewel at the front.
+  const points = Array.from({ length: 5 }, (_, i) => {
+    const a = (i / 5) * Math.PI * 2 + Math.PI / 2
+    return bare(new THREE.ConeGeometry(0.035, 0.15, 6)).translate(Math.cos(a) * 0.2, SEAT_Y + 2.03, Math.sin(a) * 0.2)
+  })
+  const ring = bare(new THREE.TorusGeometry(0.205, 0.03, 8, 40)).rotateX(Math.PI / 2).translate(0, SEAT_Y + 1.96, 0)
+
+  // A mantle over the shoulders: a closed shell, its edge in trim.
+  const mantle = lathe(
+    profile(
+      [
+        [0.17, 1.65],
+        [0.4, 1.56],
+        [0.57, 1.36],
+        [0.63, 1.1],
+        [0.58, 1.1],
+        [0.52, 1.33],
+        [0.37, 1.52],
+        [0.15, 1.6],
+      ],
+      24,
+    ),
+    32,
+  ).translate(0, SEAT_Y, 0)
+
+  // A robe split down the middle in two shades, with a glowing seam front and back.
+  const body = robe.clone().translate(0, SEAT_Y, 0)
+  const split = body.clone()
+  const shade = split.attributes.color.array
+  const corners = split.attributes.position
+  for (let i = 0; i < corners.count; i++) {
+    if (corners.getX(i) >= 0) continue
+    for (let k = 0; k < 3; k++) shade[i * 3 + k] *= 0.2
+  }
+  const seam = (side) =>
+    bare(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(ROBE_OUTLINE.slice(1, -2).map(([r, y]) => new THREE.Vector3(0, SEAT_Y + y, side * (r + 0.008)))), 40, 0.022, 6))
+
+  // A crook: the shaft curls over into a hook that holds a small gem.
+  const hook = bare(new THREE.TorusGeometry(0.2, 0.038, 8, 28, Math.PI * 1.25)).rotateZ(-Math.PI / 4).translate(0.2, 1.25, 0)
+  // A branch: the shaft forks into three tines with glowing buds.
+  const tines = [
+    [-0.24, 1.58, 0.05],
+    [0.22, 1.6, -0.04],
+    [0.02, 1.55, -0.26],
+  ]
+
+  return {
+    hat: {
+      pointed: { crest: 3.05, parts: [{ geometry: GEOMETRY.hat, paint: 'hat' }, { geometry: GEOMETRY.band, paint: 'trim', at: [0, SEAT_Y + 2.07, 0], turn: flat }] },
+      wide: {
+        crest: 2.85,
+        parts: [
+          { geometry: bare(new THREE.CylinderGeometry(0.9, 0.94, 0.04, 48)).rotateX(-0.06).translate(0, top + 0.01, 0), paint: 'hat' },
+          { geometry: crown(0.62, 0.34, 0.16), paint: 'hat' },
+          { geometry: new THREE.TorusGeometry(0.325, 0.032, 8, 40), paint: 'trim', at: [0, top + 0.07, 0], turn: flat },
+        ],
+      },
+      hood: { crest: 2.6, double: true, parts: [{ geometry: hood, paint: 'hat' }] },
+      circlet: {
+        crest: 2.45,
+        parts: [
+          { geometry: mergeGeometries([ring, ...points]), paint: 'gold' },
+          { geometry: new THREE.OctahedronGeometry(0.055, 0).scale(1, 1.4, 1), paint: 'trim', at: [0, SEAT_Y + 1.97, 0.225] },
+        ],
+      },
+    },
+    robe: {
+      plain: [{ geometry: body, paint: 'robe' }],
+      mantle: [
+        { geometry: body, paint: 'robe' },
+        { geometry: mantle, paint: 'hat' },
+        { geometry: new THREE.TorusGeometry(0.605, 0.028, 8, 48), paint: 'trim', at: [0, SEAT_Y + 1.1, 0], turn: flat },
+      ],
+      banded: [
+        { geometry: body, paint: 'robe' },
+        { geometry: new THREE.TorusGeometry(0.66, 0.03, 8, 48), paint: 'trim', at: [0, SEAT_Y + 0.15, 0], turn: flat },
+        { geometry: new THREE.TorusGeometry(0.6, 0.024, 8, 48), paint: 'trim', at: [0, SEAT_Y + 0.36, 0], turn: flat },
+      ],
+      split: [
+        { geometry: split, paint: 'robe', bright: 1.9 },
+        { geometry: mergeGeometries([seam(1), seam(-1)]), paint: 'trim' },
+      ],
+    },
+    staff: {
+      gem: [
+        { geometry: GEOMETRY.knob, paint: 'gold', at: [0, 1.22, 0], turn: flat },
+        { geometry: GEOMETRY.gem, paint: 'gem', at: [0, 1.42, 0] },
+        { geometry: GEOMETRY.orbit, paint: 'gold', at: [0, 1.42, 0], turn: [Math.PI / 2.4, 0, 0], spin: true },
+      ],
+      orb: [
+        {
+          geometry: mergeGeometries([
+            bare(new THREE.TorusGeometry(0.11, 0.022, 6, 24)).rotateX(Math.PI / 2).translate(0, 1.27, 0),
+            ...[0, 1, 2].map((k) => {
+              const a = (k / 3) * Math.PI * 2
+              return rod([Math.cos(a) * 0.1, 1.26, Math.sin(a) * 0.1], [Math.cos(a) * 0.15, 1.58, Math.sin(a) * 0.15], 0.024, 0.01)
+            }),
+          ]),
+          paint: 'gold',
+        },
+        { geometry: new THREE.SphereGeometry(0.15, 20, 14), paint: 'gem', at: [0, 1.45, 0] },
+      ],
+      crook: [
+        { geometry: hook, paint: 'wood' },
+        { geometry: GEOMETRY.knob, paint: 'gold', at: [0, 1.18, 0], turn: flat },
+        { geometry: GEOMETRY.gem.clone().scale(0.55, 0.55, 0.55), paint: 'gem', at: [0.2, 1.27, 0] },
+      ],
+      branch: [
+        { geometry: mergeGeometries(tines.map((tip) => rod([0, 1.18, 0], tip, 0.03, 0.012))), paint: 'wood' },
+        { geometry: mergeGeometries(tines.map((tip) => bare(new THREE.SphereGeometry(0.04, 8, 6)).translate(...tip))), paint: 'trim' },
+        { geometry: GEOMETRY.gem.clone().scale(0.7, 0.7, 0.7), paint: 'gem', at: [0, 1.4, 0] },
+      ],
+    },
+  }
 }
 
 const BUBBLE_VERTEX = /* glsl */ `
@@ -1665,6 +1918,32 @@ function addRim(material, color, strength = 0.4) {
 }
 
 const SEAT_Y = 0.24
+const ARM = 0.75 // sleeve length, shoulder to cuff
+
+/**
+ * Casting poses as [x, y, z] turns: at rest, raised while a cast fills, and
+ * thrust as the spell leaves. The staff arm lifts the staff up and out; the
+ * free arm reaches forward with its glowing hand.
+ */
+const POSE = {
+  staffArm: { rest: [0.3, 0, 0.8], raise: [-0.15, 0, 2.05], thrust: [-1.1, 0, 0.9] },
+  freeArm: { rest: [0.15, 0, -0.45], raise: [-1.3, 0, -0.45], thrust: [-1.6, 0, -0.12] },
+  staff: { rest: [0, 0, 0], raise: [-0.25, 0, -0.18], thrust: [0.8, 0, 0.05] },
+}
+
+/** Set a part's turn between its rest, raised and thrust poses. */
+function turn(part, pose, raise, thrust) {
+  ;['x', 'y', 'z'].forEach((axis, i) => {
+    const held = pose.rest[i] + (pose.raise[i] - pose.rest[i]) * raise
+    part.rotation[axis] = held + (pose.thrust[i] - held) * thrust
+  })
+}
+
+/** Where the staff arm's hand holds the staff, in the staff's own space. */
+const GRIP = new THREE.Vector3(0.05, -0.25, -0.2)
+const GRIP_AT = new THREE.Vector3()
+const GRIP_TURN = new THREE.Vector3()
+
 /** Symbol particles are drawn big enough to read; other shapes pick their own size. */
 const SYMBOL_SIZE = { cross: 0.3, chevron: 0.32, zed: 0.36 }
 const RIM_GOAL = new THREE.Color()
@@ -1708,14 +1987,19 @@ class Figure {
     this.body = new THREE.Group()
     this.root.add(this.body)
 
+    const garb = tidyGarb(mage.garb)
+    const hat = geo.garb.hat[garb.hat]
+    this.garb = garb
+    this.crest = hat.crest
     this.robeMaterial = addRim(new THREE.MeshStandardMaterial({ color: robe, vertexColors: true, roughness: 0.62, metalness: 0.08, emissive: glow, emissiveIntensity: 0.05, transparent: true }), glow)
     this.trimMaterial = new THREE.MeshStandardMaterial({ color: glow, emissive: glow, emissiveIntensity: 0.8, roughness: 0.3 })
     const gold = new THREE.MeshStandardMaterial({ color: '#c79a52', roughness: 0.3, metalness: 0.9 })
-    this.hatMaterial = addRim(new THREE.MeshStandardMaterial({ color: robe.clone().multiplyScalar(0.75), roughness: 0.66, metalness: 0.05, transparent: true }), glow, 0.3)
-    this.gemMaterial = new THREE.MeshStandardMaterial({ color: glow, emissive: glow, emissiveIntensity: 1.4, roughness: 0.15, metalness: 0.2, flatShading: true })
+    this.hatMaterial = addRim(new THREE.MeshStandardMaterial({ color: robe.clone().multiplyScalar(0.75), roughness: 0.66, metalness: 0.05, transparent: true, side: hat.double ? THREE.DoubleSide : THREE.FrontSide }), glow, 0.3)
+    this.gemMaterial = new THREE.MeshStandardMaterial({ color: glow, emissive: glow, emissiveIntensity: 1.4, roughness: 0.15, metalness: 0.2, flatShading: garb.staff !== 'orb' })
     const face = new THREE.MeshStandardMaterial({ color: '#0b0a18', roughness: 0.85 })
     const eyes = new THREE.MeshBasicMaterial({ color: glow.clone().lerp(new THREE.Color('#ffffff'), 0.35).multiplyScalar(1.8) })
     const wood = new THREE.MeshStandardMaterial({ color: '#4a3024', roughness: 0.75 })
+    const paints = { robe: this.robeMaterial, hat: this.hatMaterial, trim: this.trimMaterial, gold, wood, gem: this.gemMaterial }
 
     const add = (geometry, material, position, rotation = [0, 0, 0], parent = this.body) => {
       const mesh = new THREE.Mesh(geometry, material)
@@ -1724,27 +2008,61 @@ class Figure {
       parent.add(mesh)
       return mesh
     }
+    /** Put on a garb style's parts; returns the meshes by paint. */
+    const dress = (parts, parent = this.body) => {
+      const worn = {}
+      for (const part of parts) {
+        if (part.bright) paints[part.paint].color.multiplyScalar(part.bright)
+        const mesh = add(part.geometry, paints[part.paint], part.at ?? [0, 0, 0], part.turn, parent)
+        if (part.spin) this.spinners.push(mesh)
+        worn[part.paint] = mesh
+      }
+      return worn
+    }
+    this.spinners = []
 
-    add(geo.robe, this.robeMaterial, [0, SEAT_Y, 0])
+    dress(geo.garb.robe[garb.robe])
     add(geo.belt, gold, [0, SEAT_Y + 0.9, 0], [Math.PI / 2, 0, 0])
     add(geo.collar, this.trimMaterial, [0, SEAT_Y + 1.5, 0], [Math.PI / 2, 0, 0])
     add(geo.head, face, [0, SEAT_Y + 1.82, 0])
     add(geo.eyes, eyes, [0, 0, 0])
-    add(geo.hat, this.hatMaterial, [0, 0, 0])
-    add(geo.band, this.trimMaterial, [0, SEAT_Y + 2.07, 0], [Math.PI / 2, 0, 0])
-    this.arm = add(geo.arm, this.robeMaterial, [0.4, SEAT_Y + 1.2, 0.12], [0.3, 0, 0.8])
-    add(geo.arm, this.robeMaterial, [-0.38, SEAT_Y + 1.12, 0.06], [0.15, 0, -0.45])
+    dress(hat.parts)
+
+    // Arms hang from shoulder pivots so they can raise the staff and reach out to cast.
+    const shoulder = (at, pose) => {
+      const pivot = new THREE.Group()
+      pivot.position.set(...at)
+      pivot.rotation.set(...pose.rest)
+      this.body.add(pivot)
+      add(geo.arm, this.robeMaterial, [0, -ARM / 2, 0], [0, 0, 0], pivot)
+      const hand = new THREE.Object3D()
+      hand.position.set(0, -ARM - 0.03, 0)
+      pivot.add(hand)
+      return { pivot, hand }
+    }
+    this.staffArm = shoulder([0.131, SEAT_Y + 1.449, 0.197], POSE.staffArm)
+    this.freeArm = shoulder([-0.217, SEAT_Y + 1.454, 0.111], POSE.freeArm)
     this.staff = new THREE.Group()
     this.staff.position.set(0.62, SEAT_Y + 1.2, 0.24)
     this.body.add(this.staff)
     add(geo.staff, wood, [0, 0, 0], [0, 0, 0], this.staff)
-    add(geo.knob, gold, [0, 1.22, 0], [Math.PI / 2, 0, 0], this.staff)
-    this.gem = add(geo.gem, this.gemMaterial, [0, 1.42, 0], [0, 0, 0], this.staff)
-    this.orbit = add(geo.orbit, gold, [0, 1.42, 0], [Math.PI / 2.4, 0, 0], this.staff)
+    this.gem = dress(geo.garb.staff[garb.staff], this.staff).gem
     this.motes = [0, 1].map(() => add(geo.mote, this.trimMaterial, [0, SEAT_Y + 1.1, 0]))
     this.halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex.glow, color: glow, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.32 }))
     this.halo.scale.setScalar(0.7)
     this.gem.add(this.halo)
+
+    // The free hand glows in the school's color while it shapes a spell.
+    this.handMaterial = new THREE.MeshBasicMaterial({ color: glow, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false })
+    this.palm = add(geo.hand, this.handMaterial, [0, 0, 0], [0, 0, 0], this.freeArm.hand)
+    this.palmHalo = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex.glow, color: glow, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0 }))
+    this.palm.add(this.palmHalo)
+    this.palm.visible = false
+    // Colors that take a spell's school while it is cast, then ease back to the team's.
+    this.tinted = [this.gemMaterial.emissive, this.halo.material.color, this.handMaterial.color, this.palmHalo.material.color]
+    this.raise = 0 // 0 at rest, 1 with the staff high and the hand out
+    this.recoil = 0 // 1 as a spell leaves, falling back to 0
+    this.thrust = 0 // the recoil, eased in so the strike has a short wind
 
     add(geo.base, new THREE.MeshStandardMaterial({ color: BASE_TEXT, roughness: 0.4, metalness: 0.45, flatShading: true }), [0, 0, 0], [0, 0, 0], this.root)
     add(geo.rim, this.trimMaterial, [0, SEAT_Y + 0.005, 0], [Math.PI / 2, 0, Math.PI / 6], this.root)
@@ -1756,7 +2074,7 @@ class Figure {
     this.circle.scale.setScalar(2.6)
 
     // A golden ring over the hat while death is held off (Death Ward, Guardian Spirit).
-    this.nimbus = add(geo.nimbus, new THREE.MeshBasicMaterial({ color: new THREE.Color('#ffc93d').multiplyScalar(1.6) }), [0, SEAT_Y + 3.05, 0], [Math.PI / 2 - 0.2, 0, 0], this.body)
+    this.nimbus = add(geo.nimbus, new THREE.MeshBasicMaterial({ color: new THREE.Color('#ffc93d').multiplyScalar(1.6) }), [0, this.crest, 0], [Math.PI / 2 - 0.2, 0, 0], this.body)
     this.nimbus.visible = false
 
     this.bubble = add(
@@ -1831,8 +2149,12 @@ class Figure {
     this.cast = { school: spell.school, start: this.stage.time }
     this.circle.material.map = sigilTexture(spell.school)
     this.circle.material.color.copy(look.main)
-    this.gemMaterial.emissive.copy(look.main)
-    this.halo.material.color.copy(look.main)
+    this.tint(look.main)
+  }
+
+  /** The gem and the free hand take a school's color. */
+  tint(color) {
+    for (const target of this.tinted) target.copy(color)
   }
 
   endCast(broken) {
@@ -1840,12 +2162,13 @@ class Figure {
     this.cast = null
   }
 
+  /** A spell leaves: the gem flares, and staff and hand thrust toward the target. */
   release(spell) {
     const look = schoolLook(spell.school)
-    this.gemMaterial.emissive.copy(look.main)
-    this.halo.material.color.copy(look.main)
+    this.tint(look.main)
     this.stage.looks.flash(this.anchor('gem'), look.main, 1.3, 0.22, 0.6)
     this.flare = 1
+    this.recoil = 1
   }
 
   /** A ward goes up: a bright shell for its short window. */
@@ -1886,11 +2209,10 @@ class Figure {
     const shiver = looks.has('fear') && !down ? Math.sin(time * 47) * 0.035 : 0
     const castShare = state?.cast ? state.cast.done / state.cast.total : 0
     const fall = ease(this.fallen)
-    this.body.position.set(shiver, bob - fall * 0.35, -this.kick * 0.25)
-    this.body.rotation.set(-this.kick * 0.25 - fall * 1.35 + castShare * 0.06, Math.sin(time * 0.6 + this.phase) * 0.06, Math.sin(time * 1.1 + this.phase) * 0.02)
-    this.staff.rotation.set(state?.cast ? -0.35 : 0.05 * Math.sin(time + this.phase), 0, state?.cast ? -0.15 : 0)
-    this.arm.rotation.z = state?.cast ? 1.05 : 0.8
-    this.orbit.rotation.z += dt * (state?.cast ? 6 : 1.5)
+    this.gesture(dt, time, state?.cast && !down ? castShare : null)
+    this.body.position.set(shiver, bob - fall * 0.35, -this.kick * 0.25 - this.thrust * 0.14)
+    this.body.rotation.set(-this.kick * 0.25 - fall * 1.35 + castShare * 0.06 - this.thrust * 0.12, Math.sin(time * 0.6 + this.phase) * 0.06, Math.sin(time * 1.1 + this.phase) * 0.02)
+    for (const spinner of this.spinners) spinner.rotation.z += dt * (state?.cast ? 6 : 1.5)
     this.motes.forEach((mote, i) => {
       const a = time * 1.3 + this.phase + i * Math.PI
       mote.position.set(Math.cos(a) * 0.85, SEAT_Y + 1.2 + Math.sin(a * 1.7) * 0.25, Math.sin(a) * 0.85)
@@ -1906,7 +2228,7 @@ class Figure {
     this.ice.visible = looks.has('ice') && !down
     this.ice.rotation.y += dt * 0.2
     this.nimbus.visible = looks.has('cheat') && !down
-    if (this.nimbus.visible) this.nimbus.position.y = SEAT_Y + 3.05 + Math.sin(time * 2.2) * 0.04
+    if (this.nimbus.visible) this.nimbus.position.y = this.crest + Math.sin(time * 2.2) * 0.04
 
     const opacity = ghost ? (down ? 0.35 : 0.45) : 1
     this.robeMaterial.opacity = this.hatMaterial.opacity = opacity
@@ -1923,8 +2245,7 @@ class Figure {
     this.gemMaterial.emissiveIntensity = 1.4 + (casting ? 0.8 + castShare * 1.4 : 0) + this.flare * 2
     this.halo.scale.setScalar(0.7 + (casting ? 0.25 + castShare * 0.35 : 0) + this.flare * 0.4)
     if (!casting) {
-      this.gemMaterial.emissive.lerp(this.glow, Math.min(1, dt * 2))
-      this.halo.material.color.lerp(this.glow, Math.min(1, dt * 2))
+      for (const color of this.tinted) color.lerp(this.glow, Math.min(1, dt * 2))
     }
 
     const guard = (state?.guard ?? 0) > 0
@@ -1938,16 +2259,47 @@ class Figure {
       uniforms.uPower.value = warded ? 1.6 : 0.6 + this.kick * 0.6
     }
 
-    if (casting && !down) this.emitCast(dt, castShare)
-    if (state && !down) {
-      this.emitStatus(dt, state)
-      this.drawMarks(time, state)
-    }
-    if (down && this.stage.mode === 'match') this.drift(dt, time)
+    const focus = this.stage.focus
+    focus.about(this.id, [this.id], () => {
+      if (casting && !down) this.emitCast(dt, castShare)
+      if (state && !down) this.emitStatus(dt, state)
+      if (down && this.stage.mode === 'match') this.drift(dt, time)
+    })
+    // Status symbols say what a mage can do, so they fade less than its particles.
+    if (state && !down) focus.about(this.id, [this.id], () => this.drawMarks(time, state), 0.75)
+    // A call is the team's own signal: always at full strength.
     if (this.stage.time < this.calledUntil) {
       const left = (this.calledUntil - this.stage.time) / TIMING.call
       this.stage.marks.draw({ at: this.anchor('top', MARK_AT), color: CALL_COLOR, size: 1.05 + Math.sin(time * 6) * 0.08, shape: 'target', angle: time * 0.8, alpha: 0.5 + 0.5 * Math.min(1, left * 4) })
     }
+  }
+
+  /**
+   * Casting gestures. While a cast fills, the staff rises and tilts back and
+   * the free hand reaches out, glowing brighter in the school's color; as
+   * the spell leaves, staff and hand thrust toward the target and the body
+   * rocks back. `share` is the cast's progress, or null when not casting.
+   */
+  gesture(dt, time, share) {
+    const goal = share === null ? 0 : 0.3 + 0.7 * share
+    this.raise += (goal - this.raise) * Math.min(1, dt * 8)
+    this.recoil = Math.max(0, this.recoil - dt * 3)
+    this.thrust += (this.recoil - this.thrust) * Math.min(1, dt * 25)
+    const { raise, thrust } = this
+    turn(this.staffArm.pivot, POSE.staffArm, raise, thrust)
+    turn(this.freeArm.pivot, POSE.freeArm, raise, thrust)
+    turn(this.staff, POSE.staff, raise, thrust)
+    this.staff.rotation.x += 0.05 * Math.sin(time + this.phase) * (1 - raise)
+    // The staff stays in the hand that holds it.
+    const { pivot, hand } = this.staffArm
+    pivot.updateMatrix()
+    GRIP_AT.copy(hand.position).applyMatrix4(pivot.matrix)
+    this.staff.position.copy(GRIP_AT).sub(GRIP_TURN.copy(GRIP).applyEuler(this.staff.rotation))
+    const glow = clamp(raise * (0.35 + 0.65 * (share ?? 0)) + thrust, 0, 1)
+    this.palm.visible = glow > 0.02
+    this.handMaterial.opacity = glow
+    this.palmHalo.material.opacity = glow * 0.9
+    this.palmHalo.scale.setScalar(0.45 + glow * 0.75)
   }
 
   /** A fallen mage floats over its body as a wisp in its team's color. */
@@ -2102,11 +2454,16 @@ class Flight {
     this.stage.looks.head(at, this.school, scale, dir)
   }
 
-  /**
-   * Draw one frame. Trails are laid at 60 puffs a second along the stretch
-   * flown since the last frame, so they look the same at any frame rate.
-   */
+  /** Draw one frame, as an effect about the caster that touches the target. False once the flight is over. */
   update(time, dt) {
+    return this.stage.focus.about(this.from.id, [this.from.id, this.to.id], () => this.draw(time, dt))
+  }
+
+  /**
+   * Trails are laid at 60 puffs a second along the stretch flown since the
+   * last frame, so they look the same at any frame rate.
+   */
+  draw(time, dt) {
     const t = (time - this.start) / this.duration
     if (t < 0) return true
     const looks = this.stage.looks
@@ -2369,11 +2726,12 @@ class Stage {
     this.composer.addPass(ditheredOutput())
 
     const gl = renderer.getContext()
-    this.sparks = new Sparks(this.scene)
+    this.focus = new Focus()
+    this.sparks = new Sparks(this.scene, this.focus)
     this.sparks.uniforms.uMaxPoint.value = Math.min(1024, gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1])
-    this.marks = new Marks(this.scene, this.sparks.uniforms)
-    this.rings = new Rings(this.scene)
-    this.bolts = new Bolts(this.scene)
+    this.marks = new Marks(this.scene, this.sparks.uniforms, this.focus)
+    this.rings = new Rings(this.scene, this.focus)
+    this.bolts = new Bolts(this.scene, this.focus)
     this.looks = new Looks(this)
     const anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy())
     for (const texture of Object.values(textures())) if (texture.isTexture) texture.anisotropy = anisotropy
@@ -2620,12 +2978,13 @@ class Stage {
 
   // Figures ──────────────────────────────────────────────────────────────
 
-  /** Replace all figures with a roster. viewer: the team seen from the near side. */
-  setRoster(roster, viewer, mode) {
+  /** Replace all figures with a roster. viewer: the team seen from the near side; me: the player's own mage, if any. */
+  setRoster(roster, viewer, mode, me = null) {
     for (const figure of this.figures.values()) figure.dispose()
     this.figures.clear()
     const sizes = [0, 1].map((team) => roster.filter((m) => m.team === team).length)
     for (const mage of roster) this.figures.set(mage.id, new Figure(this, mage, sizes[mage.team]))
+    this.focus.field(roster.length, me)
     this.viewer = viewer
     this.span = Math.max(...sizes, 1)
     this.mode = mode
@@ -2654,7 +3013,7 @@ class Stage {
   launch(spell, casterId, targetIds, seconds) {
     const from = this.figures.get(casterId)
     if (!from) return
-    from.release(spell)
+    this.focus.about(casterId, [casterId, ...targetIds], () => from.release(spell))
     targetIds.forEach((id, i) => {
       const to = this.figures.get(id)
       if (to) this.flights.push(new Flight(this, spell, from, to, seconds, Math.min(0.12, i * 0.04)))
@@ -2667,40 +3026,45 @@ class Stage {
    * signature, so what landed reads at a glance.
    */
   impact(spell, casterId, targetIds) {
-    const roles = spell.roles
-    const look = schoolLook(spell.school)
     for (const id of targetIds) {
       const to = this.figures.get(id)
-      if (!to) continue
-      const chest = to.anchor('chest')
-      const feet = to.anchor('feet')
-      const caster = this.figures.get(casterId)
-      const friendly = caster && caster.team === to.team
-      const power = 0.6 + spell.tier * 0.25
-      if (spell.flight === 'nova') this.looks.ground(feet, spell.school, 2.6 * power)
-      if (roles.includes('revive')) this.looks.pillar(feet, 'holy', 1.6)
-      else if (friendly && roles.includes('heal')) {
-        this.looks.mend(chest, spell.school)
-        this.looks.pillar(feet, spell.school, 0.6)
-      } else if (!friendly && roles.includes('damage')) {
-        this.looks.burst(chest, spell.school, power)
-        this.looks.flourish(chest, feet, spell.school, power)
-        if (spell.flight === 'fall' || spell.tier === 3) this.looks.ground(feet, spell.school, 2.2 * power)
-        if (spell.tier === 3) this.shake(0.35)
-      } else if (friendly) {
-        this.looks.spiral(chest, spell.school, true)
-        this.looks.ground(feet, spell.school, 1.4)
-      } else {
-        this.looks.implode(chest, spell.school, 24, 1.6)
-        this.looks.arrows(chest, look.main, false)
-        this.looks.flash(chest, look.main, 1.6, 0.35, 0.6)
-      }
+      if (to) this.focus.about(casterId, [casterId, id], () => this.land(spell, casterId, to))
     }
     for (const flight of this.flights) if (flight.spell === spell && flight.from.id === casterId) flight.done = true
   }
 
+  /** One target's share of an impact. */
+  land(spell, casterId, to) {
+    const roles = spell.roles
+    const look = schoolLook(spell.school)
+    const chest = to.anchor('chest')
+    const feet = to.anchor('feet')
+    const caster = this.figures.get(casterId)
+    const friendly = caster && caster.team === to.team
+    const power = 0.6 + spell.tier * 0.25
+    if (spell.flight === 'nova') this.looks.ground(feet, spell.school, 2.6 * power)
+    if (roles.includes('revive')) this.looks.pillar(feet, 'holy', 1.6)
+    else if (friendly && roles.includes('heal')) {
+      this.looks.mend(chest, spell.school)
+      this.looks.pillar(feet, spell.school, 0.6)
+    } else if (!friendly && roles.includes('damage')) {
+      this.looks.burst(chest, spell.school, power)
+      this.looks.flourish(chest, feet, spell.school, power)
+      if (spell.flight === 'fall' || spell.tier === 3) this.looks.ground(feet, spell.school, 2.2 * power)
+      if (spell.tier === 3) this.shake(0.35)
+    } else if (friendly) {
+      this.looks.spiral(chest, spell.school, true)
+      this.looks.ground(feet, spell.school, 1.4)
+    } else {
+      this.looks.implode(chest, spell.school, 24, 1.6)
+      this.looks.arrows(chest, look.main, false)
+      this.looks.flash(chest, look.main, 1.6, 0.35, 0.6)
+    }
+  }
+
+  /** Shake the camera, less for effects that are not about you. */
   shake(amount) {
-    this.shakeLevel = Math.min(1, this.shakeLevel + amount)
+    this.shakeLevel = Math.min(1, this.shakeLevel + amount * this.focus.weight)
   }
 
   // Camera and frame ─────────────────────────────────────────────────────
@@ -2790,6 +3154,7 @@ class Stage {
   render(dt) {
     this.govern()
     this.time += dt
+    this.focus.refill(dt)
     this.shared.uTime.value = this.time
     this.shared.uSurge.value += (this.surge - this.shared.uSurge.value) * Math.min(1, dt * 2)
     for (const { mesh, phase, drift } of this.crystals) {
@@ -2817,13 +3182,151 @@ class Stage {
 
 // ─── 10 · Plates ────────────────────────────────────────────────────────────
 
-const initials = (name) =>
-  name
-    .split(/\s+/)
-    .map((word) => word[0])
-    .join('')
-    .slice(0, 2)
-    .toUpperCase()
+/** Points of a star with `count` spikes, as an SVG path, for thorns. */
+const spikes = (count, outer, inner) =>
+  Array.from({ length: count * 2 }, (_, i) => {
+    const a = (i / (count * 2)) * Math.PI * 2 - Math.PI / 2
+    const r = i % 2 ? inner : outer
+    return `${i ? 'L' : 'M'}${(12 + Math.cos(a) * r).toFixed(1)} ${(12 + Math.sin(a) * r).toFixed(1)}`
+  }).join('') + 'z'
+
+const solid = (d, extra = '') => `<path d="${d}" fill="currentColor"${extra}/>`
+const circle = (r, width = 2, extra = '') => `<circle cx="12" cy="12" r="${r}" fill="none" stroke="currentColor" stroke-width="${width}"${extra}/>`
+const eyehole = (cx, cy, r) => `<circle cx="${cx}" cy="${cy}" r="${r}" fill="#0b0820"/>`
+
+/** One small icon for every kind of aura, drawn in currentColor so the school can tint it. */
+const AURA_ICONS = {
+  flame: GLYPHS.flame,
+  flake: stroke('M12 2.5v19M3.8 7.2l16.4 9.6M3.8 16.8l16.4-9.6M9.3 4.3 12 7l2.7-2.7M9.3 19.7 12 17l2.7 2.7', 2),
+  bolt: solid('M13.5 1.8 4.8 13.6h6.1L9.4 22.2l9.8-12.6h-6.3z'),
+  drop: solid('M12 2.5c3.2 4.6 6.5 8.3 6.5 12a6.5 6.5 0 0 1-13 0c0-3.7 3.3-7.4 6.5-12z'),
+  eye: stroke('M2.5 12c2.6-4.3 5.8-6.5 9.5-6.5s6.9 2.2 9.5 6.5c-2.6 4.3-5.8 6.5-9.5 6.5S5.1 16.3 2.5 12z', 2) + '<circle cx="12" cy="12" r="3.2" fill="currentColor"/>',
+  sun: '<circle cx="12" cy="12" r="4.6" fill="currentColor"/>' + stroke('M12 1.8v3.1M12 19.1v3.1M1.8 12h3.1M19.1 12h3.1M4.8 4.8 7 7M17 17l2.2 2.2M4.8 19.2 7 17M17 7l2.2-2.2', 2.1),
+  moon: solid('M15.5 2.8a9.2 9.2 0 1 0 5.7 13.5 7.4 7.4 0 0 1-5.7-13.5z'),
+  cross: solid('M9.4 2.8h5.2v6.6h6.6v5.2h-6.6v6.6H9.4v-6.6H2.8V9.4h6.6z'),
+  stun: solid('M8 2.5l1.5 4.2 4.2 1.5-4.2 1.5L8 13.9l-1.5-4.2-4.2-1.5 4.2-1.5z') + solid('M16.6 9.6l1 2.9 2.9 1-2.9 1-1 2.9-1-2.9-2.9-1 2.9-1z') + stroke('M2.8 18.6c4.2 2.9 13.4 2.9 18.4-.6', 1.7),
+  daze: stroke('M12 12.6a1.4 1.4 0 1 1 1.4-1.4 2.9 2.9 0 0 1-2.9 2.9 4.3 4.3 0 0 1-4.3-4.3A5.8 5.8 0 0 1 12 4a7.2 7.2 0 0 1 7.2 7.2 8.6 8.6 0 0 1-8.6 8.6', 2.1),
+  sleep: stroke('M3.5 5.5h7.5l-7.5 8.5h7.5M13.5 11.5h7l-7 8h7', 2.3),
+  fear: solid('M12 2.5a7.2 7.2 0 0 1 7.2 7.2v11.2l-2.4-1.8-2.4 1.8-2.4-1.8-2.4 1.8-2.4-1.8-2.4 1.8V9.7A7.2 7.2 0 0 1 12 2.5z') + eyehole(9.4, 10, 1.5) + eyehole(14.6, 10, 1.5),
+  hush: stroke('M4 4.5h16v10.8h-9.6l-4.6 3.8v-3.8H4z', 1.9) + stroke('M3 21 21 3', 2.4),
+  haste: stroke('M4.5 5.5 11 12l-6.5 6.5M12 5.5l6.5 6.5-6.5 6.5', 2.7),
+  target: circle(7) + stroke('M12 1.5v5M12 17.5v5M1.5 12h5M17.5 12h5', 2) + '<circle cx="12" cy="12" r="1.9" fill="currentColor"/>',
+  weak: solid('M9 2.5h6v9.2h4.6L12 21.5l-7.6-9.8H9z'),
+  power: solid('M9 21.5h6v-9.2h4.6L12 2.5l-7.6 9.8H9z'),
+  helm: solid('M3.8 20.5V12a8.2 8.2 0 0 1 16.4 0v8.5h-5.8v-6.2H9.6v6.2z'),
+  shield: solid('M12 2.2l8 3v6.1c0 5-3.4 8.9-8 10.5-4.6-1.6-8-5.5-8-10.5V5.2z'),
+  stone: solid('M2.5 19.5 6.2 11l4.3-3.3 3.4 2.1 3.2-4.3 4.4 7.4-1.7 6.6z'),
+  thorns: solid(spikes(8, 10.5, 4.8)),
+  mirror: '<path d="M12 2l7.6 10L12 22 4.4 12z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>' + stroke('M9.6 9.3l2.1-2.6M8.7 13l4.6-5.6', 1.7),
+  immune: circle(9.2) + stroke('M7.2 9.2a5.4 5.4 0 0 1 4.2-3.8', 2) + '<circle cx="12" cy="12" r="2.6" fill="currentColor"/>',
+  ankh: stroke('M12 11.5c-2.7-1.6-3.9-3.4-3.9-5.4a3.9 3.9 0 0 1 7.8 0c0 2-1.2 3.8-3.9 5.4zM12 11.5V22M5.8 13.8h12.4', 2.3),
+  heart: solid('M12 20.8s-8.2-5-8.2-10.9A4.5 4.5 0 0 1 12 7.2a4.5 4.5 0 0 1 8.2 2.7c0 5.9-8.2 10.9-8.2 10.9z'),
+  flask: stroke('M8.8 2.5h6.4M10 2.5v5.3L4.6 18a2.4 2.4 0 0 0 2.1 3.5h10.6a2.4 2.4 0 0 0 2.1-3.5L14 7.8V2.5', 1.9) + solid('M7 14.6h10l1.9 3.6a1.3 1.3 0 0 1-1.2 1.9H6.3a1.3 1.3 0 0 1-1.2-1.9z'),
+  skull: solid('M12 2.5a8.2 8.2 0 0 0-8.2 8.2c0 2.6 1.2 4.7 3.1 6v3.3h10.2v-3.3c1.9-1.3 3.1-3.4 3.1-6A8.2 8.2 0 0 0 12 2.5z') + eyehole(8.9, 11, 2.1) + eyehole(15.1, 11, 2.1) + '<path d="M10.3 20v-2.2M13.7 20v-2.2" stroke="#0b0820" stroke-width="1.5"/>',
+  bomb: '<circle cx="10.5" cy="14" r="7" fill="currentColor"/>' + stroke('M15.2 8.8l2.3-2.3M17.5 6.5c.6-1.8 2-2.6 3.6-2.2', 1.8) + eyehole(8.2, 11.6, 1.6),
+  anchor: '<circle cx="12" cy="4.4" r="2" fill="none" stroke="currentColor" stroke-width="2"/>' + stroke('M12 6.4V21M7.8 10h8.4M4.6 13.6a7.4 7.4 0 0 0 14.8 0', 2.1),
+  rewind: stroke('M4.2 12a7.8 7.8 0 1 0 2.3-5.5M4.2 3.5v5h5', 2.3),
+  blight: solid('M9.4 2.8h5.2v6.6h6.6v5.2h-6.6v6.6H9.4v-6.6H2.8V9.4h6.6z', ' opacity="0.5"') + stroke('M3.5 20.5l17-17', 2.7),
+  sheep: solid('M6.6 8.6a3 3 0 0 1 5-2.1 3 3 0 0 1 5.1 1.6 3 3 0 0 1 1.5 5.5 3 3 0 0 1-3 3.5H8.3a3 3 0 0 1-3.2-3.4 3 3 0 0 1 1.5-5.1z') + stroke('M9 17.6v3.4M15 17.6v3.4', 2) + eyehole(17.6, 10.4, 1.1),
+  root: solid('M12 13.2C12 8.6 14.6 5.6 19.6 5c0 5-2.8 8-7.6 8.2zM12 13.2c0-3.6-2.2-6-6.6-6.5 0 4 2.2 6.3 6.6 6.5z') + stroke('M12 12v6.5M12 18.5l-4.2 3M12 18.5l4.2 3M12 18.5v3.5', 1.9),
+  ice: solid('M12 2l7.5 4.3v11.4L12 22l-7.5-4.3V6.3z', ' opacity="0.35"') + '<path d="M12 2l7.5 4.3v11.4L12 22l-7.5-4.3V6.3zM12 2v20M4.5 6.3 12 10.6l7.5-4.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>',
+  time: stroke('M5.8 2.5h12.4M5.8 21.5h12.4', 2) + '<path d="M7.5 3c0 4.5 4.5 6 4.5 9s-4.5 4.5-4.5 9h9c0-4.5-4.5-6-4.5-9s4.5-4.5 4.5-9z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/>' + solid('M9.4 19.6c.5-2 2.6-3.1 2.6-3.1s2.1 1.1 2.6 3.1z'),
+  banish: circle(9, 2.3, ' stroke-dasharray="3.6 2.5"') + '<circle cx="12" cy="12" r="3.6" fill="currentColor"/>',
+  boon: stroke('M5 15.5l7-7 7 7', 3),
+  bane: stroke('M5 8.5l7 7 7-7', 3),
+}
+
+/** Each aura look's icon and plain word. Damage over time takes its school's icon and word. */
+const AURA_LOOKS = {
+  hot: ['cross', 'Healing over time'],
+  stun: ['stun', 'Stun'],
+  sleep: ['sleep', 'Sleep'],
+  daze: ['daze', 'Daze'],
+  fear: ['fear', 'Fear'],
+  hush: ['hush', 'Silence'],
+  slow: ['flake', 'Chill'],
+  haste: ['haste', 'Haste'],
+  expose: ['target', 'Exposed'],
+  weak: ['weak', 'Weaken'],
+  power: ['power', 'Empower'],
+  armor: ['helm', 'Armor'],
+  shield: ['shield', 'Shield'],
+  stone: ['stone', 'Stone'],
+  thorns: ['thorns', 'Thorns'],
+  mirror: ['mirror', 'Reflect'],
+  immune: ['immune', 'Immune'],
+  cheat: ['ankh', 'Death ward'],
+  mend: ['heart', 'Mend on hit'],
+  mana: ['flask', 'Mana'],
+  doom: ['skull', 'Doom'],
+  bomb: ['bomb', 'Bomb'],
+  steady: ['anchor', 'Steady'],
+  rewind: ['rewind', 'Rewind'],
+  blight: ['blight', 'No healing'],
+  sheep: ['sheep', 'Polymorph'],
+  root: ['root', 'Root'],
+  ice: ['ice', 'Frozen'],
+  time: ['time', 'Time stop'],
+  banish: ['banish', 'Banish'],
+  boon: ['boon', 'Boon'],
+  bane: ['bane', 'Bane'],
+}
+const DOT_LOOKS = { fire: ['flame', 'Burn'], frost: ['flake', 'Frostbite'], storm: ['bolt', 'Shock'], nature: ['drop', 'Poison'], shadow: ['eye', 'Curse'], holy: ['sun', 'Holy burn'], arcane: ['moon', 'Arcane burn'] }
+
+/** [icon, word] for an aura on the field. */
+const auraLook = (aura) => (aura.look === 'dot' ? DOT_LOOKS[aura.school] : AURA_LOOKS[aura.look]) ?? AURA_LOOKS[aura.kind] ?? AURA_LOOKS.bane
+
+const auraSvg = (icon) => `<svg viewBox="0 0 24 24" aria-hidden="true">${AURA_ICONS[icon] ?? AURA_ICONS.bane}</svg>`
+
+/** Text safe inside a double-quoted attribute. */
+const attr = (text) => String(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
+
+/** An aura chip: its icon in the school's color inside a ring that empties as it runs out (green for boons, red for banes). */
+function auraChip(aura) {
+  const charges = aura.charges > 1 ? `<b>${aura.charges}</b>` : ''
+  return `<span class="aura ${aura.kind}" data-name="${attr(aura.name)}" aria-label="${attr(aura.name)}" style="--tint:var(--${aura.school ?? 'arcane'})">${auraSvg(auraLook(aura)[0])}${charges}</span>`
+}
+
+/** Banes first: they are what you cleanse, and what your reactions feed on. */
+const auraOrder = (auras) => [...auras.filter((a) => a.kind === 'bane'), ...auras.filter((a) => a.kind !== 'bane')]
+
+/**
+ * The rules of an aura on the field, found in the spell that put it there
+ * (or the reaction, for Eclipse's silence), with its real length. Null if
+ * none is known.
+ */
+function auraRules(aura) {
+  const spell = SPELL[aura.spell]
+  let rules = null
+  if (spell) {
+    walkActs(spell.acts, (act) => {
+      if (rules) return
+      if (act.op === 'mark' && (act.aura.name ?? spell.name) === aura.name) rules = act.aura
+      if (act.op === 'interrupt' && aura.name === 'Interrupted') rules = { lock: 'hush' }
+    })
+  }
+  const reaction = REACTIONS.find((r) => r.hush && r.name === aura.name)
+  if (!rules && reaction) rules = { lock: 'hush' }
+  return rules && { ...rules, name: undefined, time: Math.round((aura.total / TICK_RATE) * 10) / 10 }
+}
+
+const capitalize = (text) => text.charAt(0).toUpperCase() + text.slice(1)
+
+/** The details for an aura: what it does, from its rules, and how long it has left. */
+function auraDetail(aura) {
+  const [icon, word] = auraLook(aura)
+  const rules = auraRules(aura)
+  const school = aura.school ?? 'arcane'
+  const text = rules ? capitalize(describeAura(rules, school)) : `${word} for ${Math.round(aura.total / TICK_RATE)}s`
+  const left = Math.max(0, aura.left / TICK_RATE)
+  const spell = SPELL[aura.spell]?.name
+  const from = spell && spell !== aura.name ? `From ${spell}` : ''
+  const charges = aura.charges > 0 ? ` · ${aura.charges} ${aura.charges === 1 ? 'charge' : 'charges'}` : ''
+  return `<div class="tip-head"><span class="aura ${aura.kind}" style="--tint:var(--${school}); --left:${aura.total ? (aura.left / aura.total).toFixed(3) : 1}">${auraSvg(icon)}</span>
+      <b>${attr(aura.name)}</b><small class="${aura.kind}">${aura.kind === 'bane' ? 'Bane' : 'Boon'}</small></div>
+    <p>${attr(text)}.</p>
+    <p class="tip-meta"><span style="color:var(--${school})">${capitalize(school)}</span> · ${word} · ${left.toFixed(1)}s left${charges}${from ? `<br>${attr(from)}` : ''}</p>`
+}
 
 const SHARE_TEXT = { 1: '', 0.5: '½', 0.25: '¼', 0: '✕' }
 
@@ -2842,19 +3345,88 @@ function drBadges(state) {
   return out.join('')
 }
 
-/** Nameplates above every mage, and floating combat text. */
+/**
+ * Nameplates above every mage, and floating combat text. An aura chip shows
+ * its details on hover, or on a long press on touch screens.
+ */
 class Plates {
-  constructor(layer, floats) {
+  constructor(layer, floats, tip) {
     this.layer = layer
     this.floats = floats
+    this.tip = tip
     this.plates = new Map()
     this.pool = Array.from({ length: 48 }, () => floats.appendChild(make('div', 'float')))
     this.next = 0
     this.width = 0
+    this.tipped = null // { id, name } of the aura whose details are open
     window.addEventListener('resize', () => (this.width = 0))
+    const chipOf = (event) => event.target.closest?.('.aura')
+    // Chips are redrawn as auras change, so a mouse-opened tip also checks where the mouse is.
+    window.addEventListener('pointermove', (event) => (this.pointer = [event.clientX, event.clientY]), { passive: true })
+    layer.addEventListener('pointerover', (event) => event.pointerType !== 'touch' && chipOf(event) && this.openTip(chipOf(event), 'mouse'))
+    layer.addEventListener('pointerout', (event) => {
+      const chip = chipOf(event)
+      if (chip && event.pointerType !== 'touch' && !chip.contains(event.relatedTarget)) this.closeTip()
+    })
+    layer.addEventListener('pointerdown', (event) => {
+      const chip = chipOf(event)
+      if (!chip || event.pointerType !== 'touch') return
+      clearTimeout(this.pressTimer)
+      this.pressTimer = setTimeout(() => this.openTip(chip, 'touch'), 350)
+    })
+    for (const end of ['pointerup', 'pointercancel']) {
+      layer.addEventListener(end, (event) => {
+        if (event.pointerType !== 'touch') return
+        clearTimeout(this.pressTimer)
+        if (this.tipped) this.closeTip(1500)
+      })
+    }
+    layer.addEventListener('contextmenu', (event) => chipOf(event) && event.preventDefault())
+  }
+
+  openTip(chip, by) {
+    clearTimeout(this.tipTimer)
+    this.tipped = { id: chip.closest('.plate').dataset.id, name: chip.dataset.name, by }
+    this.tip.hidden = false
+    this.drawTip()
+  }
+
+  closeTip(delay = 0) {
+    clearTimeout(this.tipTimer)
+    this.tipTimer = setTimeout(() => {
+      this.tipped = null
+      this.tip.hidden = true
+    }, delay)
+  }
+
+  /** Refill the open details from the latest frame; they close when the aura ends. */
+  drawTip() {
+    const { id, name } = this.tipped
+    const aura = this.states?.get(id)?.auras.find((a) => a.name === name)
+    if (!aura) return this.closeTip()
+    setHtml(this.tip, auraDetail(aura))
+    this.tipSize = [this.tip.offsetWidth, this.tip.offsetHeight]
+    this.placeTip()
+  }
+
+  /** Hold the details over their chip as the plates move. */
+  placeTip() {
+    const plate = this.plates.get(this.tipped.id)
+    const chip = plate && [...plate.auras.children].find((el) => el.dataset.name === this.tipped.name)
+    if (!chip) return this.closeTip()
+    const box = chip.getBoundingClientRect()
+    const [px, py] = this.pointer ?? [-1, -1]
+    const over = px >= box.left - 4 && px <= box.right + 4 && py >= box.top - 4 && py <= box.bottom + 4
+    if (this.tipped.by === 'mouse' && !over) return this.closeTip()
+    const [width, height] = this.tipSize
+    const x = clamp(box.left + box.width / 2 - width / 2, 8, innerWidth - width - 8)
+    const y = box.top - height - 8 >= 8 ? box.top - height - 8 : box.bottom + 8
+    this.tip.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0)`
   }
 
   build(roster, me) {
+    this.tipped = null
+    this.tip.hidden = true
     this.layer.replaceChildren()
     this.plates.clear()
     for (const mage of roster) {
@@ -2869,6 +3441,7 @@ class Plates {
          <div class="plate-chord"></div>
          <div class="plate-auras"></div>`,
       )
+      el.dataset.id = mage.id
       $('.plate-name', el).textContent = mage.name
       $('.plate-tag', el).textContent = mage.id === me ? 'YOU' : mage.bot ? 'BOT' : ''
       this.layer.appendChild(el)
@@ -2894,6 +3467,7 @@ class Plates {
 
   /** Content from a frame (20 Hz). */
   fill(frame, roster) {
+    this.states = new Map(frame.mages.map((state) => [state.id, state]))
     for (const state of frame.mages) {
       const plate = this.plates.get(state.id)
       if (!plate) continue
@@ -2939,14 +3513,16 @@ class Plates {
         const metas = chord.metas.map((id) => `<i data-glyph="meta" class="${METAS[id].rune} meta" title="${METAS[id].name}">${svg('meta')}</i>`)
         plate.chord.innerHTML = metas.join('') + (chord.arming ? `<i data-glyph="meta" class="meta arming">${svg('meta')}</i>` : '') + sigilHtml(chord.runes)
       }
-      const auraSign = state.auras.map((a) => a.name).join('|')
+      const auras = auraOrder(state.auras)
+      const auraSign = auras.map((a) => `${a.name}:${a.charges}`).join('|')
       if (auraSign !== plate.sign.auras) {
         plate.sign.auras = auraSign
-        plate.auras.innerHTML = state.auras.map((a) => `<span class="aura ${a.kind}" title="${a.name}" style="color:var(--${a.school ?? 'arcane'})">${initials(a.name)}</span>`).join('')
+        plate.auras.innerHTML = auras.map(auraChip).join('')
       }
       const chips = plate.auras.children
-      state.auras.forEach((aura, i) => chips[i]?.style.setProperty('--left', (aura.left / aura.total).toFixed(3)))
+      auras.forEach((aura, i) => chips[i]?.style.setProperty('--left', (aura.left / aura.total).toFixed(3)))
     }
+    if (this.tipped) this.drawTip()
   }
 
   /**
@@ -2980,6 +3556,7 @@ class Plates {
       plate.el.style.visibility = spot.visible ? 'visible' : 'hidden'
       plate.el.classList.toggle('aimed', id === aimed)
     }
+    if (this.tipped) this.placeTip()
   }
 
   float(stage, world, text, className) {
@@ -3308,14 +3885,32 @@ function renderResult(results, roster, myTeam, owner) {
 
 // ─── 13 · Game ──────────────────────────────────────────────────────────────
 
+/** Names for garb styles in the lobby picker. */
+const GARB_TEXT = { pointed: 'Pointed', wide: 'Wide', hood: 'Hood', circlet: 'Crown', plain: 'Plain', mantle: 'Mantle', banded: 'Bands', split: 'Split', gem: 'Gem', orb: 'Orb', crook: 'Crook', branch: 'Branch' }
+
+/** The player's garb, kept across visits. A first visit is dressed at random. */
+function loadGarb() {
+  let saved = null
+  try {
+    saved = JSON.parse(memory.get('chordcast.garb'))
+  } catch {
+    /* not saved yet, or unreadable: dress anew */
+  }
+  if (saved && typeof saved === 'object') return tidyGarb(saved)
+  const garb = pickGarb(Math.floor(Math.random() * 2 ** 32))
+  memory.set('chordcast.garb', JSON.stringify(garb))
+  return garb
+}
+
 /** Client state. Messages from the host come in; visuals and HUD go out. */
 class Game {
   constructor() {
     this.link = new Link()
     this.stage = new Stage($('#stage'))
-    this.plates = new Plates($('#plates'), $('#floats'))
+    this.plates = new Plates($('#plates'), $('#floats'), $('#aura-tip'))
     this.hud = new Hud()
     this.sound = new Sound({ muted: memory.get('chordcast.sound') === 'off' })
+    this.garb = loadGarb()
     document.body.classList.toggle('muted', this.sound.muted)
     this.pads = new Pads({ onKey: (key) => this.press(key), onCommand: (name) => this.command(name), onMode: () => this.refreshLabels() })
     this.you = null
@@ -3416,6 +4011,17 @@ class Game {
         })
       }
     }
+    for (const group of $$('[data-garb]')) {
+      const part = group.dataset.garb
+      for (const style of GARB[part]) {
+        const button = make('button', '', GARB_TEXT[style])
+        button.dataset.value = style
+        button.setAttribute('role', 'radio')
+        button.addEventListener('click', () => this.dress(part, style))
+        group.appendChild(button)
+      }
+    }
+    this.showGarb()
     for (const group of $$('#rules .segmented')) {
       for (const button of $$('button', group)) {
         button.addEventListener('click', () => {
@@ -3433,7 +4039,25 @@ class Game {
     const name = raw || memory.get('chordcast.fallback') || `Mage ${Math.floor(rand(10, 99))}`
     if (!raw) memory.set('chordcast.fallback', name)
     else memory.set('chordcast.name', raw)
-    this.link.send('hello', { name })
+    this.link.send('hello', { name, garb: this.garb })
+  }
+
+  /** Pick a hat, robe or staff style; it is saved and sent at once, and the lobby's duel shows it. */
+  dress(part, style) {
+    this.garb = { ...this.garb, [part]: style }
+    memory.set('chordcast.garb', JSON.stringify(this.garb))
+    this.showGarb()
+    this.sendName()
+  }
+
+  showGarb() {
+    for (const group of $$('[data-garb]')) {
+      for (const button of $$('button', group)) {
+        const on = this.garb[group.dataset.garb] === button.dataset.value
+        button.classList.toggle('on', on)
+        button.setAttribute('aria-checked', String(on))
+      }
+    }
   }
 
   refreshLabels() {
@@ -3548,7 +4172,10 @@ class Game {
       this.results = null
       document.body.classList.remove('watching')
       renderLobby(room, this.you, this.link)
-      if (fresh || teamsChanged || document.body.dataset.view !== 'lobby') this.showDemo(room.rules.teams)
+      // The duel behind the lobby wears every seat's garb and marks yours, so a pick shows at once.
+      const looks = room.seats.flat().map((seat) => `${seat.id ?? seat.kind}:${Object.values(seat.garb ?? {}).join('.')}`).join('|')
+      if (fresh || teamsChanged || looks !== this.looks || document.body.dataset.view !== 'lobby') this.showDemo(room.rules.teams, room.seats)
+      this.looks = looks
       setView('lobby')
       if (this.quick && room.owner === this.you) {
         this.quick = false
@@ -3580,7 +4207,7 @@ class Game {
     this.kits = {}
     const roster = setup.roster
     const viewer = this.myTeam() ?? 0
-    this.stage.setRoster(roster, viewer, 'match')
+    this.stage.setRoster(roster, viewer, 'match', you)
     this.plates.build(roster, you)
     this.hud.buildBook(setup.book)
     this.hud.traySign = null
@@ -3640,7 +4267,9 @@ class Game {
     // A hidden tab draws nothing, so effects would pile up and all burst out
     // on return. Only events that change lasting state are applied.
     if (document.hidden && !LASTING_EVENTS.has(event.type)) return
-    EVENT_VISUALS[event.type]?.call(this, event)
+    // Effects are drawn about the mage that caused them, full strength when they touch you.
+    const ids = [event.mage, event.from, event.to, event.target, ...(event.targets ?? [])].filter(Boolean)
+    this.stage.focus.about(ids[0] ?? null, ids, () => EVENT_VISUALS[event.type]?.call(this, event))
     // Sound must never break the game.
     try {
       EVENT_SOUNDS[event.type]?.call(this, event)
@@ -3776,12 +4405,18 @@ class Game {
 
   // Attract mode ─────────────────────────────────────────────────────────
 
-  /** A silent demo duel behind the menus. */
-  showDemo(teams) {
-    const roster = [0, 1].flatMap((team) => Array.from({ length: teams[team] }, (_, slot) => ({ id: `d${team}${slot}`, name: '', team, slot })))
+  /**
+   * A silent demo duel behind the menus. In the lobby it wears the seats'
+   * garb (open seats keep one of their own), with a marker over yours.
+   */
+  showDemo(teams, seats = null) {
+    const seat = (team, slot) => seats?.[team]?.[slot]
+    const garb = (team, slot) => seat(team, slot)?.garb ?? pickGarb(seats ? team * 16 + slot : Math.floor(Math.random() * 2 ** 32))
+    const roster = [0, 1].flatMap((team) => Array.from({ length: teams[team] }, (_, slot) => ({ id: `d${team}${slot}`, name: '', team, slot, garb: garb(team, slot) })))
     this.stage.setRoster(roster, 0, 'attract')
     for (const figure of this.stage.figures.values()) figure.state = { auras: [], lock: null, down: false, guard: 0, cast: null }
-    this.stage.aim(null)
+    const mine = roster.find((mage) => this.you && seat(mage.team, mage.slot)?.id === this.you)
+    this.stage.aim(mine?.id ?? null)
     this.demoAt = this.stage.time + 0.6
   }
 

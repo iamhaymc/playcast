@@ -8,6 +8,8 @@ Real-time arena magic duels where every action is a chord of keys. A few moves p
 - **Draft, then fight.** Each player drafts a private kit of 8 from a 16-spell book by typing the chords.
 - **Skill on top.** Metamagic (Quicken, Twin, Empower, Extend), a timed ward that turns spells back, school reactions (Melt, Shatter, Eclipse…), a flow streak, sticky aim and team calls.
 - **Fair in big fights.** Repeat stuns diminish, and fallen mages keep playing as wisps.
+- **Readable in big fights.** Your spells and the spells aimed at you draw at full strength; the rest fade as the field fills, and each mage's particles are capped. Auras show as icons tinted by school, with a ring that runs down; hover or long-press one for what it does.
+- **Your own mage.** Pick a hat, robe and staff in the lobby so you stand out in an 8 vs 8. Casting shows: the staff rises, the free hand glows in the spell's school, and the mage thrusts and recoils as it fires.
 - **Teams of any size**, 1 vs 1 by default, up to 8 vs 8. Bots fill open seats and use every mechanic.
 - **Host and join with a code.** Share a four-letter code or a link.
 - **Keyboard, gamepad and touch** all use the same twelve keys.

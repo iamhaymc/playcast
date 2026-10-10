@@ -6,7 +6,7 @@
  * seats send `press` orders into a Match, the Match advances in fixed ticks,
  * and it emits plain events and frames that the host relays to every player.
  *
- *    1  Kit     constants, rules, timing, metamagic and reactions
+ *    1  Kit     constants, rules, timing, metamagic, reactions and garb
  *    2  Dice    seeded random numbers
  *    3  Acts    effect builders used by spells
  *    4  Lore    plain text for spells and auras
@@ -131,6 +131,37 @@ export function tidyRules(input = {}) {
     surge: wholeIn(input.surge, LIMITS.surge, RULES.surge),
     skill: SKILLS[input.skill] ? input.skill : RULES.skill,
   }
+}
+
+/**
+ * What a mage wears, picked in the lobby: a hat, a robe and a staff. Garb
+ * is looks only and never changes play; the team still sets the colors.
+ */
+export const GARB = {
+  hat: ['pointed', 'wide', 'hood', 'circlet'],
+  robe: ['plain', 'mantle', 'banded', 'split'],
+  staff: ['gem', 'orb', 'crook', 'branch'],
+}
+
+/** Any garb input made valid: unknown or missing parts become the first style. */
+export function tidyGarb(input) {
+  const garb = input && typeof input === 'object' ? input : {}
+  return Object.fromEntries(Object.entries(GARB).map(([part, styles]) => [part, styles.includes(garb[part]) ? garb[part] : styles[0]]))
+}
+
+/** A garb chosen by a whole number, so a seed gives every bot its own look. */
+export function pickGarb(seed) {
+  // Mix the bits first (murmur3's finalizer), so neighboring seeds dress differently.
+  let rest = Math.imul(seed ^ (seed >>> 16), 0x85ebca6b)
+  rest = Math.imul(rest ^ (rest >>> 13), 0xc2b2ae35)
+  rest = (rest ^ (rest >>> 16)) >>> 0
+  return Object.fromEntries(
+    Object.entries(GARB).map(([part, styles]) => {
+      const style = styles[rest % styles.length]
+      rest = Math.floor(rest / styles.length)
+      return [part, style]
+    }),
+  )
 }
 
 // ─── 2 · Dice ───────────────────────────────────────────────────────────────
@@ -890,6 +921,7 @@ function makeMage(seat, rules) {
     team: seat.team,
     slot: seat.slot,
     bot: Boolean(seat.bot),
+    garb: seat.garb,
     life: rules.life,
     lifeMax: rules.life,
     mana: TIMING.mana,
@@ -922,7 +954,7 @@ function seatRoster(roster) {
     const team = seat.team === 1 ? 1 : 0
     const slot = Number.isInteger(seat.slot) ? seat.slot : used[team]
     used[team] = Math.max(used[team], slot + 1)
-    return { id: seat.id ?? `m${i}`, name: seat.name ?? `Mage ${i + 1}`, team, slot, bot: seat.bot }
+    return { id: seat.id ?? `m${i}`, name: seat.name ?? `Mage ${i + 1}`, team, slot, bot: seat.bot, garb: tidyGarb(seat.garb) }
   })
 }
 
@@ -1602,7 +1634,7 @@ export class Match {
       fightAt: this.fightAt,
       surgeAt: this.surgeAt,
       tickRate: TICK_RATE,
-      roster: this.mages.map(({ id, name, team, slot, bot, lifeMax, manaMax }) => ({ id, name, team, slot, bot, lifeMax, manaMax })),
+      roster: this.mages.map(({ id, name, team, slot, bot, garb, lifeMax, manaMax }) => ({ id, name, team, slot, bot, garb: { ...garb }, lifeMax, manaMax })),
     }
   }
 
@@ -1633,7 +1665,7 @@ export class Match {
           guard: guardOf(m),
           down: m.down,
           lock: lockOf(m),
-          auras: m.auras.map((a) => ({ name: a.name, kind: a.kind, look: a.look, school: a.school, left: a.left, total: a.total, charges: a.charges, lock: a.def.lock ?? null })),
+          auras: m.auras.map((a) => ({ name: a.name, kind: a.kind, look: a.look, school: a.school, spell: a.spell, left: a.left, total: a.total, charges: a.charges, lock: a.def.lock ?? null })),
           cast: m.cast && { ...m.cast, metas: [...m.cast.metas] },
           queue: m.queue?.spell ?? null,
           chord: { keys: open ? [...m.chord.keys] : [], metas: open ? [...m.chord.metas] : [], cursor: m.aim },
@@ -2310,13 +2342,14 @@ const CHECKS = {
   rules: (v) => (v && typeof v === 'object' ? tidyRules(v) : null),
   skill: (v) => (SKILLS[v] ? v : null),
   token: (v) => (typeof v === 'string' && /^[\w-]{16,64}$/.test(v) ? v : null),
+  garb: (v) => (v === undefined ? undefined : tidyGarb(v)), // optional; anything else is tidied, never refused
   any: (v) => (v === undefined ? null : v),
   maybe: (v) => v ?? undefined, // optional: may be left out
 }
 
 export const WIRE = {
   peer: {
-    hello: { name: 'name' }, // set your display name
+    hello: { name: 'name', garb: 'garb' }, // set your display name and, if given, your garb
     open: { rules: 'rules' }, // host a new room
     join: { code: 'code' }, // join a room by code
     seat: { team: 'team', slot: 'slot' }, // move to an open seat

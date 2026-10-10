@@ -789,6 +789,18 @@ body:not(.muted) .when-off {
   flex: none;
 }
 
+/* Your garb: three pickers in a row, styled like the rules but for you alone. */
+.garb {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px 24px;
+}
+
+.garb .segmented button {
+  padding: 6px 9px;
+  font-size: 12px;
+}
+
 /* Each rule is a label over its control, centered in its cell, so the rows line up as columns. */
 .rules {
   display: grid;
@@ -1248,39 +1260,114 @@ body[data-phase='ready'] #plates {
   color: var(--meta);
 }
 
+/*
+ * Aura chips: an icon per look in the school's color, inside a ring that
+ * empties as the aura runs out, green for boons and red for banes.
+ */
 .aura {
+  --ring: var(--bad);
   position: relative;
   display: inline-grid;
   place-items: center;
-  height: 16px;
-  min-width: 16px;
-  padding: 0 4px;
-  border-radius: 5px;
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: 0.02em;
-  overflow: hidden;
-  background: color-mix(in srgb, currentColor 16%, rgba(10, 8, 30, 0.6));
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  color: color-mix(in srgb, var(--tint, var(--arcane)) 85%, #fff);
+  background:
+    radial-gradient(closest-side, color-mix(in srgb, var(--tint, var(--arcane)) 20%, #0b0820) calc(100% - 2.5px), transparent calc(100% - 2px)),
+    conic-gradient(var(--ring) calc(var(--left, 1) * 1turn), rgba(255, 255, 255, 0.12) 0);
+  pointer-events: auto;
+  cursor: help;
+  touch-action: none;
+  -webkit-touch-callout: none;
 }
 
 .aura.boon {
-  color: #bfffe0;
-  box-shadow: inset 0 0 0 1px rgba(77, 255, 166, 0.5);
+  --ring: var(--good);
 }
 
-.aura.bane {
-  color: #ffc4cd;
-  box-shadow: inset 0 0 0 1px rgba(255, 93, 115, 0.55);
+.aura svg {
+  width: 13px;
+  height: 13px;
 }
 
-.aura::before {
-  content: '';
+/* Charges left, as a small count at the corner. */
+.aura b {
   position: absolute;
-  inset: auto 0 0 0;
-  height: 2px;
-  background: currentColor;
-  transform-origin: 0 50%;
-  transform: scaleX(var(--left, 1));
+  right: -4px;
+  bottom: -3px;
+  min-width: 11px;
+  height: 11px;
+  padding: 0 2px;
+  border-radius: 6px;
+  font: 800 8px/11px var(--mono);
+  color: #0b0820;
+  background: var(--ink);
+}
+
+/* An aura's details, over its chip. */
+.aura-tip {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 5;
+  width: max-content;
+  max-width: min(260px, calc(100vw - 16px));
+  padding: 10px 12px;
+  border-radius: 12px;
+  pointer-events: none;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+}
+
+.aura-tip[hidden] {
+  display: none;
+}
+
+.aura-tip .tip-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.aura-tip .tip-head .aura {
+  flex: none;
+  width: 26px;
+  height: 26px;
+}
+
+.aura-tip .tip-head .aura svg {
+  width: 16px;
+  height: 16px;
+}
+
+.aura-tip .tip-head b {
+  flex: 1;
+  font-size: 13px;
+}
+
+.aura-tip .tip-head small {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--bad);
+}
+
+.aura-tip .tip-head small.boon {
+  color: var(--good);
+}
+
+.aura-tip p {
+  margin: 0;
+}
+
+.aura-tip .tip-meta {
+  margin-top: 6px;
+  color: var(--dim);
+  font-size: 11px;
 }
 
 /* Floating numbers */

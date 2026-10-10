@@ -53,6 +53,8 @@ Each mage has:
 
 All of this but the kit is visible to everyone, so you can heal, shield and cleanse teammates as easily as you hurt foes, and read who is on a streak or about to resist a stun.
 
+Each mage also wears a **garb** picked in the lobby: a hat (pointed, wide, hood or crown), a robe (plain, mantle, bands or split) and a staff (gem, orb, crook or branch). Garb is looks only and never changes play; the team still sets the colors. It lets players tell mages apart in a big fight. A first visit is dressed at random and the choice is remembered; bots dress by a seed, so each looks different.
+
 ### Keys
 
 The whole game uses twelve keys. Every input mode maps onto them.
@@ -493,7 +495,7 @@ Peer → host:
 
 | Type | Body | Who | Effect |
 |---|---|---|---|
-| `hello` | `name` | anyone | Set your name (1–16 letters, digits, spaces) |
+| `hello` | `name, garb?` | anyone | Set your name (1–16 letters, digits, spaces) and, if given, your garb (`{ hat, robe, staff }`; unknown styles become the first one, never an error) |
 | `open` | `rules` | anyone | Host a new room and join it |
 | `join` | `code` | anyone | Join a room by code |
 | `seat` | `team, slot` | anyone | Move to an open seat (lobby) |
@@ -513,7 +515,7 @@ Host → peer:
 | `welcome` | `you, token` | On connect: your peer id, and the token that takes your seat back after a drop |
 | `back` | `you` | Answer to `resume`: your old peer id, or `null` if nothing was held |
 | `moved` | | Your seat was taken back on another connection (a copied tab); stop resuming it |
-| `room` | `room` | Lobby state changed: code, owner, phase, rules, seats (with `away` for dropped players), watchers |
+| `room` | `room` | Lobby state changed: code, owner, phase, rules, seats (with `garb`, and `away` for dropped players), watchers. Bots play under the names and garb the lobby showed |
 | `begin` | `setup, you` | A match starts (or you are back in one); `you` is your mage id or `null` when watching |
 | `frame` | `frame` or `delta`, `events`, `kits?` | Every tick: your team's copy, with its private events (watchers get the public copy). `kits` only when they changed |
 | `end` | `results` | The match is over |
@@ -523,7 +525,7 @@ Host → peer:
 
 A frame is the whole changing state, so sending it every tick costs about 2 KB in 1 vs 1 and 9 KB in 8 vs 8. Instead, a peer gets one whole `frame` when it starts watching (a match begins, it joins mid-match, it comes back from a drop), then a `delta` each tick:
 
-- `packFrame` swaps each aura's countdown (`left`, which falls every tick) for the tick it ends (`end`), which holds still. `unpackFrame` turns it back.
+- `packFrame` swaps each aura's countdown (`left`, which falls every tick) for the tick it ends (`end`), which holds still. `unpackFrame` turns it back. Each aura also names the `spell` that put it there (or `null`), so the page can show its rules without sending them every tick.
 - `diff(prev, next)` lists only what changed: objects by key (removed keys in `$gone`), same-length arrays by index, anything else replaced whole. `patch(prev, delta)` applies it without touching `prev`. Keys starting with `$` are reserved.
 - The WebSocket compresses messages (`permessage-deflate`, 4 KB window).
 
@@ -582,7 +584,8 @@ Start it with `npm start`, or import it: `const host = await openHost({ port: 0 
 - The sky is a procedural nebula shader, baked once into a cube map.
 - The floor shader draws team-tinted grids, rotating rune rings and the glowing rift line. Its lines are filtered by their size on screen (`fwidth`), so distant grid lines fade instead of shimmering. A translucent curtain marks the rift itself.
 - Turned pillars with glowing bands and floating crystals ring the arena; craggy rocks drift in the distance.
-- Each mage is built from smooth shapes: a lathed robe and a hat whose tip droops (both welded for smooth normals), glowing eyes, a staff with a gem and an orbiting ring, and a chamfered hexagonal pedestal in team colors. Robes and hats get a soft rim light in the team color.
+- Each mage is built from smooth shapes: a lathed robe, a hat, glowing eyes, arms hung from shoulder pivots, a staff and a chamfered hexagonal pedestal in team colors. Robes and hats get a soft rim light in the team color. The garb picks the parts (`garbShapes`): a drooping pointed hat, a wide brim, a hood drawn into a peak, or a crown; a plain robe, one with a shoulder mantle, glowing hem bands, or split in two shades with a glowing seam; a staff topped by a gem in an orbiting ring, an orb in a claw, a crook holding a small gem, or a forked branch with glowing buds. Every style is a list of parts (geometry, paint, place), so adding one is data.
+- Casting gestures (`Figure.gesture`): while a cast fills, the staff arm lifts the staff up and out and the free arm reaches forward, its hand glowing brighter in the school's color as the cast fills. When the spell leaves, staff and hand thrust toward the target and the body rocks back. The staff always follows the hand that holds it.
 - Static parts that share a material are merged (brim and crown, both eyes), and the world shares geometry and materials, so a mage costs about twenty draw calls.
 
 ### Quality
@@ -619,6 +622,11 @@ Shapes are drawn in the fragment shader: glow, star, ring, shard, smoke, leaf, r
 
 **Marks** are points drawn fresh every frame and never kept, with the same shapes: the heads of spells in flight and the symbols that sit on a mage while a status lasts. Unlike a trail of short-lived sparks they look the same at any frame rate.
 
+**Focus** keeps big fights readable. Every effect is drawn *about* a mage (`focus.about(owner, ids, draw)`): a flight about its caster and target, an impact about the caster and that target, a status about its wearer, an event about the mages it names.
+
+- Effects that touch your own mage (your spells, spells aimed at you, your statuses) draw at full strength. The rest fade with the size of the field: `clamp(1.1 − 0.05 · mages, 0.4, 1)`, so 1 vs 1 is untouched, 4 vs 4 draws others at 70% and 8 vs 8 at 40%. Fading thins small particles, dims and shrinks them, and dims marks, floor rings, bolts and camera shake alike. Status symbols fade less (never below 75%) since they say what a mage can do. Watchers see everything at full strength.
+- Each mage has a particle budget that refills every second: 5,400 a second shared by the field, between 300 and 1,200 per mage, holding up to half a second's worth. When a mage's budget runs dry its small particles are dropped; big flashes always draw. Effects that touch you share one budget three times as large. The arena's own motes are free.
+
 ### Looks
 
 Every school owns a hue around the color wheel, and its spells carry it from the cast to the landing:
@@ -650,8 +658,8 @@ The new mechanics draw on the figure too: flow stacks as gold stars circling the
 
 | Event | Visual |
 |---|---|
-| `cast` | The school's sigil circle under the caster, growing with the cast; gem, gem glow and the plate's cast bar in the school color; school shapes rise from the circle and are drawn into the gem |
-| `fire` | Gem flash and a `Flight` timed to land on the `land` tick |
+| `cast` | The school's sigil circle under the caster, growing with the cast; the staff rises and the free hand reaches out, glowing; gem, gem glow, hand and the plate's cast bar in the school color; school shapes rise from the circle and are drawn into the gem |
+| `fire` | Gem flash, a thrust of staff and hand with a recoil, and a `Flight` timed to land on the `land` tick |
 | `land` | Impact by role: burst, school signature and shockwave (damage), rising crosses and pillar (heal), spiral and rising chevrons (boon), implosion and sinking chevrons (bane) |
 | `hit` | Flinch and a brief white flash (faint for damage over time), small burst, damage number in the school color; red vignette when you are hit hard |
 | `jump` | A forked lightning bolt between the two mages |
@@ -678,8 +686,9 @@ The HUD is laid out symmetrically around the arena:
 - Book: offense pinned to the left edge and defense to the right, both centered in the band between the top bar and the tray. While you draft they meet side by side in the middle under a title and a kit counter; tapping a row types its chord for you. When the fight starts they part to their edges and show only your kit. Each page has its own detail line, with the reactions a spell's school sets off. On narrow screens the two pages stack in one centered sheet above the tray.
 - Chord tray: centered at the bottom. The target sits on the left, the keys typed dead center (metamagic as named chips; pending keys are dimmed until the host confirms them) and the spells that still match on the right, with the shaped cost when one is left. Over it, a status row shows the ward (warm when ready, a sweep while it rests, lit while up), the flow pips and a rift shift warning; while you are a wisp the wisp book sits above that. Under it, a legend shows which key types each rune and the meta, ward, call and clear keys.
 - Match camera: behind your row, pitched so your row sits low and the foe row high. It backs off until the widest row fits between the book's pages and centers the picture in the free band between the top bar and the tray or touch pads, easing when the book opens or closes.
-- Menus: one centered card (home, lobby, results) over a silent demo duel seen side-on, one team to each side of the card.
-- Nameplates: under the feet for your row, above the halo line for the foe row; shrunk when neighbours would overlap. They show name, diminishing returns badges (½, ¼, ✕; gold for stuns, pink for silences), life with shield stripes, mana, flow pips, a cast bar in the spell's school color with its metamagic, the metamagic and runes being typed, and aura chips tinted by school with a time bar. A raised ward lights the plate; a fallen mage's plate reads WISP.
+- Menus: one centered card (home, lobby, results) over a silent demo duel seen side-on, one team to each side of the card. In the lobby the duel wears every seat's garb and the gold arrow marks yours, so a pick in the garb row under the seats shows at once.
+- Nameplates: under the feet for your row, above the halo line for the foe row; shrunk when neighbours would overlap. They show name, diminishing returns badges (½, ¼, ✕; gold for stuns, pink for silences), life with shield stripes, mana, flow pips, a cast bar in the spell's school color with its metamagic, the metamagic and runes being typed, and aura chips. A raised ward lights the plate; a fallen mage's plate reads WISP.
+- Aura chips: banes first, then boons. Each is an icon for its look (a flame for a burn, a flake for a chill, a shield, stars for a stun, a skull for doom…; damage over time takes its school's icon), tinted by the aura's school, inside a ring that empties as the aura runs out: green for boons, red for banes. Charges show as a count. Hovering a chip, or a long press on touch, opens its details: name, boon or bane, what it does (`describeAura` on the rules of the spell that put it there, with its real length), its school, time left and charges.
 - Book rows: chords in a fixed column (room for five runes) so names line up, cost after flow, target and a cooldown sweep. Rows that no longer match the typed runes dim; rows that would set off a reaction on your aimed foe show its name; rows the rift just rewrote glow.
 
 ### Local echo
@@ -710,9 +719,9 @@ The page keeps the token from `welcome` in `sessionStorage`. When the socket dro
 
 | Group | Covers |
 |---|---|
-| Core | Frame deltas rebuilding every tick of whole matches exactly, at a fraction of the size; spell list shape and size; rule clamping; book balance, chord lengths, prefix-free chords and seeding; rune and chord reading; cursor paths for both sides and the snap home; a full cast; every fizzle reason; stuns and drop; reflect, dodge and never-miss; every spell in the codex cast and landed; chord speed; each metamagic and its cost; wards, rests and never-miss; diminishing returns and grace; reactions; flow; sticky aim; calls; the draft, private kits and the early start; rift shifts; wisps; determinism; bots finishing 1v1 to 8v8; bots using every mechanic; hard beating easy; async brains; wire validation; this document listing every spell |
-| Host | Hosting, bad codes, joining by code, tuning, bots filling seats, shared books, kits and picks kept from foes, presses echoed by `seq`, leaving mid-match, match end; one whole frame then deltas, compressed; malformed paths and a match that throws; dropping, resuming, taking over a live seat and a hold running out; a connection that stops answering pings |
-| Views | A Playwright run through every screen, saved to `shots/`; sound starting, muting and unmuting; a reload mid-match taking the seat back |
+| Core | Frame deltas rebuilding every tick of whole matches exactly, at a fraction of the size; spell list shape and size; rule clamping; book balance, chord lengths, prefix-free chords and seeding; rune and chord reading; cursor paths for both sides and the snap home; a full cast; every fizzle reason; stuns and drop; reflect, dodge and never-miss; every spell in the codex cast and landed; chord speed; each metamagic and its cost; wards, rests and never-miss; diminishing returns and grace; reactions; flow; sticky aim; calls; the draft, private kits and the early start; rift shifts; wisps; determinism; bots finishing 1v1 to 8v8; bots using every mechanic; hard beating easy; async brains; wire validation; garb tidied, seeded and worn into the match; auras naming the spell that put them there; this document listing every spell |
+| Host | Hosting, bad codes, joining by code, tuning, garb in the lobby and the match (bots keep the name and garb the lobby showed), bots filling seats, shared books, kits and picks kept from foes, presses echoed by `seq`, leaving mid-match, match end; one whole frame then deltas, compressed; malformed paths and a match that throws; dropping, resuming, taking over a live seat and a hold running out; a connection that stops answering pings |
+| Views | A Playwright run through every screen, saved to `shots/`; picking garb in the lobby and wearing it into the match; aura details on hover; focus and particle budgets in 2 vs 2 and 8 vs 8; sound starting, muting and unmuting; a reload mid-match taking the seat back |
 
 Screenshots in `shots/`:
 
@@ -720,7 +729,7 @@ Screenshots in `shots/`:
 |---|---|
 | `01-home.png` | Home over the demo duel |
 | `02-guide.png` | How to play |
-| `03-lobby.png` | A new lobby with its code |
+| `03-lobby.png` | A new lobby with its code and a garb picked |
 | `04-lobby-joined.png` | A friend joined from a share link; 2 vs 2 with a bot |
 | `05-study.png` | The draft: three spells taken |
 | `06-chord.png` | Typing an empowered chord: target ring, tray and matching spells |
@@ -733,6 +742,8 @@ Screenshots in `shots/`:
 | `13-phone-study.png` | The draft on a phone |
 | `14-phone-fight.png` | Touch pads in a fight |
 | `15-watching.png` | Watching the phone's duel |
+| `16-big-fight.png` | 8 vs 8: your effects at full strength, the rest faded |
+| `17-aura.png` | An aura's details, hovered on a nameplate |
 
 The browser test uses software WebGL, so it keeps at most two pages open and freezes the one it is not driving. Pages play at the low tier; each screenshot is drawn at the top tier.
 
@@ -746,13 +757,15 @@ The browser test uses software WebGL, so it keeps at most two pages open and fre
 
 **Add an aura rule.** Read it in `Match.hurt`, `mend`, `tendAuras` or `factor`; describe it in `describeAura`; weigh it in `auraGain`.
 
-**Add a status look.** Add a row to `STATUS_LOOK` in `page.mjs`, with a `tint` and a `mark` if it should read at a glance. For a mesh, toggle it in `Figure.update`.
+**Add a status look.** Add a row to `STATUS_LOOK` in `page.mjs`, with a `tint` and a `mark` if it should read at a glance, and an icon and word in `AURA_LOOKS` (drawing the icon in `AURA_ICONS` if none fits). For a mesh, toggle it in `Figure.update`.
 
-**Add a school.** Add it to `SCHOOLS` (core); `SCHOOL_LOOK`, `HEADS`, `FLOURISH` and `SIGILS` (page); `SCHOOL_VOICES` (sound); and a `--school` color (CSS).
+**Add a school.** Add it to `SCHOOLS` (core); `SCHOOL_LOOK`, `HEADS`, `FLOURISH`, `SIGILS` and `DOT_LOOKS` (page); `SCHOOL_VOICES` (sound); and a `--school` color (CSS).
 
 **Add a sound.** Add a voice to `VOICES` in `sound.mjs` (built from `tone`, `hiss`, `bell` and `pluck`) and play it from a row in `EVENT_SOUNDS` in `page.mjs`.
 
-**Add a flight.** Add its seconds to `FLIGHTS` (core) and a branch in `Flight.update` (page).
+**Add a flight.** Add its seconds to `FLIGHTS` (core) and a branch in `Flight.draw` (page).
+
+**Add a garb style.** Add its name to `GARB` (core), its parts to `garbShapes` and its label to `GARB_TEXT` (page). A staff needs one part painted `gem`, where spells leave from; a hat needs a `crest` for the nimbus.
 
 **Add an input mode.** Turn its events into the twelve keys in `Pads` and add labels in `LABELS`.
 
