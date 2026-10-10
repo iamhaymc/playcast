@@ -14,7 +14,7 @@
  *    8  Flight   one spell in the air
  *    9  Stage    scene, camera, world and the render loop
  *   10  Plates   nameplates and floating numbers
- *   11  Hud      clock, banner, book and chord tray
+ *   11  Hud      clock, banner, book, chord tray, ward and flow
  *   12  Views    home, lobby and results screens
  *   13  Game     client state: messages in, effects out
  *   14  Boot
@@ -26,7 +26,10 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js'
-import { AIM_TEXT, CODEX, LAYOUT, MOVES, RULES, RUNES, SPELL, TEAMS, TICK_MS, TICK_RATE, dampenAt, moveCursor, pack, place, readRunes, walkActs } from '/core.mjs'
+import {
+  AIM_TEXT, CODEX, DIMINISH, LAYOUT, METAS, META_OF_RUNE, MOVES, REACTIONS, RULES, RUNES, SPELL, TEAMS, TICK_MS, TICK_RATE, TIMING,
+  costOf, dampenAt, moveCursor, pack, place, reactionOn, readChord, readRunes, walkActs,
+} from '/core.mjs'
 
 // ─── 1 · Kit ────────────────────────────────────────────────────────────────
 
@@ -86,6 +89,9 @@ const GLYPHS = {
   left: stroke('M15.5 5l-7 7 7 7', 3),
   right: stroke('M8.5 5l7 7-7 7', 3),
   close: stroke('M6.5 6.5l11 11M17.5 6.5l-11 11', 2.4),
+  meta: '<path d="M12 2.5l1.6 5.2 5.2-2.3-2.3 5.2 5.2 1.6-5.2 1.6 2.3 5.2-5.2-2.3L12 21.5l-1.6-5.2-5.2 2.3 2.3-5.2L2.3 12l5.2-1.6-2.3-5.2 5.2 2.3z" fill="currentColor"/>',
+  ward: '<path d="M12 2.2l8 3v6.1c0 5-3.4 8.9-8 10.5-4.6-1.6-8-5.5-8-10.5V5.2z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/><path d="M12 6.5v10M8 10.5h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+  call: stroke('M5 21V3.5M5 4h11.5l-2.4 4 2.4 4H5', 2.2),
   book: stroke('M3 5.5c3-1.5 6-1.5 9 .5 3-2 6-2 9-.5v13c-3-1.5-6-1.5-9 .5-3-2-6-2-9-.5zM12 6v13.5', 1.9),
   help: stroke('M9.2 9.2a2.9 2.9 0 1 1 4.2 2.6c-.9.5-1.4 1.2-1.4 2.2M12 17.6v.1', 2.2) + '<circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/>',
   keys: stroke('M3 7h18v11H3zM7 11h.01M11 11h.01M15 11h.01M8 14.5h8', 1.8),
@@ -102,20 +108,27 @@ function paintGlyphs(root = document) {
 
 /** Key labels for each input mode. */
 const LABELS = {
-  keys: { up: 'W', left: 'A', right: 'D', down: 'S', star: 'I', wave: 'J', flame: 'L', leaf: 'K', drop: '␣' },
-  pad: { up: '↑', left: '←', right: '→', down: '↓', star: 'Y', wave: 'X', flame: 'B', leaf: 'A', drop: 'LB' },
+  keys: { up: 'W', left: 'A', right: 'D', down: 'S', star: 'I', wave: 'J', flame: 'L', leaf: 'K', meta: 'U', ward: '␣', call: 'E', drop: 'Q' },
+  pad: { up: '↑', left: '←', right: '→', down: '↓', star: 'Y', wave: 'X', flame: 'B', leaf: 'A', meta: 'RB', ward: 'RT', call: 'LT', drop: 'LB' },
   touch: {},
 }
 
 let inputMode = 'keys'
-const CLEAR_KEY = { keys: 'Space', pad: 'LB' }
 
-/** A key chip: a rune or a move glyph, labeled for the current input mode. */
+/** A key chip: a rune, a move or the meta glyph, labeled for the current input mode. */
 function keyChip(key, extra = '') {
-  const kind = RUNES.includes(key) ? `rune ${key}` : 'move'
+  const kind = RUNES.includes(key) ? `rune ${key}` : key === 'meta' ? 'meta' : 'move'
   const label = LABELS[inputMode][key]
   return `<span class="key ${kind} ${extra}" data-glyph="${key}"${label ? ` data-label="${label}"` : ''}>${svg(key)}</span>`
 }
+
+/** A metamagic chip: its name in its rune's color. */
+function metaChip(id, extra = '') {
+  return `<span class="meta-chip ${METAS[id].rune} ${extra}" title="${METAS[id].text}">${svg('meta')}${METAS[id].name}</span>`
+}
+
+/** Rune glyphs for a chord, as the book and plates show them. */
+const sigilHtml = (sigil) => sigil.map((rune) => `<i data-glyph="${rune}" class="${rune}">${svg(rune)}</i>`).join('')
 
 const TEAM_GLOW = ['#3ee6ff', '#ff4fb8']
 const TEAM_ROBE = ['#16607e', '#7c1d5c']
@@ -377,14 +390,15 @@ class Link {
 
 const KEY_CODES = {
   KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down', KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right',
-  KeyI: 'star', KeyJ: 'wave', KeyL: 'flame', KeyK: 'leaf', Space: 'drop', Backspace: 'drop',
+  KeyI: 'star', KeyJ: 'wave', KeyL: 'flame', KeyK: 'leaf', KeyU: 'meta', Space: 'ward', KeyE: 'call', KeyQ: 'drop', Backspace: 'drop',
 }
-const PAD_BUTTONS = { 12: 'up', 13: 'down', 14: 'left', 15: 'right', 3: 'star', 2: 'wave', 1: 'flame', 0: 'leaf', 4: 'drop', 5: 'drop' }
+const PAD_BUTTONS = { 12: 'up', 13: 'down', 14: 'left', 15: 'right', 3: 'star', 2: 'wave', 1: 'flame', 0: 'leaf', 4: 'drop', 5: 'meta', 6: 'call', 7: 'ward' }
 const PAD_COMMANDS = { 9: 'book', 8: 'guide' }
 
 /**
  * Turns keyboard, gamepad and touch input into the same small set of keys:
- * four moves, four runes and drop. `onKey(key)` gets game keys,
+ * four moves, four runes, meta, ward, call and drop. On a keyboard, Shift
+ * with a rune is meta then that rune. `onKey(key)` gets game keys,
  * `onCommand(name)` gets UI commands, `onMode(mode)` gets input changes.
  */
 class Pads {
@@ -428,6 +442,7 @@ class Pads {
     event.preventDefault()
     if (event.repeat) return
     this.setMode('keys')
+    if (event.shiftKey && RUNES.includes(key)) this.onKey('meta')
     this.onKey(key)
   }
 
@@ -1447,7 +1462,7 @@ const STATUS_LOOK = {
   weak: { rate: 3, shape: 'chevron', color: '#8f86b8', where: 'crown', motion: 'sink', tint: '#6f6a90' },
   power: { rate: 4, shape: 'chevron', color: '#ff7a2e', where: 'feet', motion: 'climb', tint: '#ff6a2a' },
   armor: { rate: 2, shape: 'ring', color: '#9ec9ff', where: 'chest', motion: 'still', tint: '#7fb2ff' },
-  ward: { rate: 3, shape: 'star', color: '#e2f0ff', where: 'chest', motion: 'orbit' },
+  shield: { rate: 3, shape: 'star', color: '#e2f0ff', where: 'chest', motion: 'orbit' },
   stone: { rate: 6, shape: 'smoke', color: '#8a8478', where: 'feet', motion: 'drift', haze: true },
   thorns: { rate: 8, shape: 'shard', color: '#7dff3a', where: 'chest', motion: 'burst', tint: '#5ee03a' },
   mirror: { rate: 3, shape: 'spark', color: '#e0e8ff', where: 'chest', motion: 'orbit', mark: { shape: 'shard', color: '#dfe8ff', size: 0.42, count: 2, radius: 0.85, spin: 2.2 } },
@@ -1651,6 +1666,9 @@ const MARK_SPOT = new THREE.Vector3()
 const TOWARD = new THREE.Vector3()
 const BASE_TEXT = new THREE.Color('#1b1e3a')
 const TINTS = { flash: new THREE.Color('#ffffff'), stone: new THREE.Color('#8a8478'), time: new THREE.Color('#ffd166') }
+const FLOW_COLOR = new THREE.Color('#ffc94a')
+const CALL_COLOR = new THREE.Color('#ff5a3c')
+const WISP_CORE = new THREE.Color('#f2f6ff')
 
 /** One mage on the field: model, idle motion, casting, hits and statuses. */
 class Figure {
@@ -1668,6 +1686,9 @@ class Figure {
     this.fallen = 0
     this.lift = 0
     this.emit = {}
+    this.wardUntil = 0
+    this.calledUntil = 0
+    this.wisp = new THREE.Vector3()
 
     const glow = new THREE.Color(TEAM_GLOW[mage.team]).offsetHSL(((mage.slot % 3) - 1) * 0.03, 0, 0)
     const robe = new THREE.Color(TEAM_ROBE[mage.team]).offsetHSL(((mage.slot % 3) - 1) * 0.04, 0, 0)
@@ -1787,6 +1808,8 @@ class Figure {
 
   /** World points on the mage. `crown` circles the hat; `top` clears the halo, for the far row's plate. */
   anchor(name, out = new THREE.Vector3()) {
+    // A fallen mage casts from its wisp, which floats over the body.
+    if (name === 'gem' && this.state?.down) return out.copy(this.wisp)
     if (name === 'gem') return this.gem.getWorldPosition(out)
     const heights = { top: 3.5, head: 3.05, crown: 2.62, chest: 1.3, feet: SEAT_Y, body: 1.1 }
     out.copy(this.root.position)
@@ -1816,6 +1839,21 @@ class Figure {
     this.halo.material.color.copy(look.main)
     this.stage.looks.flash(this.anchor('gem'), look.main, 1.3, 0.22, 0.6)
     this.flare = 1
+  }
+
+  /** A ward goes up: a bright shell for its short window. */
+  raiseWard() {
+    this.wardUntil = this.stage.time + TIMING.ward
+    this.stage.looks.flash(this.anchor('chest'), new THREE.Color('#fff2c4'), 1.4, 0.25, 0.7)
+  }
+
+  /** A parry: the shell flares and throws off golden shards. */
+  parry() {
+    this.wardUntil = this.stage.time + 0.25
+    const chest = this.anchor('chest')
+    this.stage.looks.shatter(chest, new THREE.Color('#ffe9a8'), 22)
+    this.stage.looks.flash(chest, new THREE.Color('#fff6d8'), 2.6, 0.35, 0.9)
+    this.stage.rings.spawn({ at: this.anchor('feet'), radius: 3.2, color: new THREE.Color('#ffd166'), life: 0.5, thick: 0.1, time: this.stage.sparks.time })
   }
 
   /** Flinch from a hit. Damage over time ticks flinch less and barely flash. */
@@ -1884,18 +1922,36 @@ class Figure {
 
     const guard = (state?.guard ?? 0) > 0
     const immune = looks.has('immune') || looks.has('banish')
-    this.bubble.visible = (guard || immune) && !down
+    const warded = Boolean(state?.ward) || this.stage.time < this.wardUntil
+    this.bubble.visible = (guard || immune || warded) && !down
     if (this.bubble.visible) {
       const uniforms = this.bubble.material.uniforms
-      uniforms.uColor.value.set(looks.has('banish') ? '#b45cff' : immune ? '#ffc93d' : looks.has('stone') ? '#c9b98f' : '#7cc4ff')
+      uniforms.uColor.value.set(warded ? '#fff0b8' : looks.has('banish') ? '#b45cff' : immune ? '#ffc93d' : looks.has('stone') ? '#c9b98f' : '#7cc4ff')
       uniforms.uTime.value = time
-      uniforms.uPower.value = 0.6 + this.kick * 0.6
+      uniforms.uPower.value = warded ? 1.6 : 0.6 + this.kick * 0.6
     }
 
     if (casting && !down) this.emitCast(dt, castShare)
     if (state && !down) {
       this.emitStatus(dt, state)
       this.drawMarks(time, state)
+    }
+    if (down && this.stage.mode === 'match') this.drift(dt, time)
+    if (this.stage.time < this.calledUntil) {
+      const left = (this.calledUntil - this.stage.time) / TIMING.call
+      this.stage.marks.draw({ at: this.anchor('top', MARK_AT), color: CALL_COLOR, size: 1.05 + Math.sin(time * 6) * 0.08, shape: 'target', angle: time * 0.8, alpha: 0.5 + 0.5 * Math.min(1, left * 4) })
+    }
+  }
+
+  /** A fallen mage floats over its body as a wisp in its team's color. */
+  drift(dt, time) {
+    const feet = this.anchor('feet')
+    this.wisp.set(feet.x + Math.sin(time * 0.9 + this.phase) * 0.25, 2.3 + Math.sin(time * 1.7 + this.phase) * 0.18, feet.z)
+    const marks = this.stage.marks
+    marks.draw({ at: this.wisp, color: this.glow, size: 1.1 + Math.sin(time * 3) * 0.08, shape: 'glow', alpha: 0.7 })
+    marks.draw({ at: this.wisp, color: WISP_CORE, size: 0.42, shape: 'glow', alpha: 0.95 })
+    if (Math.random() < dt * 14) {
+      this.stage.sparks.emit({ at: point(this.wisp), offset: [rand(-0.2, 0.2), rand(-0.2, 0.2), rand(-0.2, 0.2)], velocity: [rand(-0.15, 0.15), rand(0.3, 0.7), rand(-0.15, 0.15)], color: this.glow, size: rand(0.06, 0.14), life: rand(0.6, 1), shape: 'glow' })
     }
   }
 
@@ -1951,9 +2007,19 @@ class Figure {
     }
   }
 
-  /** Status symbols for this frame: they last exactly as long as the status. */
+  /** Status symbols for this frame: they last exactly as long as the status. Flow stacks circle the feet. */
   drawMarks(time, state) {
     const marks = this.stage.marks
+    const flow = state.flow ?? 0
+    if (flow) {
+      const feet = this.anchor('feet', MARK_AT)
+      const full = flow >= TIMING.flow
+      for (let k = 0; k < flow; k++) {
+        const a = time * (full ? 2.6 : 1.4) + (k / flow) * Math.PI * 2 + this.phase
+        MARK_SPOT.set(feet.x + Math.cos(a) * 1.05, feet.y + 0.35, feet.z + Math.sin(a) * 1.05)
+        marks.draw({ at: MARK_SPOT, color: FLOW_COLOR, size: full ? 0.34 : 0.24, shape: 'star', angle: time * 2, alpha: full ? 1 : 0.8 })
+      }
+    }
     for (const aura of state.auras) {
       const mark = STATUS_LOOK[aura.look]?.mark
       if (!mark) continue
@@ -2565,11 +2631,15 @@ class Stage {
     return this.figures.get(id)
   }
 
-  /** Point the gold target cursor at a mage, or hide it. */
-  aim(id) {
+  /** Point the gold target cursor at a mage, or hide it. It burns brighter while a chord is being typed. */
+  aim(id, bright = true) {
     const figure = id && this.figures.get(id)
     this.cursor.visible = Boolean(figure)
-    if (figure) this.cursor.position.copy(figure.root.position)
+    if (!figure) return
+    this.cursor.position.copy(figure.root.position)
+    const { ring, arrow } = this.cursor.userData
+    ring.material.opacity = bright ? 1 : 0.4
+    arrow.visible = bright
   }
 
   // Spell visuals ────────────────────────────────────────────────────────
@@ -2748,6 +2818,23 @@ const initials = (name) =>
     .slice(0, 2)
     .toUpperCase()
 
+const SHARE_TEXT = { 1: '', 0.5: '½', 0.25: '¼', 0: '✕' }
+
+/**
+ * Diminishing returns at a glance: how much of the next stun or sleep (gold)
+ * and the next silence (pink) would land. ✕ means none would.
+ */
+function drBadges(state) {
+  const [lock = 0, hush = 0] = state.dr ?? []
+  const badge = (group, share, what) => `<b class="dr ${group}" title="Next ${what}: ${share ? `${share * 100}%` : 'resisted'}">${SHARE_TEXT[share]}</b>`
+  const out = []
+  const lockShare = state.grace ? 0 : (DIMINISH[lock] ?? 0)
+  if (lockShare < 1) out.push(badge('lock', lockShare, 'stun or sleep'))
+  const hushShare = DIMINISH[hush] ?? 0
+  if (hushShare < 1) out.push(badge('hush', hushShare, 'silence'))
+  return out.join('')
+}
+
 /** Nameplates above every mage, and floating combat text. */
 class Plates {
   constructor(layer, floats) {
@@ -2767,9 +2854,10 @@ class Plates {
       const el = make(
         'div',
         `plate team-${mage.team}${mage.id === me ? ' me' : ''}`,
-        `<div class="plate-head"><span class="plate-name"></span><span class="plate-tag"></span></div>
-         <div class="bar life"><i class="ghost"></i><i class="fill"></i><i class="ward"></i><b></b></div>
+        `<div class="plate-head"><span class="plate-name"></span><span class="plate-dr"></span><span class="plate-tag"></span></div>
+         <div class="bar life"><i class="ghost"></i><i class="fill"></i><i class="guard"></i><b></b></div>
          <div class="bar mana"><i class="fill"></i></div>
+         <div class="plate-flow">${'<i></i>'.repeat(TIMING.flow)}</div>
          <div class="plate-cast"><i class="fill"></i><span></span></div>
          <div class="plate-chord"></div>
          <div class="plate-auras"></div>`,
@@ -2782,15 +2870,17 @@ class Plates {
         mage,
         life: $('.life .fill', el),
         ghost: $('.life .ghost', el),
-        ward: $('.life .ward', el),
+        guard: $('.life .guard', el),
         lifeBar: $('.bar.life', el),
         number: $('.life b', el),
         mana: $('.mana .fill', el),
+        flow: $('.plate-flow', el),
+        dr: $('.plate-dr', el),
         castFill: $('.plate-cast .fill', el),
         castText: $('.plate-cast span', el),
         chord: $('.plate-chord', el),
         auras: $('.plate-auras', el),
-        sign: { auras: '', chord: '', cast: '' },
+        sign: { auras: '', chord: '', cast: '', dr: '' },
       })
     }
   }
@@ -2804,29 +2894,43 @@ class Plates {
       const share = state.life / mage.lifeMax
       plate.life.style.width = `${share * 100}%`
       plate.ghost.style.width = `${share * 100}%`
-      plate.ward.style.width = `${Math.min(1, state.guard / mage.lifeMax) * 100}%`
+      plate.guard.style.width = `${Math.min(1, state.guard / mage.lifeMax) * 100}%`
       plate.lifeBar.classList.toggle('low', share < 0.3)
-      setText(plate.number, state.down ? 'DOWN' : state.life)
+      setText(plate.number, state.down ? 'WISP' : state.life)
       plate.mana.style.width = `${(state.mana / mage.manaMax) * 100}%`
       plate.el.classList.toggle('down', state.down)
       plate.el.classList.toggle('casting', Boolean(state.cast))
+      plate.el.classList.toggle('warded', Boolean(state.ward))
+      const flow = state.flow ?? 0
+      if (plate.flow.dataset.flow !== String(flow)) {
+        plate.flow.dataset.flow = flow
+        ;[...plate.flow.children].forEach((pip, i) => pip.classList.toggle('on', i < flow))
+        plate.flow.classList.toggle('full', flow >= TIMING.flow)
+      }
+      const drSign = state.down ? '' : `${state.dr?.join()}|${state.grace}`
+      if (drSign !== plate.sign.dr) {
+        plate.sign.dr = drSign
+        plate.dr.innerHTML = state.down ? '' : drBadges(state)
+      }
       const castSign = state.cast ? `${state.cast.spell}>${state.cast.target}` : ''
       if (castSign !== plate.sign.cast) {
         plate.sign.cast = castSign
         if (state.cast) {
           const spell = SPELL[state.cast.spell]
           const target = roster.find((m) => m.id === state.cast.target)
-          plate.castText.textContent = `${spell.name}${target && target.id !== state.id ? ` → ${target.name}` : ''}`
+          const shaped = (state.cast.metas ?? []).map((id) => METAS[id].name).join(' ')
+          plate.castText.textContent = `${shaped ? `${shaped} ` : ''}${spell.name}${target && target.id !== state.id ? ` → ${target.name}` : ''}`
           // The cast bar and the plate's edge take the school's color, like the circle under the caster.
           plate.el.style.setProperty('--cast', `var(--${spell.school})`)
         }
       }
       if (state.cast) plate.castFill.style.width = `${(state.cast.done / state.cast.total) * 100}%`
-      const runes = state.chord.keys.filter((key) => RUNES.includes(key))
-      const chordSign = runes.join(',')
+      const chord = readChord(state.chord.keys)
+      const chordSign = `${chord.metas.join()}|${chord.runes.join()}|${chord.arming}`
       if (chordSign !== plate.sign.chord) {
         plate.sign.chord = chordSign
-        plate.chord.innerHTML = runes.map((rune) => `<i data-glyph="${rune}" class="${rune}">${svg(rune)}</i>`).join('')
+        const metas = chord.metas.map((id) => `<i data-glyph="meta" class="${METAS[id].rune} meta" title="${METAS[id].name}">${svg('meta')}</i>`)
+        plate.chord.innerHTML = metas.join('') + (chord.arming ? `<i data-glyph="meta" class="meta arming">${svg('meta')}</i>` : '') + sigilHtml(chord.runes)
       }
       const auraSign = state.auras.map((a) => a.name).join('|')
       if (auraSign !== plate.sign.auras) {
@@ -2900,14 +3004,16 @@ const clockText = (seconds) => {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
-/** Clock, banner, the book panel and the chord tray. */
+/** Clock, banner, the book panel, the chord tray and its status row. */
 class Hud {
   constructor() {
     this.rows = new Map()
     this.banner = $('#banner')
     this.bannerTimer = 0
+    this.onPick = null // (spellId) when a row is tapped
   }
 
+  /** Every spell in the book with its chord. During the draft, tapping a row takes it. */
   buildBook(book) {
     this.rows.clear()
     for (const kind of ['offense', 'defense']) $(`#book-${kind}`).replaceChildren()
@@ -2919,12 +3025,14 @@ class Hud {
         'li',
         'spell',
         `<span class="school" style="background:var(--${spell.school})"></span>
-         <span class="sigil">${entry.sigil.map((rune) => `<i data-glyph="${rune}" class="${rune}">${svg(rune)}</i>`).join('')}</span>
+         <span class="sigil">${sigilHtml(entry.sigil)}</span>
          <span class="name"><b>${spell.name}</b><small>${AIM_TEXT[spell.aim]}${reach} · ${cast} · ${spell.cool}s</small></span>
          <span class="cost">${spell.cost}</span>
+         <span class="react"></span>
          <span class="cool"></span>`,
       )
-      const detail = `<b>${spell.name}</b> · ${spell.cost} mana · ${cast} · ${spell.cool}s cooldown<br>${spell.text}`
+      const reactions = REACTIONS.filter((r) => r.hit === spell.school && spell.roles.includes('damage')).map((r) => `<br><small>${r.name}: ${r.text}</small>`)
+      const detail = `<b>${spell.name}</b> · ${spell.cost} mana · ${cast} · ${spell.cool}s cooldown<br>${spell.text}${reactions.join('')}`
       const list = $(`#book-${spell.kind}`)
       const note = $('.detail', list.closest('.page'))
       row.addEventListener('pointerenter', () => (note.innerHTML = detail))
@@ -2932,43 +3040,92 @@ class Hud {
         note.innerHTML = detail
         for (const other of this.rows.values()) other.row.classList.remove('picked')
         row.classList.add('picked')
+        this.onPick?.(entry.id)
       })
       list.appendChild(row)
-      this.rows.set(entry.id, { row, entry, spell, cool: $('.cool', row), glyphs: $$('.sigil i', row) })
+      this.rows.set(entry.id, { row, entry, spell, cool: $('.cool', row), cost: $('.cost', row), react: $('.react', row), sigil: $('.sigil', row), glyphs: $$('.sigil i', row), shiftedAt: -Infinity })
     }
     this.legend()
   }
 
-  /** Under the tray: which key types each rune, and how to clear a chord. */
-  legend() {
-    const labels = LABELS[inputMode]
-    const runes = RUNES.map((rune) => `<span class="legend-key"><span class="key rune ${rune}">${svg(rune)}</span><kbd>${labels[rune] ?? ''}</kbd></span>`)
-    $('#legend').innerHTML = `${runes.join('')}<span class="legend-key clear"><kbd>${CLEAR_KEY[inputMode] ?? ''}</kbd>clear</span>`
-  }
-
-  /** Book rows: cooldown sweep, mana, and the runes typed so far. */
-  updateBook(me, tick, runes) {
-    for (const { row, entry, spell, cool, glyphs } of this.rows.values()) {
-      const ready = me?.cools[spell.id] ?? 0
-      const left = Math.max(0, ready - tick)
-      cool.style.transform = `scaleX(${spell.cool ? Math.min(1, left / (spell.cool * TICK_RATE)) : 0})`
-      row.classList.toggle('poor', Boolean(me) && me.mana < spell.cost)
-      const matches = runes.length > 0 && runes.length <= entry.sigil.length && runes.every((rune, i) => entry.sigil[i] === rune)
-      row.classList.toggle('dim', runes.length > 0 && !matches)
-      glyphs.forEach((glyph, i) => glyph.classList.toggle('hit', matches && i < runes.length))
+  /** The rift rewrote some chords: redraw those rows and let them glow for a while. */
+  reshuffle(changes, now) {
+    for (const { id, sigil } of changes) {
+      const item = this.rows.get(id)
+      if (!item) continue
+      item.sigil.innerHTML = sigilHtml(sigil)
+      item.glyphs = $$('.sigil i', item.row)
+      item.shiftedAt = now
     }
   }
 
-  clock(setup, tick, phase) {
-    const fighting = tick >= setup.fightAt
-    const surging = tick >= setup.surgeAt
-    const label = phase === 'over' ? 'Over' : !fighting ? 'Study' : surging ? 'Surge' : 'Fight'
+  /** Under the tray: which key types each rune, and the other keys. */
+  legend() {
+    const labels = LABELS[inputMode]
+    const runes = RUNES.map((rune) => `<span class="legend-key"><span class="key rune ${rune}">${svg(rune)}</span><kbd>${labels[rune] ?? ''}</kbd></span>`)
+    const more = [
+      ['meta', 'meta'],
+      ['ward', 'ward'],
+      ['call', 'call'],
+      ['drop', 'clear'],
+    ].map(([key, word]) => `<span class="legend-key ${key}"><kbd>${labels[key] ?? ''}</kbd>${word}</span>`)
+    $('#legend').innerHTML = `${runes.join('')}<span class="legend-more">${more.join('')}</span>`
+    setText($('#ward-key'), labels.ward ?? '')
+  }
+
+  /**
+   * Book rows: your kit (chosen while drafting; only the kit shows in the
+   * fight), cooldown sweep, cost after flow, the runes typed so far, which
+   * spells set off a reaction on the aimed foe, and chords the rift just changed.
+   */
+  updateBook({ me, tick, runes, kit, size, drafting, target, now }) {
+    const full = Boolean(kit) && kit.length >= size
+    for (const item of this.rows.values()) {
+      const { row, entry, spell, cool, glyphs } = item
+      const inKit = !kit || kit.includes(spell.id)
+      row.classList.toggle('chosen', drafting && Boolean(kit) && inKit)
+      row.classList.toggle('spare', drafting && full && !inKit)
+      row.classList.toggle('out', !drafting && !inKit)
+      const ready = me?.cools[spell.id] ?? 0
+      const left = Math.max(0, ready - tick)
+      cool.style.transform = `scaleX(${spell.cool ? Math.min(1, left / (spell.cool * TICK_RATE)) : 0})`
+      const cost = costOf(spell, [], me?.flow ?? 0)
+      setText(item.cost, cost)
+      row.classList.toggle('poor', Boolean(me) && !drafting && me.mana < cost)
+      const matches = runes.length > 0 && runes.length <= entry.sigil.length && runes.every((rune, i) => entry.sigil[i] === rune)
+      row.classList.toggle('dim', runes.length > 0 && !matches)
+      glyphs.forEach((glyph, i) => glyph.classList.toggle('hit', matches && i < runes.length))
+      const react = target && !drafting && spell.roles.includes('damage') ? reactionOn(target, spell.school) : null
+      row.classList.toggle('combo', Boolean(react))
+      setText(item.react, react ? react.reaction.name : '')
+      row.classList.toggle('shifted', now - item.shiftedAt < 6)
+    }
+  }
+
+  /** The draft header: how much of the kit is chosen. */
+  draft(kit, size) {
+    const count = $('#kit-count')
+    setText(count, kit ? `${kit.length} / ${size}` : `${size} each`)
+    count.classList.toggle('full', Boolean(kit) && kit.length >= size)
+  }
+
+  clock(frame, tick) {
+    const { fightAt, surgeAt, shiftAt, phase } = frame
+    const fighting = tick >= fightAt
+    const surging = tick >= surgeAt
+    const label = phase === 'over' ? 'Over' : !fighting ? 'Draft' : surging ? 'Surge' : 'Fight'
     setText($('#phase-label'), label)
-    setText($('#clock'), fighting ? clockText((tick - setup.fightAt) / TICK_RATE) : clockText(Math.ceil((setup.fightAt - tick) / TICK_RATE)))
-    const heal = Math.round(dampenAt(tick, setup.fightAt, setup.surgeAt) * 100)
+    setText($('#clock'), fighting ? clockText((tick - fightAt) / TICK_RATE) : clockText(Math.ceil((fightAt - tick) / TICK_RATE)))
+    const heal = Math.round(dampenAt(tick, fightAt, surgeAt) * 100)
     setText($('#heal-label'), `Heal ${heal}%`)
     const state = phase === 'over' ? 'over' : !fighting ? 'ready' : surging ? 'surge' : 'fight'
     if (document.body.dataset.phase !== state) document.body.dataset.phase = state
+    // Warn a few seconds before the rift rewrites chords.
+    const next = Math.min(shiftAt, surgeAt > tick ? surgeAt : Infinity)
+    const soon = (next - tick) / TICK_RATE
+    const chip = $('#shift-chip')
+    chip.hidden = !(phase === 'fight' && soon <= 8 && soon > 0)
+    if (!chip.hidden) setText(chip, `Rift shift ${Math.ceil(soon)}s`)
   }
 
   alive(frame, roster) {
@@ -2989,28 +3146,66 @@ class Hud {
     this.banner.className = 'banner'
   }
 
-  /** The chord tray: target, keys typed, and spells that still match. */
-  tray({ roster, me, cursor, keys, pending, book }) {
+  /** The chord tray: target, keys typed (metamagic as named chips), and spells that still match. */
+  tray({ roster, me, cursor, keys, pending, book, drafting, mine }) {
     const target = roster.find((m) => m.id === cursor)
     const chip = $('#tray-target')
-    setText(chip, !target ? '—' : target.id === me ? 'You' : target.name)
-    const chipClass = `target-chip team-${target?.team ?? 0}`
+    setText(chip, drafting ? 'Draft' : !target ? '—' : target.id === me ? 'You' : target.name)
+    const chipClass = `target-chip team-${drafting ? 'draft' : (target?.team ?? 0)}`
     if (chip.className !== chipClass) chip.className = chipClass
     const all = [...keys.map((key) => ({ key, pending: false })), ...pending.map((key) => ({ key, pending: true }))]
     const sign = all.map((k) => k.key + k.pending).join()
     if (sign !== this.traySign) {
       this.traySign = sign
-      $('#tray-keys').innerHTML = all.map(({ key, pending: wait }) => keyChip(key, wait ? 'pending' : '')).join('')
+      const chips = []
+      for (let i = 0; i < all.length; i++) {
+        const { key, pending: wait } = all[i]
+        const next = all[i + 1]
+        if (key === 'meta' && next && RUNES.includes(next.key)) {
+          chips.push(metaChip(META_OF_RUNE[next.key], wait || next.pending ? 'pending' : ''))
+          i++
+        } else chips.push(keyChip(key, `${wait ? 'pending' : ''} ${key === 'meta' ? 'arming' : ''}`))
+      }
+      $('#tray-keys').innerHTML = chips.join('')
     }
-    const runes = all.map((k) => k.key).filter((key) => RUNES.includes(key))
+    const read = readChord(all.map((k) => k.key))
     const hint = $('#tray-hint')
-    if (!runes.length) {
-      setHtml(hint, all.length ? 'Now the runes' : 'Move to aim, then runes')
-      return runes
+    if (!read.runes.length) {
+      setHtml(hint, drafting ? 'Type a chord to take it' : mine?.down ? 'Wisp: aim, then a wisp chord' : all.length ? 'Now the runes' : 'Aim, then runes')
+      return read.runes
     }
-    const options = book.filter((entry) => runes.every((rune, i) => entry.sigil[i] === rune) && entry.sigil.length > runes.length).slice(0, 3)
-    setHtml(hint, options.length ? options.map((entry) => `<b>${SPELL[entry.id].name}</b>`).join(' · ') : 'No match')
-    return runes
+    const options = book.filter((entry) => read.runes.every((rune, i) => entry.sigil[i] === rune) && entry.sigil.length > read.runes.length).slice(0, 3)
+    const cost = options.length === 1 && read.metas.length && mine ? ` <small>${costOf(SPELL[options[0].id], read.metas, mine.flow)} mana</small>` : ''
+    setHtml(hint, options.length ? options.map((entry) => `<b>${SPELL[entry.id].name}</b>`).join(' · ') + cost : 'No match')
+    return read.runes
+  }
+
+  /** The status row over the tray: the ward and its rest, flow pips. */
+  status(mine, tick) {
+    const ward = $('#ward-chip')
+    const left = Math.max(0, mine.wardReady - tick)
+    ward.classList.toggle('up', Boolean(mine.ward))
+    ward.classList.toggle('ready', left <= 0 && !mine.down)
+    ward.style.setProperty('--rest', left > 0 ? (left / (TIMING.wardCool * TICK_RATE)).toFixed(3) : '0')
+    const meter = $('#flow-meter')
+    if (meter.dataset.flow !== String(mine.flow)) {
+      meter.dataset.flow = mine.flow
+      $$('i', meter).forEach((pip, i) => pip.classList.toggle('on', i < mine.flow))
+      meter.classList.toggle('full', mine.flow >= TIMING.flow)
+    }
+  }
+
+  /** While you are a wisp, the wisp book sits over the tray. */
+  wisps(entries, show) {
+    const panel = $('#wisp-book')
+    if (panel.hidden !== !show) panel.hidden = !show
+    if (!show) return
+    const sign = entries.map((entry) => entry.id + entry.sigil.join()).join('|')
+    if (sign === this.wispSign) return
+    this.wispSign = sign
+    $('#wisp-spells').innerHTML = entries
+      .map((entry) => `<span class="wisp-spell" title="${SPELL[entry.id].text}"><span class="sigil">${sigilHtml(entry.sigil)}</span><b>${SPELL[entry.id].name}</b></span>`)
+      .join('')
   }
 
   pulse(className) {
@@ -3070,7 +3265,7 @@ function renderLobby(room, you, link) {
   $('#rules').classList.toggle('locked', !owner)
   $('[data-rule="team0"] b').textContent = rules.teams[0]
   $('[data-rule="team1"] b').textContent = rules.teams[1]
-  for (const field of ['book', 'life', 'surge', 'skill']) {
+  for (const field of ['book', 'kit', 'life', 'surge', 'skill']) {
     for (const button of $$(`[data-rule="${field}"] button`)) button.classList.toggle('on', String(rules[field]) === button.dataset.value)
   }
   $('#start-button').hidden = !owner
@@ -3090,13 +3285,13 @@ function renderResult(results, roster, myTeam, owner) {
   $('#result-title').textContent = title
   $('#result-sub').textContent = `Match over · ${clockText(results.ticks / TICK_RATE)}`
   const best = {}
-  for (const field of ['dealt', 'healed', 'taken', 'casts']) best[field] = Math.max(...results.mages.map((m) => m[field]))
+  for (const field of ['dealt', 'healed', 'taken', 'casts', 'parries', 'combos']) best[field] = Math.max(...results.mages.map((m) => m[field] ?? 0))
   const rows = [...results.mages].sort((a, b) => a.team - b.team || b.dealt - a.dealt)
   $('#result-rows').innerHTML = rows
     .map((m) => {
-      const cell = (field) => `<td class="${m[field] === best[field] && m[field] > 0 ? 'best' : ''}">${m[field]}</td>`
+      const cell = (field) => `<td class="${m[field] === best[field] && m[field] > 0 ? 'best' : ''}">${m[field] ?? 0}</td>`
       const name = `${m.name}${m.bot ? ' <small>bot</small>' : ''}`
-      return `<tr class="team-${m.team}"><td>${name}</td>${cell('dealt')}${cell('healed')}${cell('taken')}${cell('casts')}<td>${m.fizzles}</td></tr>`
+      return `<tr class="team-${m.team}"><td>${name}</td>${cell('dealt')}${cell('healed')}${cell('taken')}${cell('casts')}${cell('parries')}${cell('combos')}<td>${m.fizzles}</td></tr>`
     })
     .join('')
   $('#again-button').hidden = !owner
@@ -3122,9 +3317,11 @@ class Game {
     this.frameAt = 0
     this.pending = []
     this.seq = 0
+    this.kits = {}
     this.quick = false
     this.demoAt = 0
     this.last = performance.now()
+    this.hud.onPick = (id) => this.tapPick(id)
 
     this.link
       .on('welcome', (m) => this.onWelcome(m))
@@ -3290,22 +3487,26 @@ class Game {
     this.results = null
     this.frame = null
     this.pending = []
+    this.kits = {}
     const roster = setup.roster
     const viewer = this.myTeam() ?? 0
     this.stage.setRoster(roster, viewer, 'match')
     this.plates.build(roster, you)
     this.hud.buildBook(setup.book)
     this.hud.traySign = null
+    const { book, kit } = setup.rules
+    setText($('#kit-note'), you ? `New chords this match. Type a spell's chord, or tap it, to take it. Pick ${kit} of ${book}.` : `The players are drafting ${kit} of ${book} spells each.`)
     document.body.classList.toggle('watching', !you)
     document.activeElement?.blur?.()
     setView('match')
     this.hud.hush()
   }
 
-  onFrame({ frame, events }) {
+  onFrame({ frame, events, kits }) {
     if (!this.setup) return
     this.frame = frame
     this.frameAt = performance.now()
+    if (kits) this.kits = kits
     const mine = this.mine()
     if (mine) this.pending = this.pending.filter((p) => p.seq > mine.seq)
     const roster = this.setup.roster
@@ -3365,6 +3566,15 @@ class Game {
     this.link.send('press', { key, seq })
   }
 
+  /** Tapping a spell while drafting types its chord for you. */
+  tapPick(id) {
+    const entry = this.setup?.book.find((e) => e.id === id)
+    if (!entry || this.frame?.phase !== 'ready' || !this.me) return
+    const view = this.chordView()
+    if (view.keys.length + view.pending.length) this.press('drop')
+    for (const rune of entry.sigil) this.press(rune)
+  }
+
   // State helpers ────────────────────────────────────────────────────────
 
   myTeam() {
@@ -3383,28 +3593,39 @@ class Game {
     return this.frame.tick + Math.min(3, (performance.now() - this.frameAt) / TICK_MS)
   }
 
-  /** Server chord plus keys still in flight, replayed with core rules. */
+  /**
+   * Server chord plus keys still in flight, replayed with core rules: the aim
+   * sticks, down on your own row snaps home, meta takes the next rune, and
+   * a whole or dead chord clears. Ward and call never join a chord.
+   */
   chordView() {
     const mine = this.mine()
     if (!mine) return { keys: [], pending: [], cursor: null }
+    const drafting = this.frame.phase === 'ready'
+    const book = drafting || !mine.down ? this.setup.book : this.setup.wisps
     let cursor = mine.chord.cursor
-    let runes = mine.chord.keys.filter((key) => RUNES.includes(key))
+    let keys = mine.chord.keys
+    let { runes, arming } = readChord(keys)
     const pending = []
+    const clear = () => {
+      keys = []
+      pending.length = 0
+      runes = []
+      arming = false
+    }
     for (const { key } of this.pending) {
-      if (key === 'drop') {
-        pending.length = 0
-        cursor = this.me
-        runes = []
-        continue
-      }
+      if (key === 'drop') clear()
+      if (key === 'drop' || key === 'ward' || key === 'call' || (drafting && !RUNES.includes(key))) continue
       pending.push(key)
-      if (MOVES.includes(key)) cursor = moveCursor(this.setup.roster, this.myTeam(), cursor, key)
+      if (MOVES.includes(key)) cursor = moveCursor(this.setup.roster, this.myTeam(), cursor, key, this.me)
+      else if (key === 'meta') arming = true
+      else if (arming) arming = false
       else {
         runes.push(key)
-        if (readRunes(this.setup.book, runes) !== 'open') return { keys: [], pending: [], cursor: this.me }
+        if (readRunes(book, runes) !== 'open') clear()
       }
     }
-    return { keys: mine.chord.keys, pending, cursor }
+    return { keys, pending, cursor }
   }
 
   // Attract mode ─────────────────────────────────────────────────────────
@@ -3488,17 +3709,29 @@ class Game {
 
   drawMatch() {
     const tick = this.serverTick()
-    this.hud.clock(this.setup, tick, this.frame.phase)
+    const { frame, setup } = this
+    const drafting = frame.phase === 'ready'
+    const now = this.stage.time
+    this.hud.clock(frame, tick)
     const mine = this.mine()
+    const kit = this.me ? (this.kits[this.me] ?? []) : null
+    if (drafting) this.hud.draft(kit, setup.rules.kit)
     if (mine) {
       const view = this.chordView()
-      const runes = this.hud.tray({ roster: this.setup.roster, me: this.me, cursor: view.cursor, keys: view.keys, pending: view.pending, book: this.setup.book })
-      this.hud.updateBook(mine, tick, runes)
-      const typing = view.keys.length + view.pending.length > 0 && !mine.down && this.frame.phase === 'fight'
-      this.aimed = typing ? view.cursor : null
-      this.stage.aim(this.aimed)
+      const usable = drafting ? setup.book : mine.down ? setup.wisps : setup.book.filter((entry) => kit.includes(entry.id))
+      const runes = this.hud.tray({ roster: setup.roster, me: this.me, cursor: view.cursor, keys: view.keys, pending: view.pending, book: usable, drafting, mine })
+      const aimed = frame.mages[setup.roster.findIndex((m) => m.id === view.cursor)]
+      const foe = aimed && setup.roster.find((m) => m.id === view.cursor).team !== this.myTeam() ? aimed : null
+      this.hud.updateBook({ me: mine, tick, runes: mine.down && !drafting ? [] : runes, kit, size: setup.rules.kit, drafting, target: foe, now })
+      this.hud.status(mine, tick)
+      this.hud.wisps(setup.wisps, mine.down && frame.phase === 'fight')
+      const fighting = frame.phase === 'fight'
+      const typing = view.keys.length + view.pending.length > 0
+      // The aim sticks between chords: a faint ring always, bright while typing.
+      this.aimed = fighting && typing ? view.cursor : null
+      this.stage.aim(fighting ? view.cursor : null, typing)
     } else {
-      this.hud.updateBook(null, tick, [])
+      this.hud.updateBook({ me: null, tick, runes: [], kit: null, size: setup.rules.kit, drafting, target: null, now })
       this.aimed = null
       this.stage.aim(null)
     }
@@ -3506,15 +3739,20 @@ class Game {
 }
 
 /** Events that still matter while the tab is hidden: they set lasting state, not effects. */
-const LASTING_EVENTS = new Set(['fizzle', 'surge', 'over'])
+const LASTING_EVENTS = new Set(['fizzle', 'surge', 'shift', 'over'])
+
+/** Metamagic as words over a caster: "Quicken Twin". */
+const shapedText = (metas) => (metas ?? []).map((id) => METAS[id].name).join(' ')
 
 /** Event type → visual reaction. `this` is the Game. */
 const EVENT_VISUALS = {
   start() {
-    this.hud.say('Fight!', 'Chords fire on the last rune')
+    this.hud.say('Fight!', 'Your kit is set. Chords fire on the last rune')
   },
   cast(e) {
     this.figure(e.mage)?.beginCast(SPELL[e.spell])
+    if (e.metas?.length) this.floatAt(e.mage, shapedText(e.metas), 'meta small', 'head')
+    else if (e.mage === this.me && e.swift <= 0.75) this.floatAt(e.mage, 'Swift', 'swift small', 'head')
   },
   stop(e) {
     this.figure(e.mage)?.endCast(e.why === 'break')
@@ -3528,6 +3766,8 @@ const EVENT_VISUALS = {
     this.figure(e.mage)?.endCast(false)
     const seconds = Math.max(0.1, ((e.land - this.serverTick()) * TICK_MS) / 1000)
     this.stage.launch(spell, e.mage, e.targets, seconds)
+    // Spells with no cast bar show their metamagic as they leave; the others showed it when the cast began.
+    if (e.metas?.length && (!spell.cast || e.metas.includes('quicken'))) this.floatAt(e.mage, shapedText(e.metas), 'meta small', 'head')
     if (e.mage === this.me) this.hud.pulse('cast')
   },
   land(e) {
@@ -3563,10 +3803,55 @@ const EVENT_VISUALS = {
     if (e.amount > 0) this.floatAt(e.to, `+${e.amount}`, `mend ${e.amount > 150 ? 'big' : e.amount < 30 ? 'small' : ''}`)
   },
   void(e) {
-    const words = { immune: 'Immune', evade: 'Dodged', reflect: 'Reflected', steady: 'Resisted' }
-    this.floatAt(e.to, words[e.why] ?? e.why, 'note', 'head')
+    const words = { immune: 'Immune', evade: 'Dodged', reflect: 'Reflected', steady: 'Resisted', resist: 'Resisted', parry: 'Parried!' }
+    this.floatAt(e.to, words[e.why] ?? e.why, e.why === 'parry' ? 'parry big' : 'note', 'head')
     const figure = this.figure(e.to)
     if (figure && e.why === 'reflect') this.stage.looks.shatter(figure.anchor('chest'), new THREE.Color('#e0e8ff'), 14)
+    if (figure && e.why === 'parry') {
+      figure.parry()
+      this.stage.shake(e.to === this.me ? 0.3 : 0.12)
+    }
+  },
+  ward(e) {
+    this.figure(e.mage)?.raiseWard()
+  },
+  react(e) {
+    const figure = this.figure(e.to)
+    if (!figure) return
+    const chest = figure.anchor('chest')
+    this.stage.looks.burst(chest, e.hit, 1.3)
+    this.stage.looks.burst(chest, e.on, 0.8)
+    this.stage.looks.ground(figure.anchor('feet'), e.hit, 2.4)
+    this.stage.shake(0.12)
+    this.floatAt(e.to, `${e.name}!`, `react ${e.hit} big`, 'head')
+  },
+  flow(e) {
+    if (e.flow < TIMING.flow) return
+    const figure = this.figure(e.mage)
+    if (figure) this.stage.looks.spiral(figure.anchor('chest'), 'holy', true)
+    if (e.mage === this.me) this.floatAt(e.mage, 'In flow', 'swift', 'head')
+  },
+  shift(e) {
+    for (const { id, sigil } of e.changes) {
+      const entry = this.setup.book.find((x) => x.id === id)
+      if (entry) entry.sigil = sigil
+    }
+    this.hud.reshuffle(e.changes, this.stage.time)
+    this.hud.traySign = null
+    this.stage.shake(0.2)
+    const mine = this.me && (this.kits[this.me] ?? [])
+    const hits = mine ? e.changes.filter((c) => mine.includes(c.id)).length : e.changes.length
+    this.hud.say('Rift shift', mine ? `${hits} of your chords changed` : `${e.changes.length} chords changed`)
+  },
+  call(e) {
+    const figure = this.figure(e.target)
+    if (!figure) return
+    figure.calledUntil = this.stage.time + TIMING.call
+    const by = this.setup.roster.find((m) => m.id === e.mage)
+    this.floatAt(e.target, e.mage === this.me ? 'Called' : `${by?.name ?? 'Ally'}: here!`, 'call small', 'top')
+  },
+  pick(e) {
+    if (e.mage === this.me) this.hud.pulse('cast')
   },
   mark(e) {
     const figure = this.figure(e.to)
@@ -3591,6 +3876,15 @@ const EVENT_VISUALS = {
     } else if (e.amount > 10) this.floatAt(e.to, `+${e.amount} mana`, 'small frost')
   },
   fizzle(e) {
+    if (this.frame?.phase === 'ready') {
+      // While drafting, the book covers the arena: say it in a toast instead.
+      if (e.mage === this.me) {
+        toast(e.why)
+        this.hud.pulse('fizzled')
+        this.pending = []
+      }
+      return
+    }
     const figure = this.figure(e.mage)
     if (figure) this.stage.looks.puff(figure.anchor('gem'))
     this.floatAt(e.mage, e.mage === this.me ? e.why : 'Fizzle', 'fizzle', 'head')
@@ -3606,7 +3900,7 @@ const EVENT_VISUALS = {
     this.stage.looks.ground(figure.anchor('feet'), 'shadow', 3)
     this.stage.shake(0.5)
     this.floatAt(e.to, 'Down', 'note big', 'head')
-    if (e.to === this.me) this.hud.say('You fell', 'Your team fights on')
+    if (e.to === this.me) this.hud.say('You fell', 'Fight on as a wisp')
   },
   rise(e) {
     const figure = this.figure(e.to)

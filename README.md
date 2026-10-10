@@ -1,13 +1,16 @@
 # Chordcast
 
-Real-time arena magic duels where every action is a chord of keys. A few moves pick the target, a run of runes picks the spell, and it fires on the last rune. Each match deals a fresh book with fresh chords, so you learn the spells while you fight.
+Real-time arena magic duels where every action is a chord of keys. A few moves pick the target, a run of runes picks the spell, and it fires on the last rune: the faster you type it, the faster it casts. Each match deals a fresh book with fresh chords. You draft your kit from it, then learn its chords while you fight, as the rift keeps rewriting some of them.
 
 ![A 2 vs 2 fight](shots/08-battle.png)
 
 - **137 spells** drawn from tabletop and MMO classics: Fireball, Polymorph, Counterspell, Lifebloom, Living Bomb, Death Ward and more.
-- **Teams of any size**, 1 vs 1 by default. Bots fill open seats.
+- **Draft, then fight.** Each player drafts a private kit of 8 from a 16-spell book by typing the chords.
+- **Skill on top.** Metamagic (Quicken, Twin, Empower, Extend), a timed ward that turns spells back, school reactions (Melt, Shatter, Eclipse…), a flow streak, sticky aim and team calls.
+- **Fair in big fights.** Repeat stuns diminish, and fallen mages keep playing as wisps.
+- **Teams of any size**, 1 vs 1 by default, up to 8 vs 8. Bots fill open seats and use every mechanic.
 - **Host and join with a code.** Share a four-letter code or a link.
-- **Keyboard, gamepad and touch** all use the same nine keys.
+- **Keyboard, gamepad and touch** all use the same twelve keys.
 - **One authority.** The host runs every match and sends the same frames to everyone.
 - **Swappable bots.** A deterministic brain today; any `think(view)` object, sync or async, can replace it.
 
@@ -29,13 +32,18 @@ The browser test uses Playwright's Chromium. If it is not installed yet, run `np
 |---|---|---|---|
 | Moves (aim) | W A S D or arrows | D-pad or left stick | Left pad |
 | Runes: star, wave, flame, leaf | I J L K | Y X B A | Right pad |
-| Cancel | Space or Backspace | LB or RB | Center button |
+| Meta (shape the spell) | U, or Shift with a rune | RB | Corner of the right pad |
+| Ward (parry) | Space | RT | Shield button |
+| Call your aim | E | LT | Corner of the left pad |
+| Cancel | Q or Backspace | LB | Center button |
 | Book | Tab | Start | Book button |
 
-1. The target starts on you. Up jumps to the foe row, down comes back, left and right walk along a row.
-2. Type the spell's runes from the book. Offense needs a foe, defense needs an ally or you.
-3. Wrong chord, target, mana or cooldown: the spell fizzles and you stall briefly.
-4. Healing fades over time. When the rift surges, everyone takes rising damage until a team falls.
+1. **Draft.** Type a spell's chord (or tap it) to put it in your kit. Only your kit can be cast.
+2. **Aim.** Up jumps to the foe row, down comes back (again to snap to you), left and right walk a row. The aim stays between chords; ally spells aimed at a foe land on you.
+3. **Cast.** Type the runes; the spell fires on the last one. Faster typing means a shorter cast. Meta then a rune shapes it: Quicken, Twin, Empower or Extend, each for more mana.
+4. **Ward.** Raise it just as a hostile spell lands to turn it back on its caster.
+5. **Combine.** Fire melts frost, storm shatters it, shadow eclipses holy and more. Clean casts, parries and reactions build flow: faster, cheaper spells. A fizzle breaks it.
+6. **Endure.** Repeat stuns land at ½, ¼, then not at all. Fallen mages fight on as wisps. Every 45s the rift rewrites some chords; when it surges, everyone takes rising damage until a team falls.
 
 ## Files
 

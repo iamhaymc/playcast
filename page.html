@@ -34,10 +34,12 @@
           <div class="anatomy-row">
             <span class="key move" data-glyph="up"></span>
             <span class="plus">+</span>
+            <span class="key meta" data-glyph="meta"></span><span class="key rune flame" data-glyph="flame"></span>
+            <span class="plus">+</span>
             <span class="key rune star" data-glyph="star"></span><span class="key rune wave" data-glyph="wave"></span
             ><span class="key rune flame" data-glyph="flame"></span>
           </div>
-          <figcaption><b>Move</b> picks the target. <b>Runes</b> pick the spell. It fires on the last rune.</figcaption>
+          <figcaption><b>Move</b> aims. <b>Meta</b> shapes the spell. <b>Runes</b> pick it, and it fires on the last rune, faster the faster you type.</figcaption>
         </figure>
 
         <label class="field">
@@ -103,7 +105,11 @@
           </div>
           <div class="rule">
             <span>Book</span>
-            <div class="segmented" data-rule="book"><button data-value="8">8</button><button data-value="12">12</button><button data-value="16">16</button><button data-value="20">20</button></div>
+            <div class="segmented" data-rule="book"><button data-value="12">12</button><button data-value="16">16</button><button data-value="20">20</button><button data-value="24">24</button></div>
+          </div>
+          <div class="rule">
+            <span>Kit</span>
+            <div class="segmented" data-rule="kit"><button data-value="6">6</button><button data-value="8">8</button><button data-value="10">10</button><button data-value="12">12</button></div>
           </div>
           <div class="rule">
             <span>Life</span>
@@ -151,11 +157,11 @@
 
       <div id="banner" class="banner"><strong></strong><span></span></div>
 
-      <!-- The book: offense on the left, defense on the right, side by side in the middle while you study. -->
+      <!-- The book: offense on the left, defense on the right, side by side in the middle while you draft. -->
       <aside id="book" class="book">
         <header class="book-intro">
-          <h3>Your book</h3>
-          <p>New chords this match. Study them before the fight.</p>
+          <h3>Draft your kit <span id="kit-count" class="kit-count">0 / 8</span></h3>
+          <p id="kit-note">New chords this match. Type a spell's chord, or tap it, to take it.</p>
         </header>
         <section class="page glass offense">
           <header class="page-head"><h4>Offense</h4><span>Needs a foe</span></header>
@@ -170,6 +176,15 @@
       </aside>
 
       <footer id="tray" class="tray">
+        <div id="wisp-book" class="wisp-book glass" hidden>
+          <span class="wisp-title">Wisp</span>
+          <span id="wisp-spells" class="wisp-spells"></span>
+        </div>
+        <div class="tray-status">
+          <span id="ward-chip" class="ward-chip" title="Ward: parry the next spell that lands"><i data-glyph="ward"></i><kbd id="ward-key">␣</kbd></span>
+          <span id="flow-meter" class="flow-meter" title="Flow: each clean cast casts faster and cheaper"><b>Flow</b><span class="pips"><i></i><i></i><i></i><i></i><i></i></span></span>
+          <span id="shift-chip" class="shift-chip" hidden></span>
+        </div>
         <div class="chord glass">
           <span id="tray-target" class="target-chip">Self</span>
           <span id="tray-keys" class="tray-keys"></span>
@@ -184,13 +199,16 @@
           <button data-key="left" class="left" aria-label="Left"><i data-glyph="left"></i></button>
           <button data-key="right" class="right" aria-label="Right"><i data-glyph="right"></i></button>
           <button data-key="down" class="down" aria-label="Down"><i data-glyph="down"></i></button>
+          <button data-key="call" class="corner call" aria-label="Call target"><i data-glyph="call"></i></button>
         </div>
+        <button data-key="ward" class="ward" aria-label="Ward"><i data-glyph="ward"></i></button>
         <button data-key="drop" class="drop" aria-label="Cancel"><i data-glyph="close"></i></button>
         <div class="pad runes">
           <button data-key="star" class="up star" aria-label="Star rune"><i data-glyph="star"></i></button>
           <button data-key="wave" class="left wave" aria-label="Wave rune"><i data-glyph="wave"></i></button>
           <button data-key="flame" class="right flame" aria-label="Flame rune"><i data-glyph="flame"></i></button>
           <button data-key="leaf" class="down leaf" aria-label="Leaf rune"><i data-glyph="leaf"></i></button>
+          <button data-key="meta" class="corner meta" aria-label="Meta"><i data-glyph="meta"></i></button>
         </div>
       </div>
     </section>
@@ -202,7 +220,7 @@
         <h2 id="result-title">Victory</h2>
         <table class="stats">
           <thead>
-            <tr><th>Mage</th><th>Damage</th><th>Healing</th><th>Taken</th><th>Casts</th><th>Fizzles</th></tr>
+            <tr><th>Mage</th><th>Damage</th><th>Healing</th><th>Taken</th><th>Casts</th><th>Parries</th><th>Combos</th><th>Fizzles</th></tr>
           </thead>
           <tbody id="result-rows"></tbody>
         </table>
@@ -222,12 +240,16 @@
         <button class="icon-btn" data-close aria-label="Close"><i data-glyph="close"></i></button>
       </header>
       <ol class="steps">
-        <li><b>Every action is a chord.</b> Press moves to pick a target, then runes to pick a spell. The spell fires on the last rune.</li>
-        <li><b>Targets.</b> You start on yourself. <i data-glyph="up"></i> jumps to the foe row, <i data-glyph="down"></i> back to yours, <i data-glyph="left"></i><i data-glyph="right"></i> walk along a row.</li>
-        <li><b>Runes.</b> Each spell has a chord of 2 to 4 runes. Chords change every match, so study the book before the fight.</li>
-        <li><b>Offense</b> spells need a foe. <b>Defense</b> spells need an ally or yourself. A wrong chord, target, mana or cooldown fizzles and stalls you briefly.</li>
-        <li><b>Read the field.</b> Life, mana, shields, casts and effects of every mage show above them. Interrupt casts, cleanse allies, finish foes.</li>
-        <li><b>The surge.</b> Healing fades over time. When the rift surges, everyone takes rising damage until a team falls.</li>
+        <li><b>Draft.</b> Each match deals a new book. Before the fight, type a spell's chord (or tap it) to put it in your kit. Only your kit can be cast.</li>
+        <li><b>Every action is a chord.</b> Moves aim, runes pick the spell, and it fires on the last rune. Type fast: a quick chord casts up to 40% faster.</li>
+        <li><b>Aim sticks.</b> <i data-glyph="up"></i> jumps to the foe row, <i data-glyph="down"></i> back to yours (again to snap to you), <i data-glyph="left"></i><i data-glyph="right"></i> walk a row. The aim stays between chords. Ally spells aimed at a foe land on you.</li>
+        <li><b>Metamagic.</b> Before the last rune, <i data-glyph="meta"></i> then a rune shapes the spell: <i data-glyph="star" class="star"></i> Quicken (instant), <i data-glyph="wave" class="wave"></i> Twin (also the mage beside), <i data-glyph="flame" class="flame"></i> Empower (40% stronger, slower), <i data-glyph="leaf" class="leaf"></i> Extend (effects last 50% longer). Each costs more mana, and they stack.</li>
+        <li><b>Ward.</b> <i data-glyph="ward"></i> raises a ward for 0.3s. A hostile spell that lands on it turns back on its caster, and the ward is ready again in 1s. Miss and it rests 5s.</li>
+        <li><b>Reactions.</b> Hit a foe's bane with the right school: fire melts frost, storm shatters frost, frost steams fire, nature spreads fire, arcane overloads storm, holy purifies shadow, shadow eclipses holy.</li>
+        <li><b>Flow.</b> Clean casts, parries and reactions build up to 5 flow: faster casts, cheaper spells. A fizzle or an interrupt breaks it.</li>
+        <li><b>Stuns fade.</b> Repeat stuns and silences from foes land at ½, then ¼, then not at all. After a stun ends you get a moment of grace.</li>
+        <li><b>The rift shifts.</b> Every 45s and when the surge begins, a quarter of the chords change. Healing fades over time, and the surge hurts everyone until a team falls.</li>
+        <li><b>Fallen, not out.</b> A fallen mage drifts as a wisp with three tiny spells. <i data-glyph="call"></i> calls your aim for the team.</li>
       </ol>
       <table class="mapping">
         <thead>
@@ -236,7 +258,10 @@
         <tbody>
           <tr><td>Moves</td><td>W A S D or arrows</td><td>D-pad or left stick</td><td>Left pad</td></tr>
           <tr><td>Runes <i data-glyph="star" class="star"></i><i data-glyph="wave" class="wave"></i><i data-glyph="flame" class="flame"></i><i data-glyph="leaf" class="leaf"></i></td><td>I J L K</td><td>Y X B A</td><td>Right pad</td></tr>
-          <tr><td>Cancel</td><td>Space or Backspace</td><td>LB or RB</td><td>Center button</td></tr>
+          <tr><td>Meta <i data-glyph="meta"></i></td><td>U, or Shift with a rune</td><td>RB</td><td>Corner of the right pad</td></tr>
+          <tr><td>Ward <i data-glyph="ward"></i></td><td>Space</td><td>RT</td><td>Shield button</td></tr>
+          <tr><td>Call <i data-glyph="call"></i></td><td>E</td><td>LT</td><td>Corner of the left pad</td></tr>
+          <tr><td>Cancel</td><td>Q or Backspace</td><td>LB</td><td>Center button</td></tr>
           <tr><td>Book</td><td>Tab</td><td>Start</td><td>Book button</td></tr>
         </tbody>
       </table>

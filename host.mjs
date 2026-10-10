@@ -246,7 +246,11 @@ class Room {
     this.timer = setInterval(() => this.loop(), TICK_MS / 2)
   }
 
-  /** Advance whole ticks that are due, then send one frame with all their events. */
+  /**
+   * Advance whole ticks that are due, then send one frame with all their
+   * events. Each team gets its own copy: its kits, its draft chords and its
+   * private events (picks, calls). Watchers see only what is public.
+   */
   loop() {
     const now = performance.now()
     if (now - this.due > TICK_MS * 10) this.due = now - TICK_MS * 10
@@ -257,9 +261,19 @@ class Room {
     }
     if (!events.length && this.lastTick === this.match.tick) return
     this.lastTick = this.match.tick
-    const text = pack('frame', { frame: this.match.frame(), events })
-    for (const peer of this.peers) peer.sendRaw(text)
+    const texts = new Map()
+    for (const team of [0, 1, null]) {
+      const seen = events.filter((event) => event.only === undefined || event.only === team)
+      const kits = team === null ? {} : this.match.kits(team)
+      texts.set(team, pack('frame', { frame: this.match.frame(team), events: seen, kits }))
+    }
+    for (const peer of this.peers) peer.sendRaw(texts.get(this.teamOf(peer)))
     if (this.match.phase === 'over') this.finish()
+  }
+
+  /** The team a peer plays on in the current match, or null when watching. */
+  teamOf(peer) {
+    return (peer.mage && this.match?.index.get(peer.mage)?.team) ?? null
   }
 
   finish() {

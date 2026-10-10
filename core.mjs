@@ -6,16 +6,16 @@
  * seats send `press` orders into a Match, the Match advances in fixed ticks,
  * and it emits plain events and frames that the host relays to every player.
  *
- *    1  Kit     constants, rules and timing
+ *    1  Kit     constants, rules, timing, metamagic and reactions
  *    2  Dice    seeded random numbers
  *    3  Acts    effect builders used by spells
  *    4  Lore    plain text for spells and auras
- *    5  Codex   the spell catalog
- *    6  Book    the spells of one match and their chords
+ *    5  Codex   the spell catalog, wisp spells, costs and cast times
+ *    6  Book    the spells of one match, their chords, kits and reshuffles
  *    7  Board   seats, rows and the target cursor
- *    8  Match   the simulation
+ *    8  Match   the simulation: draft, chords, casts, wards, flow, reactions
  *    9  Brain   the deterministic bot mind
- *   10  Pilot   turns brain plans into key presses
+ *   10  Pilot   drafts, turns brain plans into key presses, raises wards
  *   11  Arena   runs a match with pilots
  *   12  Wire    the message protocol
  */
@@ -30,7 +30,7 @@ export const secs = (seconds) => Math.round(seconds * TICK_RATE)
 
 export const MOVES = ['up', 'left', 'right', 'down']
 export const RUNES = ['star', 'wave', 'flame', 'leaf'] // top, left, right, bottom
-export const KEYS = [...MOVES, ...RUNES, 'drop']
+export const KEYS = [...MOVES, ...RUNES, 'meta', 'ward', 'call', 'drop']
 export const KINDS = ['offense', 'defense']
 export const SCHOOLS = ['fire', 'frost', 'storm', 'nature', 'shadow', 'holy', 'arcane']
 export const TEAMS = ['Dawn', 'Dusk']
@@ -40,7 +40,8 @@ export const AIMS = ['foe', 'ally', 'self', 'any', 'fallen']
 export const FLIGHTS = { bolt: 0.55, volley: 0.65, beam: 0.15, arc: 0.1, fall: 0.7, rise: 0.35, nova: 0.3, aura: 0.15 }
 
 export const TIMING = {
-  ready: 6, // seconds to study the book before the fight
+  ready: 15, // seconds to draft a kit from the book before the fight
+  early: 3, // the fight starts this soon once every kit is full
   idle: 2.5, // a chord clears after this long without a key
   stagger: 0.6, // keys are ignored this long after a fizzle
   recover: 0.4, // pause after a cast before the next one starts
@@ -48,7 +49,52 @@ export const TIMING = {
   mana: 100, // mana pool
   surge: 0.02, // share of max life lost per surge wave, growing each second
   dampen: 0.4, // healing power left when the surge begins (falls from 100%)
+  swift: [0.1, 0.35], // seconds between chord keys for the fastest and the slowest cast
+  quick: 0.6, // share of the cast time left after the fastest chord
+  ward: 0.3, // seconds a ward stays up
+  wardCool: 5, // seconds between wards
+  wardRefund: 1, // seconds left on the ward cooldown after a parry
+  grace: 1, // seconds immune to stuns and sleeps after one ends
+  fade: 15, // seconds before a lock group's diminishing returns reset
+  flow: 5, // most flow stacks
+  flowPace: 0.08, // cast speed per flow stack
+  flowCost: 0.05, // mana discount per flow stack
+  flowFade: 4, // seconds without a cast before flow starts to fall, one stack per 1.5s
+  shift: 45, // seconds between chord reshuffles (and one when the surge begins)
+  call: 6, // seconds a call marks its target
 }
+
+/** Chord length per spell tier: bigger spells take more runes. */
+export const CHORD_LENGTH = { 1: 2, 2: 3, 3: 5 }
+
+/** Lock durations from foes shrink with each repeat in the fade window, then stop landing. */
+export const DIMINISH = [1, 0.5, 0.25]
+
+/**
+ * Metamagic: `meta` then a rune, before the chord's last rune. Each changes
+ * the spell; costs multiply when they stack.
+ */
+export const METAS = {
+  quicken: { rune: 'star', name: 'Quicken', cost: 1.5, text: 'Cast instantly' },
+  twin: { rune: 'wave', name: 'Twin', cost: 2, text: 'Also hits the mage beside the target' },
+  empower: { rune: 'flame', name: 'Empower', cost: 1.5, power: 1.4, slow: 1.5, text: '40% stronger, 50% longer cast' },
+  extend: { rune: 'leaf', name: 'Extend', cost: 1.5, stretch: 1.5, text: 'Effects last 50% longer' },
+}
+export const META_OF_RUNE = Object.fromEntries(Object.entries(METAS).map(([id, meta]) => [meta.rune, id]))
+
+/**
+ * Reactions: a direct hostile hit of school `hit` on a target with a bane of
+ * school `on` hits harder, uses up that bane and adds a rider.
+ */
+export const REACTIONS = [
+  { name: 'Melt', hit: 'fire', on: 'frost', times: 1.5, text: 'Fire on frost: ×1.5' },
+  { name: 'Shatter', hit: 'storm', on: 'frost', times: 1.4, pierce: true, text: 'Storm on frost: ×1.4 through shields' },
+  { name: 'Steam', hit: 'frost', on: 'fire', times: 1.3, stall: 0.8, text: 'Frost on fire: ×1.3, breaks the chord and stalls keys' },
+  { name: 'Wildfire', hit: 'nature', on: 'fire', times: 1.2, spread: true, text: 'Nature on fire: ×1.2, the fire spreads beside it' },
+  { name: 'Overload', hit: 'arcane', on: 'storm', times: 1.4, burn: 20, text: 'Arcane on storm: ×1.4, burns 20 mana' },
+  { name: 'Purify', hit: 'holy', on: 'shadow', times: 1.5, leech: 0.5, text: 'Holy on shadow: ×1.5, heals you for half' },
+  { name: 'Eclipse', hit: 'shadow', on: 'holy', times: 1.4, hush: 1.5, text: 'Shadow on holy: ×1.4, silences 1.5s' },
+]
 
 /** Healing power at a tick, shared by host and page so the HUD shows the truth. */
 export function dampenAt(tick, fightAt, surgeAt) {
@@ -56,14 +102,17 @@ export function dampenAt(tick, fightAt, surgeAt) {
   return Math.round((1 - (1 - TIMING.dampen) * share) * 100) / 100
 }
 
-export const RULES = { teams: [1, 1], book: 12, life: 800, surge: 90, skill: 'normal' }
-export const LIMITS = { team: [1, 8], book: [8, 20], life: [400, 3000], surge: [20, 600] }
+export const RULES = { teams: [1, 1], book: 16, kit: 8, life: 800, surge: 90, skill: 'normal' }
+export const LIMITS = { team: [1, 8], book: [12, 24], kit: [4, 12], life: [400, 3000], surge: [20, 600] }
 
-/** Bot skill: think pause, key gap and reaction (seconds), and choice noise. */
+/**
+ * Bot skill: think pause, key gap and reaction (seconds), choice noise, the
+ * most metamagic per spell, and the chance to parry a spell it sees coming.
+ */
 export const SKILLS = {
-  easy: { think: [1.2, 2.0], gap: [0.3, 0.42], react: [0.5, 0.9], noise: 0.45 },
-  normal: { think: [0.6, 1.1], gap: [0.19, 0.27], react: [0.3, 0.6], noise: 0.18 },
-  hard: { think: [0.25, 0.5], gap: [0.12, 0.17], react: [0.15, 0.3], noise: 0.05 },
+  easy: { think: [1.2, 2.0], gap: [0.3, 0.42], react: [0.5, 0.9], noise: 0.45, metas: 0, parry: 0.1 },
+  normal: { think: [0.6, 1.1], gap: [0.19, 0.27], react: [0.3, 0.6], noise: 0.18, metas: 1, parry: 0.35 },
+  hard: { think: [0.25, 0.5], gap: [0.12, 0.17], react: [0.15, 0.3], noise: 0.05, metas: 2, parry: 0.7 },
 }
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value))
@@ -73,10 +122,11 @@ const wholeIn = (value, [low, high], fallback) =>
 /** Clamp any rules object into a valid one. */
 export function tidyRules(input = {}) {
   const teams = Array.isArray(input.teams) ? input.teams : RULES.teams
-  const book = wholeIn(input.book, LIMITS.book, RULES.book)
+  const book = wholeIn(input.book, LIMITS.book, RULES.book) & ~1
   return {
     teams: [0, 1].map((t) => wholeIn(teams[t], LIMITS.team, RULES.teams[t])),
-    book: book - (book % 2),
+    book,
+    kit: Math.min(wholeIn(input.kit, LIMITS.kit, RULES.kit), book - 4),
     life: wholeIn(input.life, LIMITS.life, RULES.life),
     surge: wholeIn(input.surge, LIMITS.surge, RULES.surge),
     skill: SKILLS[input.skill] ? input.skill : RULES.skill,
@@ -160,7 +210,7 @@ export const kill = (below, ...acts) => ({ op: 'kill', below, acts })
  * Aura (status) rules, all optional:
  *   name kind look school time        identity and display
  *   pulse grow                        acts each second; grow raises them per pulse
- *   taken dealt mended pace flow      multipliers on damage taken/dealt, healing
+ *   taken dealt mended pace regen     multipliers on damage taken/dealt, healing
  *                                     received, cast speed and mana regen
  *   lock                              'stun' | 'sleep' (breaks on damage) | 'hush'
  *   guard                             absorbs this much damage
@@ -185,7 +235,7 @@ export const expose = (share, time, name = 'Exposed') => mark(time, { name, kind
 export const armor = (share, time, name) => mark(time, { name, kind: 'boon', taken: 1 - share, look: 'armor' })
 export const weaken = (share, time, name = 'Weakened') => mark(time, { name, kind: 'bane', dealt: 1 - share, look: 'weak' })
 export const empower = (share, time, name) => mark(time, { name, kind: 'boon', dealt: 1 + share, look: 'power' })
-export const ward = (amount, time, name, more = {}) => mark(time, { name, kind: 'boon', guard: amount, look: 'ward', ...more })
+export const shield = (amount, time, name, more = {}) => mark(time, { name, kind: 'boon', guard: amount, look: 'shield', ...more })
 export const thorns = (amount, time, name) => mark(time, { name, kind: 'boon', thorns: amount, look: 'thorns' })
 
 // ─── 4 · Lore ───────────────────────────────────────────────────────────────
@@ -270,7 +320,7 @@ export function describeAura(aura, school, fallback) {
   if (aura.pace) parts.push(`cast ${percent(Math.abs(1 - aura.pace))} ${aura.pace > 1 ? 'faster' : 'slower'}`)
   if (aura.mended === 0) parts.push('no healing')
   else if (aura.mended) parts.push(`${percent(Math.abs(1 - aura.mended))} ${aura.mended > 1 ? 'more' : 'less'} healing`)
-  if (aura.flow) parts.push(`mana regen ×${aura.flow}`)
+  if (aura.regen) parts.push(`mana regen ×${aura.regen}`)
   if (aura.mirror) parts.push(`reflect the ${nextSpells(aura.charges)}`)
   if (aura.evade) parts.push(`dodge the ${nextSpells(aura.charges)}`)
   if (aura.thorns) parts.push(`return ${aura.thorns} ${auraSchool} to attackers`)
@@ -322,46 +372,46 @@ const D = 'defense'
 
 const SPELL_LIST = [
   // Fire ──────────────────────────────────────────────────────────────────
-  { id: 'fire-bolt', name: 'Fire Bolt', kind: O, school: 'fire', tier: 1, cast: 0.8, cool: 2, cost: 6, flight: 'bolt', acts: [harm(70)] },
+  { id: 'fire-bolt', name: 'Fire Bolt', kind: O, school: 'fire', tier: 1, cast: 0.6, cool: 2, cost: 6, flight: 'bolt', acts: [harm(70)] },
   { id: 'scorch', name: 'Scorch', kind: O, school: 'fire', tier: 1, cast: 0, cool: 4, cost: 8, flight: 'rise', acts: [harm(55)] },
-  { id: 'immolate', name: 'Immolate', kind: O, school: 'fire', tier: 1, cast: 1, cool: 6, cost: 10, flight: 'rise', acts: [harm(40), dot(16, 8, 'Immolated')] },
-  { id: 'fireball', name: 'Fireball', kind: O, school: 'fire', tier: 2, cast: 1.5, cool: 6, cost: 16, flight: 'bolt', acts: [harm(150), dot(10, 4, 'Burning')] },
-  { id: 'scorching-ray', name: 'Scorching Ray', kind: O, school: 'fire', tier: 2, cast: 1, cool: 8, cost: 16, flight: 'volley', acts: [harm(50), harm(50), harm(50)] },
+  { id: 'immolate', name: 'Immolate', kind: O, school: 'fire', tier: 1, cast: 0.7, cool: 6, cost: 10, flight: 'rise', acts: [harm(40), dot(16, 8, 'Immolated')] },
+  { id: 'fireball', name: 'Fireball', kind: O, school: 'fire', tier: 2, cast: 1, cool: 6, cost: 16, flight: 'bolt', acts: [harm(150), dot(10, 4, 'Burning')] },
+  { id: 'scorching-ray', name: 'Scorching Ray', kind: O, school: 'fire', tier: 2, cast: 0.7, cool: 8, cost: 16, flight: 'volley', acts: [harm(50), harm(50), harm(50)] },
   { id: 'living-bomb', name: 'Living Bomb', kind: O, school: 'fire', tier: 2, cast: 0, cool: 12, cost: 18, flight: 'aura', acts: [mark(4, { kind: 'bane', look: 'bomb', pulse: [harm(15, { tick: true })], expire: [side(harm(110))] })] },
-  { id: 'flame-strike', name: 'Flame Strike', kind: O, school: 'fire', tier: 2, reach: 'side', cast: 1.5, cool: 10, cost: 22, flight: 'fall', acts: [harm(100), dot(8, 4, 'Burning')] },
-  { id: 'lava-burst', name: 'Lava Burst', kind: O, school: 'fire', tier: 2, cast: 1.5, cool: 8, cost: 18, flight: 'bolt', acts: [harm(140, { bonus: { when: 'burning', times: 1.5 } })] },
+  { id: 'flame-strike', name: 'Flame Strike', kind: O, school: 'fire', tier: 2, reach: 'side', cast: 1, cool: 10, cost: 22, flight: 'fall', acts: [harm(100), dot(8, 4, 'Burning')] },
+  { id: 'lava-burst', name: 'Lava Burst', kind: O, school: 'fire', tier: 2, cast: 1, cool: 8, cost: 18, flight: 'bolt', acts: [harm(140, { bonus: { when: 'burning', times: 1.5 } })] },
   { id: 'dragon-breath', name: 'Dragon Breath', kind: O, school: 'fire', tier: 2, cast: 0, cool: 16, cost: 18, flight: 'nova', acts: [harm(90), sleep(3, 'Disoriented', 'daze')] },
   { id: 'combustion', name: 'Combustion', kind: O, school: 'fire', tier: 2, aim: 'self', cast: 0, cool: 24, cost: 14, flight: 'aura', acts: [empower(0.3, 6, 'Combustion')] },
-  { id: 'pyroblast', name: 'Pyroblast', kind: O, school: 'fire', tier: 3, cast: 2.5, cool: 18, cost: 32, flight: 'bolt', acts: [harm(300), dot(20, 6, 'Burning')] },
-  { id: 'meteor', name: 'Meteor', kind: O, school: 'fire', tier: 3, cast: 2, cool: 24, cost: 36, flight: 'fall', acts: [harm(240), side(harm(90))] },
-  { id: 'fire-wall', name: 'Fire Wall', kind: O, school: 'fire', tier: 3, reach: 'side', cast: 1.5, cool: 20, cost: 30, flight: 'rise', acts: [dot(25, 6, 'Fire Wall')] },
+  { id: 'pyroblast', name: 'Pyroblast', kind: O, school: 'fire', tier: 3, cast: 1.8, cool: 18, cost: 32, flight: 'bolt', acts: [harm(300), dot(20, 6, 'Burning')] },
+  { id: 'meteor', name: 'Meteor', kind: O, school: 'fire', tier: 3, cast: 1.4, cool: 24, cost: 36, flight: 'fall', acts: [harm(240), side(harm(90))] },
+  { id: 'fire-wall', name: 'Fire Wall', kind: O, school: 'fire', tier: 3, reach: 'side', cast: 1, cool: 20, cost: 30, flight: 'rise', acts: [dot(25, 6, 'Fire Wall')] },
   { id: 'rebuke', name: 'Rebuke', kind: D, school: 'fire', tier: 1, aim: 'self', cast: 0, cool: 14, cost: 8, flight: 'aura', acts: [thorns(50, 8, 'Rebuke')] },
   { id: 'cauterize', name: 'Cauterize', kind: D, school: 'fire', tier: 2, aim: 'self', cast: 0, cool: 20, cost: 12, flight: 'rise', acts: [heal(220), dot(15, 4, 'Cauterized')] },
 
   // Frost ─────────────────────────────────────────────────────────────────
-  { id: 'frost-ray', name: 'Frost Ray', kind: O, school: 'frost', tier: 1, cast: 1, cool: 3, cost: 8, flight: 'beam', acts: [harm(60), slow(0.3, 4, 'Chilled')] },
+  { id: 'frost-ray', name: 'Frost Ray', kind: O, school: 'frost', tier: 1, cast: 0.7, cool: 3, cost: 8, flight: 'beam', acts: [harm(60), slow(0.3, 4, 'Chilled')] },
   { id: 'ice-lance', name: 'Ice Lance', kind: O, school: 'frost', tier: 1, cast: 0, cool: 3, cost: 8, flight: 'bolt', acts: [harm(45, { bonus: { when: 'locked', times: 3 } })] },
-  { id: 'frostbolt', name: 'Frostbolt', kind: O, school: 'frost', tier: 2, cast: 1.5, cool: 5, cost: 16, flight: 'bolt', acts: [harm(140), slow(0.3, 5, 'Chilled')] },
+  { id: 'frostbolt', name: 'Frostbolt', kind: O, school: 'frost', tier: 2, cast: 1, cool: 5, cost: 16, flight: 'bolt', acts: [harm(140), slow(0.3, 5, 'Chilled')] },
   { id: 'cone-of-cold', name: 'Cone of Cold', kind: O, school: 'frost', tier: 2, reach: 'side', cast: 0, cool: 12, cost: 20, flight: 'nova', acts: [harm(80), slow(0.4, 4, 'Chilled')] },
   { id: 'frost-nova', name: 'Frost Nova', kind: O, school: 'frost', tier: 2, reach: 'side', cast: 0, cool: 20, cost: 18, flight: 'nova', acts: [harm(30), stun(2, 'Frozen', 'ice')] },
-  { id: 'ice-storm', name: 'Ice Storm', kind: O, school: 'frost', tier: 2, reach: 'side', cast: 1.2, cool: 12, cost: 22, flight: 'fall', acts: [harm(100)] },
-  { id: 'blizzard', name: 'Blizzard', kind: O, school: 'frost', tier: 3, reach: 'side', cast: 2, cool: 20, cost: 30, flight: 'fall', acts: [dot(22, 6, 'Blizzard'), slow(0.3, 6, 'Chilled')] },
-  { id: 'glacial-spike', name: 'Glacial Spike', kind: O, school: 'frost', tier: 3, cast: 2.5, cool: 20, cost: 30, flight: 'bolt', acts: [harm(260), stun(2.5, 'Frozen', 'ice')] },
+  { id: 'ice-storm', name: 'Ice Storm', kind: O, school: 'frost', tier: 2, reach: 'side', cast: 0.8, cool: 12, cost: 22, flight: 'fall', acts: [harm(100)] },
+  { id: 'blizzard', name: 'Blizzard', kind: O, school: 'frost', tier: 3, reach: 'side', cast: 1.4, cool: 20, cost: 30, flight: 'fall', acts: [dot(22, 6, 'Blizzard'), slow(0.3, 6, 'Chilled')] },
+  { id: 'glacial-spike', name: 'Glacial Spike', kind: O, school: 'frost', tier: 3, cast: 1.8, cool: 20, cost: 30, flight: 'bolt', acts: [harm(260), stun(2.5, 'Frozen', 'ice')] },
   { id: 'ice-block', name: 'Ice Block', kind: D, school: 'frost', tier: 3, aim: 'self', cast: 0, cool: 40, cost: 10, flight: 'aura', acts: [cleanse(9), mark(4, { name: 'Ice Block', kind: 'boon', immune: true, lock: 'stun', look: 'ice' })] },
-  { id: 'ice-barrier', name: 'Ice Barrier', kind: D, school: 'frost', tier: 2, cast: 0, cool: 14, cost: 16, flight: 'aura', acts: [ward(180, 10, 'Ice Barrier')] },
-  { id: 'frost-armor', name: 'Frost Armor', kind: D, school: 'frost', tier: 2, aim: 'self', cast: 0, cool: 16, cost: 14, flight: 'aura', acts: [ward(120, 12, 'Frost Armor', { thorns: 30 })] },
+  { id: 'ice-barrier', name: 'Ice Barrier', kind: D, school: 'frost', tier: 2, cast: 0, cool: 14, cost: 16, flight: 'aura', acts: [shield(180, 10, 'Ice Barrier')] },
+  { id: 'frost-armor', name: 'Frost Armor', kind: D, school: 'frost', tier: 2, aim: 'self', cast: 0, cool: 16, cost: 14, flight: 'aura', acts: [shield(120, 12, 'Frost Armor', { thorns: 30 })] },
   { id: 'winter-veil', name: 'Winter Veil', kind: D, school: 'frost', tier: 1, cast: 0, cool: 10, cost: 8, flight: 'aura', acts: [armor(0.2, 6, 'Winter Veil')] },
 
   // Storm ─────────────────────────────────────────────────────────────────
   { id: 'shocking-grasp', name: 'Shocking Grasp', kind: O, school: 'storm', tier: 1, cast: 0, cool: 10, cost: 10, flight: 'arc', acts: [harm(50), interrupt(1.5)] },
   { id: 'thunderclap', name: 'Thunderclap', kind: O, school: 'storm', tier: 1, reach: 'side', cast: 0, cool: 10, cost: 12, flight: 'nova', acts: [harm(40), interrupt(1)] },
-  { id: 'spark', name: 'Spark', kind: O, school: 'storm', tier: 1, cast: 0.6, cool: 2, cost: 6, flight: 'arc', acts: [harm(60)] },
-  { id: 'lightning-bolt', name: 'Lightning Bolt', kind: O, school: 'storm', tier: 2, cast: 1.5, cool: 6, cost: 16, flight: 'arc', acts: [harm(160)] },
-  { id: 'chain-lightning', name: 'Chain Lightning', kind: O, school: 'storm', tier: 2, cast: 1.5, cool: 10, cost: 22, flight: 'arc', acts: [chain(2, 0.7, harm(120))] },
-  { id: 'witch-bolt', name: 'Witch Bolt', kind: O, school: 'storm', tier: 2, cast: 1, cool: 10, cost: 14, flight: 'beam', acts: [harm(70), dot(20, 5, 'Tethered')] },
-  { id: 'call-lightning', name: 'Call Lightning', kind: O, school: 'storm', tier: 2, cast: 1, cool: 8, cost: 18, flight: 'fall', acts: [harm(130)] },
-  { id: 'ball-lightning', name: 'Ball Lightning', kind: O, school: 'storm', tier: 2, cast: 1, cool: 12, cost: 20, flight: 'volley', acts: [scatter(4, harm(45))] },
-  { id: 'storm-fury', name: 'Storm Fury', kind: O, school: 'storm', tier: 3, reach: 'side', cast: 2, cool: 22, cost: 34, flight: 'fall', acts: [harm(150), sleep(1.5, 'Dazed', 'daze')] },
+  { id: 'spark', name: 'Spark', kind: O, school: 'storm', tier: 1, cast: 0.4, cool: 2, cost: 6, flight: 'arc', acts: [harm(60)] },
+  { id: 'lightning-bolt', name: 'Lightning Bolt', kind: O, school: 'storm', tier: 2, cast: 1, cool: 6, cost: 16, flight: 'arc', acts: [harm(160)] },
+  { id: 'chain-lightning', name: 'Chain Lightning', kind: O, school: 'storm', tier: 2, cast: 1, cool: 10, cost: 22, flight: 'arc', acts: [chain(2, 0.7, harm(120))] },
+  { id: 'witch-bolt', name: 'Witch Bolt', kind: O, school: 'storm', tier: 2, cast: 0.7, cool: 10, cost: 14, flight: 'beam', acts: [harm(70), dot(20, 5, 'Tethered')] },
+  { id: 'call-lightning', name: 'Call Lightning', kind: O, school: 'storm', tier: 2, cast: 0.7, cool: 8, cost: 18, flight: 'fall', acts: [harm(130)] },
+  { id: 'ball-lightning', name: 'Ball Lightning', kind: O, school: 'storm', tier: 2, cast: 0.7, cool: 12, cost: 20, flight: 'volley', acts: [scatter(4, harm(45))] },
+  { id: 'storm-fury', name: 'Storm Fury', kind: O, school: 'storm', tier: 3, reach: 'side', cast: 1.4, cool: 22, cost: 34, flight: 'fall', acts: [harm(150), sleep(1.5, 'Dazed', 'daze')] },
   { id: 'tailwind', name: 'Tailwind', kind: D, school: 'storm', tier: 2, cast: 0, cool: 16, cost: 14, flight: 'aura', acts: [haste(0.4, 8, 'Tailwind')] },
   { id: 'lightning-shield', name: 'Lightning Shield', kind: D, school: 'storm', tier: 1, aim: 'self', cast: 0, cool: 12, cost: 10, flight: 'aura', acts: [thorns(40, 10, 'Lightning Shield')] },
   { id: 'grounding', name: 'Grounding', kind: D, school: 'storm', tier: 2, cast: 0, cool: 18, cost: 12, flight: 'aura', acts: [mark(8, { name: 'Grounded', kind: 'boon', evade: true, charges: 1, look: 'mirror' })] },
@@ -372,111 +422,111 @@ const SPELL_LIST = [
   { id: 'corruption', name: 'Corruption', kind: O, school: 'shadow', tier: 1, cast: 0, cool: 5, cost: 8, flight: 'aura', acts: [dot(16, 10, 'Corruption')] },
   { id: 'agony', name: 'Agony', kind: O, school: 'shadow', tier: 1, cast: 0, cool: 6, cost: 8, flight: 'aura', acts: [dot(6, 12, 'Agony', { grow: 0.25 })] },
   { id: 'hex', name: 'Hex', kind: O, school: 'shadow', tier: 1, cast: 0, cool: 10, cost: 8, flight: 'aura', acts: [expose(0.15, 8, 'Hexed')] },
-  { id: 'shadow-bolt', name: 'Shadow Bolt', kind: O, school: 'shadow', tier: 2, cast: 1.5, cool: 5, cost: 16, flight: 'bolt', acts: [harm(150)] },
-  { id: 'drain-life', name: 'Drain Life', kind: O, school: 'shadow', tier: 2, cast: 1.5, cool: 8, cost: 16, flight: 'beam', acts: [drain(120)] },
-  { id: 'vampiric-touch', name: 'Vampiric Touch', kind: O, school: 'shadow', tier: 2, cast: 1.2, cool: 8, cost: 16, flight: 'aura', acts: [mark(8, { name: 'Vampiric Touch', kind: 'bane', look: 'dot', pulse: [drain(20)] })] },
-  { id: 'unstable-affliction', name: 'Unstable Affliction', kind: O, school: 'shadow', tier: 2, cast: 1.2, cool: 8, cost: 16, flight: 'aura', acts: [dot(30, 6, 'Unstable Affliction', { purged: [harm(150), hush(3)] })] },
+  { id: 'shadow-bolt', name: 'Shadow Bolt', kind: O, school: 'shadow', tier: 2, cast: 1, cool: 5, cost: 16, flight: 'bolt', acts: [harm(150)] },
+  { id: 'drain-life', name: 'Drain Life', kind: O, school: 'shadow', tier: 2, cast: 1, cool: 8, cost: 16, flight: 'beam', acts: [drain(120)] },
+  { id: 'vampiric-touch', name: 'Vampiric Touch', kind: O, school: 'shadow', tier: 2, cast: 0.8, cool: 8, cost: 16, flight: 'aura', acts: [mark(8, { name: 'Vampiric Touch', kind: 'bane', look: 'dot', pulse: [drain(20)] })] },
+  { id: 'unstable-affliction', name: 'Unstable Affliction', kind: O, school: 'shadow', tier: 2, cast: 0.8, cool: 8, cost: 16, flight: 'aura', acts: [dot(30, 6, 'Unstable Affliction', { purged: [harm(150), hush(3)] })] },
   { id: 'death-coil', name: 'Death Coil', kind: O, school: 'shadow', tier: 2, cast: 0, cool: 16, cost: 16, flight: 'bolt', acts: [harm(110), sleep(2.5, 'Horrified', 'fear')] },
-  { id: 'fear', name: 'Fear', kind: O, school: 'shadow', tier: 2, cast: 1.2, cool: 14, cost: 14, flight: 'bolt', acts: [sleep(5, 'Feared', 'fear')] },
-  { id: 'blight', name: 'Blight', kind: O, school: 'shadow', tier: 2, cast: 1, cool: 8, cost: 18, flight: 'rise', acts: [harm(130), mark(4, { name: 'Blighted', kind: 'bane', mended: 0.5, look: 'blight' })] },
-  { id: 'mind-blast', name: 'Mind Blast', kind: O, school: 'shadow', tier: 2, cast: 1.2, cool: 6, cost: 16, flight: 'bolt', acts: [harm(120), burn(10)] },
+  { id: 'fear', name: 'Fear', kind: O, school: 'shadow', tier: 2, cast: 0.8, cool: 14, cost: 14, flight: 'bolt', acts: [sleep(5, 'Feared', 'fear')] },
+  { id: 'blight', name: 'Blight', kind: O, school: 'shadow', tier: 2, cast: 0.7, cool: 8, cost: 18, flight: 'rise', acts: [harm(130), mark(4, { name: 'Blighted', kind: 'bane', mended: 0.5, look: 'blight' })] },
+  { id: 'mind-blast', name: 'Mind Blast', kind: O, school: 'shadow', tier: 2, cast: 0.8, cool: 6, cost: 16, flight: 'bolt', acts: [harm(120), burn(10)] },
   { id: 'contagion', team: true, name: 'Contagion', kind: O, school: 'shadow', tier: 2, cast: 0, cool: 16, cost: 16, flight: 'nova', acts: [spread()] },
   { id: 'howl-of-terror', name: 'Howl of Terror', kind: O, school: 'shadow', tier: 3, reach: 'side', cast: 0, cool: 30, cost: 26, flight: 'nova', acts: [sleep(3, 'Feared', 'fear')] },
   { id: 'doom', name: 'Doom', kind: O, school: 'shadow', tier: 3, cast: 0, cool: 24, cost: 30, flight: 'aura', acts: [mark(6, { name: 'Doom', kind: 'bane', look: 'doom', expire: [harm(340)] })] },
-  { id: 'void-hunger', name: 'Void Hunger', kind: O, school: 'shadow', tier: 3, reach: 'side', cast: 1.5, cool: 20, cost: 30, flight: 'nova', acts: [dot(20, 5, 'Void Hunger'), slow(0.3, 5)] },
-  { id: 'finger-of-death', name: 'Finger of Death', kind: O, school: 'shadow', tier: 3, cast: 2, cool: 22, cost: 32, flight: 'beam', acts: [harm(300)] },
+  { id: 'void-hunger', name: 'Void Hunger', kind: O, school: 'shadow', tier: 3, reach: 'side', cast: 1, cool: 20, cost: 30, flight: 'nova', acts: [dot(20, 5, 'Void Hunger'), slow(0.3, 5)] },
+  { id: 'finger-of-death', name: 'Finger of Death', kind: O, school: 'shadow', tier: 3, cast: 1.4, cool: 22, cost: 32, flight: 'beam', acts: [harm(300)] },
   { id: 'kill-word', name: 'Kill Word', kind: O, school: 'shadow', tier: 3, cast: 0, cool: 30, cost: 30, flight: 'arc', acts: [kill(0.2, harm(60))] },
-  { id: 'soul-swap', name: 'Soul Swap', kind: O, school: 'shadow', tier: 3, cast: 1.5, cool: 40, cost: 30, flight: 'beam', acts: [swap()] },
+  { id: 'soul-swap', name: 'Soul Swap', kind: O, school: 'shadow', tier: 3, cast: 1, cool: 40, cost: 30, flight: 'beam', acts: [swap()] },
   { id: 'life-tap', name: 'Life Tap', kind: D, school: 'shadow', tier: 1, aim: 'self', cast: 0, cool: 10, cost: 0, flight: 'aura', acts: [harm(100, { pierce: true }), mana(30)] },
   { id: 'resolve', name: 'Resolve', kind: D, school: 'shadow', tier: 2, aim: 'self', cast: 0, cool: 24, cost: 12, flight: 'aura', acts: [mark(6, { name: 'Resolve', kind: 'boon', taken: 0.6, steady: true, look: 'steady' })] },
 
   // Holy ──────────────────────────────────────────────────────────────────
-  { id: 'smite', name: 'Smite', kind: O, school: 'holy', tier: 1, cast: 1, cool: 2, cost: 8, flight: 'fall', acts: [harm(70)] },
+  { id: 'smite', name: 'Smite', kind: O, school: 'holy', tier: 1, cast: 0.7, cool: 2, cost: 8, flight: 'fall', acts: [harm(70)] },
   { id: 'sacred-flame', name: 'Sacred Flame', kind: O, school: 'holy', tier: 1, cast: 0, cool: 4, cost: 8, flight: 'fall', acts: [harm(55, { pierce: true })] },
-  { id: 'guiding-bolt', name: 'Guiding Bolt', kind: O, school: 'holy', tier: 2, cast: 1.2, cool: 8, cost: 16, flight: 'bolt', acts: [harm(120), expose(0.2, 4, 'Guided')] },
-  { id: 'holy-fire', name: 'Holy Fire', kind: O, school: 'holy', tier: 2, cast: 1.5, cool: 10, cost: 18, flight: 'fall', acts: [harm(110), dot(12, 6, 'Holy Fire')] },
+  { id: 'guiding-bolt', name: 'Guiding Bolt', kind: O, school: 'holy', tier: 2, cast: 0.8, cool: 8, cost: 16, flight: 'bolt', acts: [harm(120), expose(0.2, 4, 'Guided')] },
+  { id: 'holy-fire', name: 'Holy Fire', kind: O, school: 'holy', tier: 2, cast: 1, cool: 10, cost: 18, flight: 'fall', acts: [harm(110), dot(12, 6, 'Holy Fire')] },
   { id: 'judgment', name: 'Judgment', kind: O, school: 'holy', tier: 2, cast: 0, cool: 14, cost: 14, flight: 'fall', acts: [harm(80), hush(2.5)] },
   { id: 'holy-shock', name: 'Holy Shock', kind: O, school: 'holy', tier: 2, aim: 'any', cast: 0, cool: 8, cost: 14, flight: 'beam', acts: { foe: [harm(110)], ally: [heal(140)] } },
-  { id: 'sunbeam', name: 'Sunbeam', kind: O, school: 'holy', tier: 3, cast: 2, cool: 18, cost: 30, flight: 'beam', acts: [harm(220), sleep(2, 'Blinded', 'daze')] },
+  { id: 'sunbeam', name: 'Sunbeam', kind: O, school: 'holy', tier: 3, cast: 1.4, cool: 18, cost: 30, flight: 'beam', acts: [harm(220), sleep(2, 'Blinded', 'daze')] },
   { id: 'healing-word', name: 'Healing Word', kind: D, school: 'holy', tier: 1, cast: 0, cool: 4, cost: 8, flight: 'rise', acts: [heal(70)] },
-  { id: 'flash-heal', name: 'Flash Heal', kind: D, school: 'holy', tier: 1, cast: 1, cool: 3, cost: 12, flight: 'rise', acts: [heal(110)] },
+  { id: 'flash-heal', name: 'Flash Heal', kind: D, school: 'holy', tier: 1, cast: 0.7, cool: 3, cost: 12, flight: 'rise', acts: [heal(110)] },
   { id: 'renew', name: 'Renew', kind: D, school: 'holy', tier: 1, cast: 0, cool: 4, cost: 8, flight: 'aura', acts: [hot(18, 8, 'Renew')] },
-  { id: 'power-shield', name: 'Power Shield', kind: D, school: 'holy', tier: 1, cast: 0, cool: 8, cost: 12, flight: 'aura', acts: [ward(130, 10, 'Power Shield')] },
+  { id: 'power-shield', name: 'Power Shield', kind: D, school: 'holy', tier: 1, cast: 0, cool: 8, cost: 12, flight: 'aura', acts: [shield(130, 10, 'Power Shield')] },
   { id: 'cleanse', name: 'Cleanse', kind: D, school: 'holy', tier: 1, cast: 0, cool: 6, cost: 8, flight: 'aura', acts: [cleanse(2)] },
-  { id: 'cure-wounds', name: 'Cure Wounds', kind: D, school: 'holy', tier: 2, cast: 1.5, cool: 4, cost: 16, flight: 'rise', acts: [heal(170)] },
-  { id: 'penance', name: 'Penance', kind: D, school: 'holy', tier: 2, aim: 'any', cast: 1, cool: 10, cost: 16, flight: 'volley', acts: { foe: [harm(45), harm(45), harm(45)], ally: [heal(55), heal(55), heal(55)] } },
+  { id: 'cure-wounds', name: 'Cure Wounds', kind: D, school: 'holy', tier: 2, cast: 1, cool: 4, cost: 16, flight: 'rise', acts: [heal(170)] },
+  { id: 'penance', name: 'Penance', kind: D, school: 'holy', tier: 2, aim: 'any', cast: 0.7, cool: 10, cost: 16, flight: 'volley', acts: { foe: [harm(45), harm(45), harm(45)], ally: [heal(55), heal(55), heal(55)] } },
   { id: 'pain-suppression', name: 'Pain Suppression', kind: D, school: 'holy', tier: 2, cast: 0, cool: 24, cost: 12, flight: 'aura', acts: [armor(0.4, 6, 'Pain Suppression')] },
   { id: 'death-ward', name: 'Death Ward', kind: D, school: 'holy', tier: 2, cast: 0, cool: 30, cost: 16, flight: 'aura', acts: [mark(20, { name: 'Death Ward', kind: 'boon', cheat: 0.1, look: 'cheat' })] },
   { id: 'prayer-of-mending', name: 'Prayer of Mending', kind: D, school: 'holy', tier: 2, cast: 0, cool: 10, cost: 14, flight: 'aura', acts: [mark(20, { name: 'Prayer of Mending', kind: 'boon', struck: [heal(80)], charges: 3, look: 'mend' })] },
   { id: 'bless', name: 'Bless', kind: D, school: 'holy', tier: 2, reach: 'side', cast: 0, cool: 18, cost: 18, flight: 'aura', acts: [mark(8, { name: 'Blessed', kind: 'boon', dealt: 1.15, taken: 0.9, look: 'power' })] },
   { id: 'freedom', team: true, name: 'Freedom', kind: D, school: 'holy', tier: 2, cast: 0, cool: 18, cost: 12, flight: 'aura', acts: [cleanse(9, 'lock'), mark(4, { name: 'Freedom', kind: 'boon', steady: true, look: 'steady' })] },
   { id: 'holy-nova', name: 'Holy Nova', kind: D, school: 'holy', tier: 2, reach: 'side', cast: 0, cool: 12, cost: 18, flight: 'nova', acts: [heal(70)] },
-  { id: 'greater-heal', name: 'Greater Heal', kind: D, school: 'holy', tier: 3, cast: 2.5, cool: 10, cost: 30, flight: 'rise', acts: [heal(360)] },
-  { id: 'prayer-of-healing', name: 'Prayer of Healing', kind: D, school: 'holy', tier: 3, reach: 'side', cast: 2, cool: 14, cost: 30, flight: 'rise', acts: [heal(140)] },
+  { id: 'greater-heal', name: 'Greater Heal', kind: D, school: 'holy', tier: 3, cast: 1.8, cool: 10, cost: 30, flight: 'rise', acts: [heal(360)] },
+  { id: 'prayer-of-healing', name: 'Prayer of Healing', kind: D, school: 'holy', tier: 3, reach: 'side', cast: 1.4, cool: 14, cost: 30, flight: 'rise', acts: [heal(140)] },
   { id: 'guardian-spirit', name: 'Guardian Spirit', kind: D, school: 'holy', tier: 3, cast: 0, cool: 40, cost: 20, flight: 'aura', acts: [mark(8, { name: 'Guardian Spirit', kind: 'boon', cheat: 0.4, mended: 1.4, look: 'cheat' })] },
   { id: 'divine-shield', name: 'Divine Shield', kind: D, school: 'holy', tier: 3, aim: 'self', cast: 0, cool: 45, cost: 16, flight: 'aura', acts: [mark(3, { name: 'Divine Shield', kind: 'boon', immune: true, look: 'immune' })] },
   { id: 'lay-on-hands', name: 'Lay on Hands', kind: D, school: 'holy', tier: 3, cast: 0, cool: 45, cost: 0, flight: 'rise', acts: [heal(500)] },
-  { id: 'revive', team: true, name: 'Revive', kind: D, school: 'holy', tier: 3, aim: 'fallen', cast: 3, cool: 30, cost: 30, flight: 'rise', acts: [revive(0.35)] },
+  { id: 'revive', team: true, name: 'Revive', kind: D, school: 'holy', tier: 3, aim: 'fallen', cast: 2, cool: 30, cost: 30, flight: 'rise', acts: [revive(0.35)] },
 
   // Nature ────────────────────────────────────────────────────────────────
-  { id: 'wrath', name: 'Wrath', kind: O, school: 'nature', tier: 1, cast: 1, cool: 2, cost: 8, flight: 'bolt', acts: [harm(70)] },
+  { id: 'wrath', name: 'Wrath', kind: O, school: 'nature', tier: 1, cast: 0.7, cool: 2, cost: 8, flight: 'bolt', acts: [harm(70)] },
   { id: 'poison-spray', name: 'Poison Spray', kind: O, school: 'nature', tier: 1, cast: 0, cool: 5, cost: 8, flight: 'nova', acts: [harm(35), dot(10, 6, 'Poisoned')] },
   { id: 'acid-splash', name: 'Acid Splash', kind: O, school: 'nature', tier: 1, cast: 0, cool: 6, cost: 8, flight: 'bolt', acts: [harm(45), expose(0.1, 4, 'Corroded')] },
   { id: 'thorn-whip', name: 'Thorn Whip', kind: O, school: 'nature', tier: 1, cast: 0, cool: 8, cost: 10, flight: 'beam', acts: [harm(40), slow(0.25, 4, 'Snared')] },
-  { id: 'entangle', name: 'Entangle', kind: O, school: 'nature', tier: 2, cast: 1, cool: 16, cost: 14, flight: 'rise', acts: [stun(2.5, 'Rooted', 'root'), dot(10, 4, 'Thorned')] },
-  { id: 'insect-swarm', name: 'Insect Swarm', kind: O, school: 'nature', tier: 2, cast: 1, cool: 10, cost: 14, flight: 'nova', acts: [dot(18, 8, 'Swarmed'), weaken(0.2, 8)] },
-  { id: 'earthquake', name: 'Earthquake', kind: O, school: 'nature', tier: 3, reach: 'side', cast: 2, cool: 22, cost: 32, flight: 'rise', acts: [harm(120), stun(1, 'Knocked Down')] },
+  { id: 'entangle', name: 'Entangle', kind: O, school: 'nature', tier: 2, cast: 0.7, cool: 16, cost: 14, flight: 'rise', acts: [stun(2.5, 'Rooted', 'root'), dot(10, 4, 'Thorned')] },
+  { id: 'insect-swarm', name: 'Insect Swarm', kind: O, school: 'nature', tier: 2, cast: 0.7, cool: 10, cost: 14, flight: 'nova', acts: [dot(18, 8, 'Swarmed'), weaken(0.2, 8)] },
+  { id: 'earthquake', name: 'Earthquake', kind: O, school: 'nature', tier: 3, reach: 'side', cast: 1.4, cool: 22, cost: 32, flight: 'rise', acts: [harm(120), stun(1, 'Knocked Down')] },
   { id: 'rejuvenate', name: 'Rejuvenate', kind: D, school: 'nature', tier: 1, cast: 0, cool: 4, cost: 8, flight: 'aura', acts: [hot(15, 10, 'Rejuvenate')] },
   { id: 'barkskin', name: 'Barkskin', kind: D, school: 'nature', tier: 1, aim: 'self', cast: 0, cool: 16, cost: 6, flight: 'aura', acts: [armor(0.25, 8, 'Barkskin')] },
   { id: 'thorns', name: 'Thorns', kind: D, school: 'nature', tier: 1, cast: 0, cool: 12, cost: 8, flight: 'aura', acts: [thorns(35, 12, 'Thorns')] },
   { id: 'lifebloom', name: 'Lifebloom', kind: D, school: 'nature', tier: 2, cast: 0, cool: 8, cost: 14, flight: 'aura', acts: [hot(12, 6, 'Lifebloom', { expire: [heal(150)] })] },
-  { id: 'regrowth', name: 'Regrowth', kind: D, school: 'nature', tier: 2, cast: 1.2, cool: 6, cost: 16, flight: 'rise', acts: [heal(100), hot(10, 6, 'Regrowth')] },
+  { id: 'regrowth', name: 'Regrowth', kind: D, school: 'nature', tier: 2, cast: 0.8, cool: 6, cost: 16, flight: 'rise', acts: [heal(100), hot(10, 6, 'Regrowth')] },
   { id: 'ironbark', name: 'Ironbark', kind: D, school: 'nature', tier: 2, cast: 0, cool: 20, cost: 12, flight: 'aura', acts: [armor(0.3, 8, 'Ironbark')] },
   { id: 'earth-shield', name: 'Earth Shield', kind: D, school: 'nature', tier: 2, cast: 0, cool: 12, cost: 14, flight: 'aura', acts: [mark(20, { name: 'Earth Shield', kind: 'boon', struck: [heal(60)], charges: 4, look: 'mend' })] },
-  { id: 'chain-heal', name: 'Chain Heal', kind: D, school: 'nature', tier: 2, cast: 1.5, cool: 8, cost: 20, flight: 'arc', acts: [chain(2, 0.7, heal(150))] },
-  { id: 'stoneskin', name: 'Stoneskin', kind: D, school: 'nature', tier: 2, cast: 1, cool: 14, cost: 16, flight: 'aura', acts: [ward(160, 12, 'Stoneskin', { taken: 0.9, look: 'stone' })] },
-  { id: 'innervate', name: 'Innervate', kind: D, school: 'nature', tier: 2, cast: 0, cool: 30, cost: 0, flight: 'aura', acts: [mark(8, { name: 'Innervate', kind: 'boon', flow: 3, look: 'mana' })] },
-  { id: 'tranquility', name: 'Tranquility', kind: D, school: 'nature', tier: 3, reach: 'side', cast: 2, cool: 24, cost: 32, flight: 'rise', acts: [hot(30, 6, 'Tranquility')] },
-  { id: 'healing-rain', name: 'Healing Rain', kind: D, school: 'nature', tier: 3, reach: 'side', cast: 1.5, cool: 20, cost: 28, flight: 'fall', acts: [hot(22, 8, 'Healing Rain')] },
-  { id: 'rebirth', team: true, name: 'Rebirth', kind: D, school: 'nature', tier: 3, aim: 'fallen', cast: 1.5, cool: 40, cost: 30, flight: 'rise', acts: [revive(0.25)] },
+  { id: 'chain-heal', name: 'Chain Heal', kind: D, school: 'nature', tier: 2, cast: 1, cool: 8, cost: 20, flight: 'arc', acts: [chain(2, 0.7, heal(150))] },
+  { id: 'stoneskin', name: 'Stoneskin', kind: D, school: 'nature', tier: 2, cast: 0.7, cool: 14, cost: 16, flight: 'aura', acts: [shield(160, 12, 'Stoneskin', { taken: 0.9, look: 'stone' })] },
+  { id: 'innervate', name: 'Innervate', kind: D, school: 'nature', tier: 2, cast: 0, cool: 30, cost: 0, flight: 'aura', acts: [mark(8, { name: 'Innervate', kind: 'boon', regen: 3, look: 'mana' })] },
+  { id: 'tranquility', name: 'Tranquility', kind: D, school: 'nature', tier: 3, reach: 'side', cast: 1.4, cool: 24, cost: 32, flight: 'rise', acts: [hot(30, 6, 'Tranquility')] },
+  { id: 'healing-rain', name: 'Healing Rain', kind: D, school: 'nature', tier: 3, reach: 'side', cast: 1, cool: 20, cost: 28, flight: 'fall', acts: [hot(22, 8, 'Healing Rain')] },
+  { id: 'rebirth', team: true, name: 'Rebirth', kind: D, school: 'nature', tier: 3, aim: 'fallen', cast: 1, cool: 40, cost: 30, flight: 'rise', acts: [revive(0.25)] },
 
   // Arcane ────────────────────────────────────────────────────────────────
-  { id: 'magic-missile', name: 'Magic Missile', kind: O, school: 'arcane', tier: 1, cast: 1, cool: 3, cost: 8, flight: 'volley', acts: [harm(25, { sure: true }), harm(25, { sure: true }), harm(25, { sure: true })] },
+  { id: 'magic-missile', name: 'Magic Missile', kind: O, school: 'arcane', tier: 1, cast: 0.7, cool: 3, cost: 8, flight: 'volley', acts: [harm(25, { sure: true }), harm(25, { sure: true }), harm(25, { sure: true })] },
   { id: 'moonfire', name: 'Moonfire', kind: O, school: 'arcane', tier: 1, cast: 0, cool: 5, cost: 8, flight: 'fall', acts: [harm(40), dot(12, 8, 'Moonfire')] },
   { id: 'purge', name: 'Purge', kind: O, school: 'arcane', tier: 1, cast: 0, cool: 8, cost: 8, flight: 'nova', acts: [purge(2)] },
-  { id: 'mana-burn', name: 'Mana Burn', kind: O, school: 'arcane', tier: 1, cast: 1, cool: 8, cost: 10, flight: 'beam', acts: [burn(25, 2)] },
-  { id: 'arcane-blast', name: 'Arcane Blast', kind: O, school: 'arcane', tier: 2, cast: 1.5, cool: 4, cost: 20, flight: 'bolt', acts: [harm(160)] },
-  { id: 'arcane-missiles', name: 'Arcane Missiles', kind: O, school: 'arcane', tier: 2, cast: 1.5, cool: 8, cost: 16, flight: 'volley', acts: [harm(35), harm(35), harm(35), harm(35), harm(35)] },
-  { id: 'starfire', name: 'Starfire', kind: O, school: 'arcane', tier: 2, cast: 2, cool: 6, cost: 18, flight: 'fall', acts: [harm(190)] },
+  { id: 'mana-burn', name: 'Mana Burn', kind: O, school: 'arcane', tier: 1, cast: 0.7, cool: 8, cost: 10, flight: 'beam', acts: [burn(25, 2)] },
+  { id: 'arcane-blast', name: 'Arcane Blast', kind: O, school: 'arcane', tier: 2, cast: 1, cool: 4, cost: 20, flight: 'bolt', acts: [harm(160)] },
+  { id: 'arcane-missiles', name: 'Arcane Missiles', kind: O, school: 'arcane', tier: 2, cast: 1, cool: 8, cost: 16, flight: 'volley', acts: [harm(35), harm(35), harm(35), harm(35), harm(35)] },
+  { id: 'starfire', name: 'Starfire', kind: O, school: 'arcane', tier: 2, cast: 1.4, cool: 6, cost: 18, flight: 'fall', acts: [harm(190)] },
   { id: 'counterspell', name: 'Counterspell', kind: O, school: 'arcane', tier: 2, cast: 0, cool: 16, cost: 12, flight: 'arc', acts: [interrupt(3)] },
-  { id: 'polymorph', name: 'Polymorph', kind: O, school: 'arcane', tier: 2, cast: 1.5, cool: 18, cost: 14, flight: 'bolt', acts: [mark(6, { name: 'Sheep', kind: 'bane', lock: 'sleep', look: 'sheep', pulse: [heal(20)] })] },
-  { id: 'spell-steal', name: 'Spell Steal', kind: O, school: 'arcane', tier: 2, cast: 1, cool: 10, cost: 14, flight: 'beam', acts: [steal(1)] },
-  { id: 'slow', name: 'Slow', kind: O, school: 'arcane', tier: 2, cast: 1, cool: 14, cost: 12, flight: 'bolt', acts: [slow(0.5, 6)] },
-  { id: 'mana-siphon', name: 'Mana Siphon', kind: O, school: 'arcane', tier: 2, cast: 1, cool: 12, cost: 0, flight: 'beam', acts: [siphon(25)] },
-  { id: 'chaos-bolt', name: 'Chaos Bolt', kind: O, school: 'arcane', tier: 2, cast: 1.5, cool: 8, cost: 18, flight: 'bolt', acts: [pick(harm(160, { school: 'fire' }), harm(160, { school: 'frost' }), harm(160, { school: 'storm' }), harm(160, { school: 'shadow' }), harm(160))] },
-  { id: 'disintegrate', name: 'Disintegrate', kind: O, school: 'arcane', tier: 3, cast: 2, cool: 20, cost: 32, flight: 'beam', acts: [harm(240, { bonus: { when: 'low', times: 2 } })] },
+  { id: 'polymorph', name: 'Polymorph', kind: O, school: 'arcane', tier: 2, cast: 1, cool: 18, cost: 14, flight: 'bolt', acts: [mark(6, { name: 'Sheep', kind: 'bane', lock: 'sleep', look: 'sheep', pulse: [heal(20)] })] },
+  { id: 'spell-steal', name: 'Spell Steal', kind: O, school: 'arcane', tier: 2, cast: 0.7, cool: 10, cost: 14, flight: 'beam', acts: [steal(1)] },
+  { id: 'slow', name: 'Slow', kind: O, school: 'arcane', tier: 2, cast: 0.7, cool: 14, cost: 12, flight: 'bolt', acts: [slow(0.5, 6)] },
+  { id: 'mana-siphon', name: 'Mana Siphon', kind: O, school: 'arcane', tier: 2, cast: 0.7, cool: 12, cost: 0, flight: 'beam', acts: [siphon(25)] },
+  { id: 'chaos-bolt', name: 'Chaos Bolt', kind: O, school: 'arcane', tier: 2, cast: 1, cool: 8, cost: 18, flight: 'bolt', acts: [pick(harm(160, { school: 'fire' }), harm(160, { school: 'frost' }), harm(160, { school: 'storm' }), harm(160, { school: 'shadow' }), harm(160))] },
+  { id: 'disintegrate', name: 'Disintegrate', kind: O, school: 'arcane', tier: 3, cast: 1.4, cool: 20, cost: 32, flight: 'beam', acts: [harm(240, { bonus: { when: 'low', times: 2 } })] },
   { id: 'starfall', name: 'Starfall', kind: O, school: 'arcane', tier: 3, cast: 0, cool: 24, cost: 30, flight: 'fall', acts: [scatter(6, harm(55))] },
-  { id: 'time-stop', name: 'Time Stop', kind: O, school: 'arcane', tier: 3, reach: 'side', cast: 1, cool: 40, cost: 30, flight: 'nova', acts: [stun(2.5, 'Time Stopped', 'time')] },
-  { id: 'feeblemind', name: 'Feeblemind', kind: O, school: 'arcane', tier: 3, cast: 2, cool: 30, cost: 26, flight: 'beam', acts: [harm(100), hush(4, 'Feebleminded'), burn(30)] },
-  { id: 'prismatic-spray', name: 'Prismatic Spray', kind: O, school: 'arcane', tier: 3, reach: 'side', cast: 1.5, cool: 20, cost: 30, flight: 'nova', acts: [pick(harm(140, { school: 'fire' }), harm(140, { school: 'frost' }), harm(140, { school: 'storm' }), harm(140, { school: 'nature' }), hush(3), stun(2, 'Petrified', 'stone'), slow(0.5, 5))] },
-  { id: 'arcane-ward', name: 'Arcane Ward', kind: D, school: 'arcane', tier: 1, cast: 0, cool: 8, cost: 10, flight: 'aura', acts: [ward(100, 8, 'Arcane Ward')] },
-  { id: 'mage-armor', name: 'Mage Armor', kind: D, school: 'arcane', tier: 1, aim: 'self', cast: 0, cool: 16, cost: 8, flight: 'aura', acts: [ward(100, 10, 'Mage Armor', { taken: 0.9 })] },
+  { id: 'time-stop', name: 'Time Stop', kind: O, school: 'arcane', tier: 3, reach: 'side', cast: 0.7, cool: 40, cost: 30, flight: 'nova', acts: [stun(2.5, 'Time Stopped', 'time')] },
+  { id: 'feeblemind', name: 'Feeblemind', kind: O, school: 'arcane', tier: 3, cast: 1.4, cool: 30, cost: 26, flight: 'beam', acts: [harm(100), hush(4, 'Feebleminded'), burn(30)] },
+  { id: 'prismatic-spray', name: 'Prismatic Spray', kind: O, school: 'arcane', tier: 3, reach: 'side', cast: 1, cool: 20, cost: 30, flight: 'nova', acts: [pick(harm(140, { school: 'fire' }), harm(140, { school: 'frost' }), harm(140, { school: 'storm' }), harm(140, { school: 'nature' }), hush(3), stun(2, 'Petrified', 'stone'), slow(0.5, 5))] },
+  { id: 'arcane-ward', name: 'Arcane Ward', kind: D, school: 'arcane', tier: 1, cast: 0, cool: 8, cost: 10, flight: 'aura', acts: [shield(100, 8, 'Arcane Ward')] },
+  { id: 'mage-armor', name: 'Mage Armor', kind: D, school: 'arcane', tier: 1, aim: 'self', cast: 0, cool: 16, cost: 8, flight: 'aura', acts: [shield(100, 10, 'Mage Armor', { taken: 0.9 })] },
   { id: 'dispel-magic', name: 'Dispel Magic', kind: D, school: 'arcane', tier: 1, aim: 'any', cast: 0, cool: 6, cost: 8, flight: 'aura', acts: { foe: [purge(1)], ally: [cleanse(1)] } },
   { id: 'mirror-image', name: 'Mirror Image', kind: D, school: 'arcane', tier: 2, aim: 'self', cast: 0, cool: 20, cost: 14, flight: 'aura', acts: [mark(10, { name: 'Mirror Image', kind: 'boon', evade: true, charges: 2, look: 'mirror' })] },
   { id: 'haste', name: 'Haste', kind: D, school: 'arcane', tier: 2, cast: 0, cool: 18, cost: 14, flight: 'aura', acts: [haste(0.5, 8)] },
   { id: 'mana-shield', name: 'Mana Shield', kind: D, school: 'arcane', tier: 2, aim: 'self', cast: 0, cool: 16, cost: 8, flight: 'aura', acts: [mark(10, { name: 'Mana Shield', kind: 'boon', shift: 0.6, look: 'mana' })] },
   { id: 'spell-reflect', name: 'Spell Reflect', kind: D, school: 'arcane', tier: 2, cast: 0, cool: 16, cost: 12, flight: 'aura', acts: [mark(6, { name: 'Spell Reflect', kind: 'boon', mirror: true, charges: 1, look: 'mirror' })] },
   { id: 'rewind', name: 'Rewind', kind: D, school: 'arcane', tier: 2, aim: 'self', cast: 0, cool: 30, cost: 12, flight: 'aura', acts: [mark(6, { name: 'Rewind', kind: 'boon', rewind: true, look: 'rewind' })] },
-  { id: 'evocation', name: 'Evocation', kind: D, school: 'arcane', tier: 2, aim: 'self', cast: 2, cool: 30, cost: 0, flight: 'aura', acts: [mana(50)] },
-  { id: 'globe', name: 'Globe of Warding', kind: D, school: 'arcane', tier: 3, reach: 'side', cast: 1, cool: 40, cost: 28, flight: 'nova', acts: [armor(0.5, 4, 'Warded')] },
+  { id: 'evocation', name: 'Evocation', kind: D, school: 'arcane', tier: 2, aim: 'self', cast: 1.4, cool: 30, cost: 0, flight: 'aura', acts: [mana(50)] },
+  { id: 'globe', name: 'Globe of Warding', kind: D, school: 'arcane', tier: 3, reach: 'side', cast: 0.7, cool: 40, cost: 28, flight: 'nova', acts: [armor(0.5, 4, 'Warded')] },
   { id: 'time-warp', name: 'Time Warp', kind: D, school: 'arcane', tier: 3, cast: 0, cool: 45, cost: 20, flight: 'aura', acts: [refresh()] },
-  { id: 'banish', name: 'Banish', kind: D, school: 'arcane', tier: 3, aim: 'any', cast: 1, cool: 30, cost: 20, flight: 'bolt', acts: [mark(4, { name: 'Banished', kind: 'bane', immune: true, lock: 'stun', look: 'banish' })] },
+  { id: 'banish', name: 'Banish', kind: D, school: 'arcane', tier: 3, aim: 'any', cast: 0.7, cool: 30, cost: 20, flight: 'bolt', acts: [mark(4, { name: 'Banished', kind: 'bane', immune: true, lock: 'stun', look: 'banish' })] },
 ]
 
 /** Fill defaults and attach roles and text, so every spell has the same shape. */
 function defineSpell(raw) {
   const spell = {
-    aim: raw.kind === O ? 'foe' : 'ally',
+    aim: raw.kind === D ? 'ally' : 'foe',
     reach: 'one',
     cast: 0,
     ...raw,
@@ -487,8 +537,64 @@ function defineSpell(raw) {
   return Object.freeze(spell)
 }
 
+/**
+ * Wisp spells: a fallen mage drifts as a wisp and keeps a tiny book of its
+ * own, with no mana and short chords, until revived or the match ends.
+ */
+const WISP_LIST = [
+  { id: 'glimmer', name: 'Glimmer', kind: 'wisp', school: 'holy', tier: 1, aim: 'ally', cast: 0, cool: 5, cost: 0, flight: 'aura', acts: [heal(40)] },
+  { id: 'hinder', name: 'Hinder', kind: 'wisp', school: 'arcane', tier: 1, aim: 'foe', cast: 0, cool: 6, cost: 0, flight: 'aura', acts: [slow(0.2, 3, 'Hindered')] },
+  { id: 'kindle', name: 'Kindle', kind: 'wisp', school: 'arcane', tier: 1, aim: 'ally', cast: 0, cool: 8, cost: 0, flight: 'aura', acts: [mana(12)] },
+]
+
 export const CODEX = SPELL_LIST.map(defineSpell)
-export const SPELL = Object.fromEntries(CODEX.map((spell) => [spell.id, spell]))
+export const WISPS = WISP_LIST.map(defineSpell)
+export const SPELL = Object.fromEntries([...CODEX, ...WISPS].map((spell) => [spell.id, spell]))
+
+/** True when a spell applies an aura somewhere, so Extend has something to stretch. */
+export function lasts(spell) {
+  let found = false
+  walkActs(spell.acts, (act) => (found ||= act.op === 'mark'))
+  return found
+}
+
+/** Why a set of metamagic cannot shape a spell, or null. */
+export function metaFault(spell, metas) {
+  if (!metas.length) return null
+  if (spell.kind === 'wisp') return 'Wisps can’t shape spells'
+  if (metas.includes('twin') && (spell.reach !== 'one' || spell.aim === 'self' || spell.aim === 'fallen')) return 'Can’t twin'
+  if (metas.includes('extend') && !lasts(spell)) return 'Nothing to extend'
+  return null
+}
+
+/** Mana for a spell with its metamagic and the caster's flow. */
+export function costOf(spell, metas = [], flow = 0) {
+  let cost = spell.cost
+  if (metas.length) cost = Math.max(cost, 6) * metas.reduce((product, id) => product * METAS[id].cost, 1)
+  return Math.ceil(cost * (1 - TIMING.flowCost * flow))
+}
+
+/** Share of the cast time a chord leaves, from the seconds between its keys. */
+export function swiftOf(gap) {
+  const [fast, slow] = TIMING.swift
+  return TIMING.quick + (1 - TIMING.quick) * clamp((gap - fast) / (slow - fast), 0, 1)
+}
+
+/** Cast seconds for a spell with its metamagic and the chord's swiftness. */
+export function castOf(spell, metas = [], swift = 1) {
+  if (metas.includes('quicken')) return 0
+  return spell.cast * swift * (metas.includes('empower') ? METAS.empower.slow : 1)
+}
+
+/** The reaction a hit of `school` sets off on a mage, and the bane it uses: { reaction, aura } or null. */
+export function reactionOn(mage, school) {
+  for (const reaction of REACTIONS) {
+    if (reaction.hit !== school) continue
+    const aura = mage.auras.findLast((a) => a.kind === 'bane' && a.school === reaction.on)
+    if (aura) return { reaction, aura }
+  }
+  return null
+}
 
 /** The acts a spell runs on one target (aim 'any' splits by side). */
 export function actsFor(spell, caster, target) {
@@ -520,7 +626,7 @@ export function rolesOf(spell) {
     if (['mana', 'burn', 'siphon'].includes(act.op)) roles.add('mana')
     if (aura.guard || aura.immune || aura.cheat || aura.mirror || aura.evade || aura.thorns || aura.steady || aura.rewind || aura.shift || (aura.taken && aura.taken < 1)) roles.add('guard')
     if (aura.dealt || aura.pace || (aura.taken && aura.taken > 1) || aura.mended !== undefined) roles.add('tempo')
-    if (aura.flow) roles.add('mana')
+    if (aura.regen) roles.add('mana')
     if (['refresh', 'swap', 'spread'].includes(act.op)) roles.add('tempo')
   })
   return [...roles]
@@ -529,8 +635,10 @@ export function rolesOf(spell) {
 // ─── 6 · Book ───────────────────────────────────────────────────────────────
 //
 // Each match draws a fresh book: half offense, half defense, a spread of
-// tiers, and a random chord (a run of runes) per spell. Chord length is
-// tier + 1. Chords are prefix-free, so a chord fires the moment it is whole.
+// tiers, and a random chord (a run of runes) per spell. Chord length grows
+// with tier (CHORD_LENGTH). Chords are prefix-free, so a chord fires the
+// moment it is whole. Each player drafts a kit from the book before the
+// fight, and the rift rewrites a few chords as the fight goes on.
 
 /** How many spells of each tier for a half-book of `count`. */
 export function splitTiers(count) {
@@ -565,12 +673,38 @@ function clashes(sigil, taken) {
   })
 }
 
-function drawSigil(dice, length, taken) {
+function drawSigil(dice, length, taken, old = null) {
   for (let attempt = 0; attempt < 400; attempt++) {
     const sigil = Array.from({ length }, () => dice.pick(RUNES))
-    if (!clashes(sigil, taken)) return sigil
+    if (!clashes(sigil, taken) && sigil.join() !== old?.join()) return sigil
   }
   throw new Error(`No free chord of length ${length}`)
+}
+
+/**
+ * Rewrite the chords of `count` spells in a book, keeping it prefix-free.
+ * Returns the changes as [{ id, sigil }]; the book is changed in place.
+ */
+export function shiftBook(dice, book, count) {
+  const moved = dice.shuffle(book).slice(0, Math.min(count, book.length))
+  const taken = book.filter((entry) => !moved.includes(entry)).map((entry) => entry.sigil)
+  return moved
+    .sort((a, b) => a.sigil.length - b.sigil.length)
+    .map((entry) => {
+      entry.sigil = drawSigil(dice, entry.sigil.length, taken, entry.sigil)
+      taken.push(entry.sigil)
+      return { id: entry.id, sigil: entry.sigil }
+    })
+}
+
+/** The wisp book: every wisp spell with its own short, prefix-free chord. */
+export function writeWisps(dice) {
+  const taken = []
+  return WISPS.map((spell) => {
+    const sigil = drawSigil(dice, CHORD_LENGTH[spell.tier], taken)
+    taken.push(sigil)
+    return { id: spell.id, sigil }
+  })
 }
 
 /**
@@ -585,12 +719,58 @@ export function writeBook(dice, size = RULES.book, teams = RULES.teams) {
   const book = [...spells]
     .sort((a, b) => a.tier - b.tier)
     .map((spell) => {
-      const sigil = drawSigil(dice, spell.tier + 1, taken)
+      const sigil = drawSigil(dice, CHORD_LENGTH[spell.tier], taken)
       taken.push(sigil)
       return { id: spell.id, sigil }
     })
   const order = (entry) => KINDS.indexOf(SPELL[entry.id].kind) * 10 + SPELL[entry.id].tier
   return book.sort((a, b) => order(a) - order(b) || SPELL[a.id].name.localeCompare(SPELL[b.id].name))
+}
+
+/**
+ * A balanced kit of `size` spells drafted from a book: half offense (rounded
+ * up) and half defense, leaning to damage, healing and guards. `noise` shakes
+ * the choices; spells in `shared` (a teammate's picks) are worth a little
+ * less; `start` holds picks already made, which are kept.
+ */
+export function pickKit(dice, book, size, { noise = 0.3, shared = [], start = [] } = {}) {
+  const worth = (spell) => {
+    let score = 1 + spell.tier * 0.15
+    if (spell.kind === 'offense') score += spell.roles.includes('damage') ? 1 : 0.3
+    else score += spell.roles.includes('heal') ? 1 : spell.roles.includes('guard') ? 0.7 : 0.3
+    if (spell.roles.includes('control')) score += 0.4
+    if (shared.includes(spell.id)) score -= 0.35
+    return score * (1 + dice.float(-noise, noise))
+  }
+  const ranked = book
+    .map((entry) => SPELL[entry.id])
+    .map((spell) => ({ spell, score: worth(spell) }))
+    .sort((a, b) => b.score - a.score)
+  const kit = start.filter((id) => book.some((entry) => entry.id === id)).slice(0, size)
+  const room = { offense: Math.ceil(size / 2), defense: Math.floor(size / 2) }
+  for (const id of kit) room[SPELL[id].kind]--
+  for (const { spell } of ranked) if (kit.length < size && !kit.includes(spell.id) && room[spell.kind]-- > 0) kit.push(spell.id)
+  for (const { spell } of ranked) if (kit.length < size && !kit.includes(spell.id)) kit.push(spell.id)
+  return kit
+}
+
+/**
+ * Read a chord's keys: the spell runes, the metamagic picked (meta then a
+ * rune), and whether a meta is waiting for its rune. Moves are skipped.
+ */
+export function readChord(keys) {
+  const out = { runes: [], metas: [], arming: false }
+  for (const key of keys) {
+    if (key === 'meta') out.arming = true
+    else if (!RUNES.includes(key)) continue
+    else if (!out.arming) out.runes.push(key)
+    else {
+      out.arming = false
+      const id = META_OF_RUNE[key]
+      if (!out.metas.includes(id)) out.metas.push(id)
+    }
+  }
+  return out
 }
 
 /** Match runes against the book: an entry when whole, 'open' when partial, null when dead. */
@@ -608,8 +788,9 @@ export function readRunes(book, runes) {
 // ─── 7 · Board ──────────────────────────────────────────────────────────────
 //
 // Teams stand in two rows facing each other across the rift. Each player sees
-// their own team in the near row. The target cursor starts on yourself:
-// up/down swap rows, left/right walk along a row, as seen from your side.
+// their own team in the near row. The target cursor starts on yourself and
+// stays where it was left between chords: up/down swap rows, down on your own
+// row snaps back to you, left/right walk along a row, as seen from your side.
 
 export const LAYOUT = { gap: 3.2, row: 3.8 }
 
@@ -624,13 +805,13 @@ export function rowOf(mages, team, viewer) {
   return viewer === 0 ? row : row.reverse()
 }
 
-/** Where the cursor lands after one move. */
-export function moveCursor(mages, viewer, cursorId, move) {
+/** Where the cursor lands after one move. `selfId` is the mover, for down's snap home. */
+export function moveCursor(mages, viewer, cursorId, move, selfId = null) {
   const cursor = mages.find((m) => m.id === cursorId)
-  if (!cursor) return cursorId
+  if (!cursor) return selfId ?? cursorId
   if (move === 'up' || move === 'down') {
     const team = move === 'up' ? 1 - viewer : viewer
-    if (team === cursor.team) return cursorId
+    if (team === cursor.team) return move === 'down' && selfId ? selfId : cursorId
     const from = rowOf(mages, cursor.team, viewer)
     const to = rowOf(mages, team, viewer)
     const share = (from.indexOf(cursor) + 0.5) / from.length
@@ -641,24 +822,31 @@ export function moveCursor(mages, viewer, cursorId, move) {
   return row[index].id
 }
 
-/** The moves that walk the cursor from one mage to another. */
-export function pathTo(mages, viewer, fromId, toId) {
+/** The fewest moves that walk the cursor from one mage to another. `selfId` allows the snap home. */
+export function pathTo(mages, viewer, fromId, toId, selfId = null) {
   const moves = []
   let cursor = fromId
   const target = mages.find((m) => m.id === toId)
-  if (!target) return moves
-  if (mages.find((m) => m.id === cursor).team !== target.team) {
+  const from = mages.find((m) => m.id === cursor)
+  if (!target || !from) return moves
+  if (from.team !== target.team) {
     const move = target.team === viewer ? 'down' : 'up'
     moves.push(move)
-    cursor = moveCursor(mages, viewer, cursor, move)
+    cursor = moveCursor(mages, viewer, cursor, move, selfId)
   }
   const row = rowOf(mages, target.team, viewer)
   const step = row.indexOf(target) - row.findIndex((m) => m.id === cursor)
+  if (toId === selfId && Math.abs(step) > 1) return [...moves, 'down']
   for (let i = 0; i < Math.abs(step); i++) moves.push(step < 0 ? 'left' : 'right')
   return moves
 }
 
 // ─── 8 · Match ──────────────────────────────────────────────────────────────
+//
+// Phases: 'ready' (the draft: whole chords add spells to your kit), 'fight'
+// and 'over'. Each mage keeps a sticky aim, a chord in progress, a ward, a
+// flow streak and diminishing returns per lock group. A fallen mage drifts
+// as a wisp and casts from the wisp book until revived.
 
 const LOCK_ORDER = ['stun', 'sleep', 'hush']
 
@@ -672,18 +860,28 @@ export function lockOf(mage) {
   return best
 }
 
+/** Diminishing returns group of a lock: stuns and sleeps share one, silences have their own. */
+export const lockGroup = (lock) => (lock === 'hush' ? 'hush' : 'lock')
+
+/** Cast speed from flow stacks. */
+export const flowPace = (flow) => 1 + TIMING.flowPace * flow
+
 const factor = (mage, field) => mage.auras.reduce((value, aura) => (aura.def[field] != null ? value * aura.def[field] : value), 1)
 const flagged = (mage, field) => mage.auras.some((aura) => aura.def[field])
 const guardOf = (mage) => mage.auras.reduce((sum, aura) => sum + (aura.guard ?? 0), 0)
+const knocks = (lock) => lock === 'stun' || lock === 'sleep'
 
 const auraRules = (aura) => aura.def ?? aura.rules ?? aura
 
 function meets(when, mage) {
-  if (when === 'locked') return mage.auras.some((a) => auraRules(a).lock === 'stun' || auraRules(a).lock === 'sleep')
+  if (when === 'locked') return mage.auras.some((a) => knocks(auraRules(a).lock))
   if (when === 'burning') return mage.auras.some((a) => a.kind === 'bane' && a.school === 'fire')
   if (when === 'low') return mage.life / mage.lifeMax <= 0.3
   return false
 }
+
+/** A chord in progress: keys, spell runes, metamagic, and when its timed keys began. */
+const freshChord = (tick) => ({ keys: [], runes: [], metas: [], arming: false, start: -1, count: 0, last: tick })
 
 function makeMage(seat, rules) {
   return {
@@ -700,12 +898,20 @@ function makeMage(seat, rules) {
     auras: [],
     cast: null,
     queue: null,
-    chord: { keys: [], runes: [], cursor: seat.id, last: 0 },
+    aim: seat.id,
+    chord: freshChord(0),
+    kit: [],
     cools: {},
     recover: 0,
     stagger: 0,
+    ward: { until: -1, ready: 0 },
+    flow: 0,
+    flowAt: 0,
+    dr: { lock: { level: 0, until: 0 }, hush: { level: 0, until: 0 } },
+    grace: 0,
+    callReady: 0,
     seq: 0,
-    stats: { dealt: 0, healed: 0, taken: 0, casts: 0, fizzles: 0, kills: 0 },
+    stats: { dealt: 0, healed: 0, taken: 0, casts: 0, fizzles: 0, kills: 0, parries: 0, combos: 0, flow: 0 },
   }
 }
 
@@ -731,16 +937,24 @@ export class Match {
     this.rules = tidyRules(rules)
     this.dice = new Dice(this.seed)
     this.book = writeBook(this.dice.fork('book'), this.rules.book, this.rules.teams)
+    this.wisps = writeWisps(this.dice.fork('wisps'))
     this.tick = 0
     this.phase = 'ready'
-    this.fightAt = secs(TIMING.ready)
-    this.surgeAt = this.fightAt + secs(this.rules.surge)
+    this.time(secs(TIMING.ready))
     this.winner = null
     this.mages = seatRoster(roster).map((seat) => makeMage(seat, this.rules))
     this.index = new Map(this.mages.map((m) => [m.id, m]))
     this.flights = []
+    this.calls = [null, null]
     this.inbox = []
     this.events = []
+  }
+
+  /** Set the tick the fight begins; the surge and the first reshuffle follow from it. */
+  time(fightAt) {
+    this.fightAt = fightAt
+    this.surgeAt = fightAt + secs(this.rules.surge)
+    this.shiftAt = fightAt + secs(TIMING.shift)
   }
 
   // Messages in ──────────────────────────────────────────────────────────
@@ -750,7 +964,7 @@ export class Match {
     this.inbox.push(order)
   }
 
-  /** Take every event emitted since the last flush. */
+  /** Take every event emitted since the last flush. Events with `only` are for that team alone. */
   flush() {
     const out = this.events
     this.events = []
@@ -767,18 +981,32 @@ export class Match {
     if (this.phase === 'over') return
     this.tick++
     for (const order of this.inbox.splice(0)) this.handle(order)
-    if (this.phase === 'ready' && this.tick >= this.fightAt) {
-      this.phase = 'fight'
-      this.emit('start')
+    if (this.phase === 'ready') {
+      for (const mage of this.mages) this.lapse(mage)
+      const full = this.mages.every((m) => m.kit.length >= this.rules.kit)
+      if (full && this.fightAt > this.tick + secs(TIMING.early)) this.time(this.tick + secs(TIMING.early))
+      if (this.tick < this.fightAt) return
+      this.begin()
     }
     if (this.phase !== 'fight') return
     this.surge()
-    for (const mage of this.mages) if (!mage.down) this.tend(mage)
+    this.reshuffle()
+    for (const mage of this.mages) mage.down ? this.lapse(mage) : this.tend(mage)
     for (const flight of this.flights.filter((f) => f.land <= this.tick)) {
       this.flights.splice(this.flights.indexOf(flight), 1)
       this.land(flight)
     }
     this.judgeEnd()
+  }
+
+  /** The fight begins: kits left short are filled for their owners, chords start clean. */
+  begin() {
+    for (const mage of this.mages) {
+      if (mage.kit.length < this.rules.kit) mage.kit = pickKit(this.dice.fork(`kit:${mage.id}`), this.book, this.rules.kit, { start: mage.kit })
+      mage.chord = freshChord(this.tick)
+    }
+    this.phase = 'fight'
+    this.emit('start')
   }
 
   handle(order) {
@@ -788,25 +1016,33 @@ export class Match {
     this.press(mage, order.key)
   }
 
-  /** Regen, auras, chord timeout, cast progress and queued casts for one mage. */
+  /** Regen, auras, chord timeout, flow, cast progress and queued casts for one standing mage. */
   tend(mage) {
-    mage.mana = Math.min(mage.manaMax, mage.mana + (TIMING.regen / TICK_RATE) * factor(mage, 'flow'))
+    mage.mana = Math.min(mage.manaMax, mage.mana + (TIMING.regen / TICK_RATE) * factor(mage, 'regen'))
     this.tendAuras(mage)
     if (mage.down) return
-    const chord = mage.chord
-    if (chord.keys.length && this.tick - chord.last > secs(TIMING.idle)) {
-      this.clearChord(mage)
-      this.emit('lapse', { mage: mage.id })
-    }
+    this.lapse(mage)
+    this.ebb(mage)
     if (mage.cast) {
       if (lockOf(mage)) return this.stopCast(mage, 'break')
-      mage.cast.done += factor(mage, 'pace')
-      if (mage.cast.done >= mage.cast.total) this.fire(mage, SPELL[mage.cast.spell], this.index.get(mage.cast.target))
+      mage.cast.done += factor(mage, 'pace') * flowPace(mage.flow)
+      if (mage.cast.done >= mage.cast.total) {
+        const cast = mage.cast
+        mage.cast = null
+        this.fire(mage, SPELL[cast.spell], this.index.get(cast.target), cast)
+      }
     } else if (mage.queue && this.tick >= mage.recover) {
       const queued = mage.queue
       mage.queue = null
-      this.order(mage, queued.spell, queued.target)
+      this.order(mage, queued.spell, queued.target, queued)
     }
+  }
+
+  /** Clear a chord left idle too long. */
+  lapse(mage) {
+    if (!mage.chord.keys.length || this.tick - mage.chord.last <= secs(TIMING.idle)) return
+    this.clearChord(mage)
+    this.emit('lapse', { mage: mage.id })
   }
 
   tendAuras(mage) {
@@ -831,8 +1067,9 @@ export class Match {
     }
   }
 
+  /** Context for an aura's own acts; Empower's power rides along with the aura. */
   auraContext(aura, mage, scale) {
-    return { from: this.index.get(aura.from) ?? null, to: mage, spell: aura.spell, name: aura.name, school: aura.school, direct: false, scale }
+    return { from: this.index.get(aura.from) ?? null, to: mage, spell: aura.spell, name: aura.name, school: aura.school, direct: false, scale: scale * (aura.power ?? 1) }
   }
 
   surge() {
@@ -842,6 +1079,20 @@ export class Match {
     for (const mage of this.mages) {
       if (!mage.down) this.hurt(null, mage, mage.lifeMax * TIMING.surge * wave, { school: 'arcane', pierce: true, exact: true })
     }
+  }
+
+  /** Every so often, and when the surge begins, the rift rewrites a quarter of the book's chords. */
+  reshuffle() {
+    const due = this.tick === this.shiftAt || this.tick === this.surgeAt
+    if (this.tick === this.shiftAt) this.shiftAt += secs(TIMING.shift)
+    if (!due) return
+    const changes = shiftBook(this.dice.fork(`shift:${this.tick}`), this.book, Math.max(2, Math.round(this.book.length / 4)))
+    for (const mage of this.mages) {
+      if (!mage.chord.runes.length || mage.down) continue
+      this.clearChord(mage)
+      this.emit('lapse', { mage: mage.id })
+    }
+    this.emit('shift', { changes })
   }
 
   get surging() {
@@ -869,25 +1120,76 @@ export class Match {
 
   // Chords ───────────────────────────────────────────────────────────────
 
+  /** The book a mage reads chords from right now: the match book, or the wisp book when down. */
+  bookOf(mage) {
+    return mage.down ? this.wisps : this.book
+  }
+
+  /** The entries a mage can cast right now: its kit, or the wisp book when down. */
+  usable(mage) {
+    return mage.down ? this.wisps : this.book.filter((entry) => mage.kit.includes(entry.id))
+  }
+
   press(mage, key) {
-    if (this.phase !== 'fight' || mage.down) return
-    const lock = lockOf(mage)
-    if (lock === 'stun' || lock === 'sleep' || this.tick < mage.stagger) return
-    const chord = mage.chord
+    if (this.phase === 'ready') return this.draftKey(mage, key)
+    if (this.phase !== 'fight') return
+    const lock = mage.down ? null : lockOf(mage)
+    if (knocks(lock) || this.tick < mage.stagger) return
     if (key === 'drop') return this.dropKey(mage)
+    if (key === 'ward') return this.raiseWard(mage)
+    if (key === 'call') return this.callTarget(mage)
+    const chord = mage.chord
     chord.keys.push(key)
     chord.last = this.tick
     if (MOVES.includes(key)) {
-      chord.cursor = moveCursor(this.mages, mage.team, chord.cursor, key)
+      mage.aim = moveCursor(this.mages, mage.team, mage.aim, key, mage.id)
+      return
+    }
+    if (chord.start < 0) chord.start = this.tick
+    chord.count++
+    if (key === 'meta') {
+      chord.arming = true
+      return
+    }
+    if (chord.arming) {
+      chord.arming = false
+      const meta = META_OF_RUNE[key]
+      if (!chord.metas.includes(meta)) chord.metas.push(meta)
       return
     }
     chord.runes.push(key)
-    const read = readRunes(this.book, chord.runes)
+    const read = readRunes(this.bookOf(mage), chord.runes)
     if (read === 'open') return
-    const target = chord.cursor
+    const { metas, start, count } = chord
+    const swift = swiftOf((this.tick - start) / TICK_RATE / Math.max(1, count - 1))
     this.clearChord(mage)
     if (!read) return this.fizzle(mage, 'Unknown chord')
-    this.order(mage, read.id, target)
+    this.order(mage, read.id, mage.aim, { metas, swift })
+  }
+
+  /** Before the fight a whole chord adds its spell to the kit, or takes it out. */
+  draftKey(mage, key) {
+    if (key === 'drop') return this.clearChord(mage)
+    if (!RUNES.includes(key)) return
+    const chord = mage.chord
+    chord.keys.push(key)
+    chord.runes.push(key)
+    chord.last = this.tick
+    const read = readRunes(this.book, chord.runes)
+    if (read === 'open') return
+    this.clearChord(mage)
+    if (!read) return this.emit('fizzle', { mage: mage.id, why: 'Unknown chord', spell: null, only: mage.team })
+    this.pick(mage, read.id)
+  }
+
+  /** Add a spell from the book to a mage's kit, or take it out again. */
+  pick(mage, id) {
+    if (this.phase !== 'ready' || !this.book.some((entry) => entry.id === id)) return
+    const at = mage.kit.indexOf(id)
+    if (at >= 0) mage.kit.splice(at, 1)
+    else if (mage.kit.length >= this.rules.kit) return this.emit('fizzle', { mage: mage.id, why: 'Kit is full', spell: id, only: mage.team })
+    else mage.kit.push(id)
+    this.emit('pick', { mage: mage.id, spell: id, on: at < 0, only: mage.team })
   }
 
   dropKey(mage) {
@@ -898,17 +1200,59 @@ export class Match {
     else if (mage.cast) this.stopCast(mage, 'drop')
   }
 
+  /** A new, empty chord. The aim stays where it was. */
   clearChord(mage) {
-    mage.chord = { keys: [], runes: [], cursor: mage.id, last: this.tick }
+    mage.chord = freshChord(this.tick)
+  }
+
+  /** Raise a ward: hostile spells that land in the next moment are turned back on their casters. */
+  raiseWard(mage) {
+    if (mage.down || this.tick < mage.ward.ready) return
+    mage.ward = { until: this.tick + secs(TIMING.ward) - 1, ready: this.tick + secs(TIMING.wardCool) }
+    this.emit('ward', { mage: mage.id })
+  }
+
+  /** Call the aimed mage for the team: teammates see a marker and bots focus it. */
+  callTarget(mage) {
+    if (this.tick < mage.callReady) return
+    mage.callReady = this.tick + secs(1)
+    this.calls[mage.team] = { by: mage.id, target: mage.aim, until: this.tick + secs(TIMING.call) }
+    this.emit('call', { mage: mage.id, target: mage.aim, only: mage.team })
+  }
+
+  // Flow ─────────────────────────────────────────────────────────────────
+
+  setFlow(mage, flow) {
+    flow = clamp(flow, 0, TIMING.flow)
+    if (flow === mage.flow) return
+    mage.flow = flow
+    mage.stats.flow = Math.max(mage.stats.flow, flow)
+    this.emit('flow', { mage: mage.id, flow })
+  }
+
+  /** One more stack for a cast, a parry or a reaction; the streak's clock restarts. */
+  riseFlow(mage) {
+    mage.flowAt = this.tick
+    this.setFlow(mage, mage.flow + 1)
+  }
+
+  /** After a while without a cast, flow falls one stack at a time. */
+  ebb(mage) {
+    if (!mage.flow || this.tick - mage.flowAt < secs(TIMING.flowFade)) return
+    mage.flowAt = this.tick - secs(TIMING.flowFade) + secs(1.5)
+    this.setFlow(mage, mage.flow - 1)
   }
 
   // Casting ──────────────────────────────────────────────────────────────
 
-  /** Why a mage cannot cast a spell on a target right now, or null. */
-  fault(mage, spell, target) {
-    if (lockOf(mage) === 'hush') return 'Silenced'
+  /** Why a mage cannot cast a spell (with metamagic) on a target right now, or null. */
+  fault(mage, spell, target, metas = []) {
+    if (mage.down !== (spell.kind === 'wisp') || (!mage.down && !mage.kit.includes(spell.id))) return 'Not in kit'
+    if (!mage.down && lockOf(mage) === 'hush') return 'Silenced'
     if ((mage.cools[spell.id] ?? 0) > this.tick) return 'Not ready'
-    if (mage.mana < spell.cost) return 'Low mana'
+    const shape = metaFault(spell, metas)
+    if (shape) return shape
+    if (mage.mana < costOf(spell, metas, mage.flow)) return 'Low mana'
     if (!target) return 'No target'
     const ally = target.team === mage.team
     if (spell.aim === 'foe' && ally) return 'Needs a foe'
@@ -918,47 +1262,61 @@ export class Match {
     return null
   }
 
-  order(mage, spellId, targetId) {
+  /** Who a spell lands on: self spells on the caster, and ally spells aimed at a foe too. */
+  aimAt(mage, spell, targetId) {
+    const target = this.index.get(targetId)
+    if (spell.aim === 'self' || (spell.aim === 'ally' && target && target.team !== mage.team)) return mage
+    return target
+  }
+
+  order(mage, spellId, targetId, { metas = [], swift = 1 } = {}) {
     const spell = SPELL[spellId]
-    const target = spell.aim === 'self' ? mage : this.index.get(targetId)
-    const fault = this.fault(mage, spell, target)
+    const target = this.aimAt(mage, spell, targetId)
+    const fault = this.fault(mage, spell, target, metas)
     if (fault) return this.fizzle(mage, fault, spell.id)
     if (mage.cast || this.tick < mage.recover) {
-      mage.queue = { spell: spell.id, target: target.id }
-      return this.emit('queue', { mage: mage.id, spell: spell.id, target: target.id })
+      mage.queue = { spell: spell.id, target: target.id, metas, swift }
+      return this.emit('queue', { mage: mage.id, spell: spell.id, target: target.id, metas })
     }
-    this.startCast(mage, spell, target)
+    this.startCast(mage, spell, target, metas, swift)
   }
 
-  startCast(mage, spell, target) {
-    const total = secs(spell.cast)
-    if (total <= 0) return this.fire(mage, spell, target)
-    mage.cast = { spell: spell.id, target: target.id, done: 0, total }
-    this.emit('cast', { mage: mage.id, spell: spell.id, target: target.id, total })
+  startCast(mage, spell, target, metas = [], swift = 1) {
+    const total = secs(castOf(spell, metas, swift))
+    const shape = { metas, swift: Math.round(swift * 100) / 100 }
+    if (total <= 0) return this.fire(mage, spell, target, shape)
+    mage.cast = { spell: spell.id, target: target.id, done: 0, total, ...shape }
+    this.emit('cast', { mage: mage.id, spell: spell.id, target: target.id, total, ...shape })
   }
 
+  /** End a cast early: 'drop' (a free feint) or 'break' (interrupted, which ends the flow). */
   stopCast(mage, why) {
     if (!mage.cast) return
     this.emit('stop', { mage: mage.id, spell: mage.cast.spell, why })
     mage.cast = null
+    if (why === 'break') this.setFlow(mage, 0)
   }
 
   fizzle(mage, why, spell = null) {
     mage.stats.fizzles++
     mage.stagger = this.tick + secs(TIMING.stagger)
+    this.setFlow(mage, 0)
     this.emit('fizzle', { mage: mage.id, why, spell })
   }
 
-  fire(mage, spell, target) {
+  fire(mage, spell, target, { metas = [], swift = 1 } = {}) {
     mage.cast = null
-    const fault = this.fault(mage, spell, target)
+    const fault = this.fault(mage, spell, target, metas)
     if (fault) return this.fizzle(mage, fault, spell.id)
-    mage.mana -= spell.cost
+    mage.mana -= costOf(spell, metas, mage.flow)
     mage.cools[spell.id] = this.tick + secs(spell.cool)
     mage.recover = this.tick + secs(TIMING.recover)
     mage.stats.casts++
+    if (spell.kind !== 'wisp') this.riseFlow(mage)
     const targets = spell.reach === 'side' ? this.sideOf(target) : [target]
-    const flight = { mage: mage.id, spell: spell.id, target: target.id, targets: targets.map((m) => m.id), land: this.tick + secs(FLIGHTS[spell.flight]) }
+    const twin = metas.includes('twin') ? this.besideOf(target) : null
+    if (twin) targets.push(twin)
+    const flight = { mage: mage.id, spell: spell.id, target: target.id, targets: targets.map((m) => m.id), metas, swift, at: this.tick, land: this.tick + secs(FLIGHTS[spell.flight]) }
     this.emit('fire', flight)
     if (flight.land <= this.tick) this.land(flight)
     else this.flights.push(flight)
@@ -967,21 +1325,38 @@ export class Match {
   land(flight) {
     const caster = this.index.get(flight.mage)
     const spell = SPELL[flight.spell]
+    const metas = flight.metas ?? []
     this.emit('land', { mage: flight.mage, spell: flight.spell, target: flight.target, targets: flight.targets })
     for (const id of flight.targets) {
       const target = this.index.get(id)
       if (target.down !== (spell.aim === 'fallen')) continue
       const acts = actsFor(spell, caster, target)
-      const context = { from: caster, to: target, spell: spell.id, name: spell.name, school: spell.school, direct: true, scale: 1 }
+      const context = {
+        from: caster,
+        to: target,
+        spell: spell.id,
+        name: spell.name,
+        school: spell.school,
+        direct: true,
+        scale: metas.includes('empower') ? METAS.empower.power : 1,
+        stretch: metas.includes('extend') ? METAS.extend.stretch : 1,
+      }
       const deflect = caster.team !== target.team && !spell.sure ? this.deflect(caster, target) : null
       if (deflect === 'evade') continue
-      if (deflect === 'reflect') this.apply(acts, { ...context, from: target, to: caster, direct: false })
+      if (deflect) this.apply(acts, { ...context, from: target, to: caster, direct: false })
       else this.apply(acts, context)
     }
   }
 
-  /** Spend a reflect or dodge charge against a hostile spell: 'reflect', 'evade' or null. */
+  /** Turn a hostile spell aside: a raised ward parries it, then reflect and dodge charges. */
   deflect(caster, target) {
+    if (this.tick <= target.ward.until) {
+      target.stats.parries++
+      target.ward.ready = Math.min(target.ward.ready, this.tick + secs(TIMING.wardRefund))
+      this.riseFlow(target)
+      this.emit('void', { from: caster.id, to: target.id, why: 'parry' })
+      return 'parry'
+    }
     for (const why of ['reflect', 'evade']) {
       const aura = target.auras.find((a) => a.def[why === 'reflect' ? 'mirror' : 'evade'] && a.charges > 0)
       if (!aura) continue
@@ -995,6 +1370,21 @@ export class Match {
   /** Living mages on a mage's team, in slot order. */
   sideOf(mage) {
     return this.mages.filter((m) => m.team === mage.team && !m.down)
+  }
+
+  /** The standing mages right beside a mage in its row. */
+  besides(mage) {
+    const row = this.sideOf(mage).sort((a, b) => a.slot - b.slot)
+    const at = row.indexOf(mage)
+    return at < 0 ? [] : [row[at - 1], row[at + 1]].filter(Boolean)
+  }
+
+  /** The standing mage nearest a target in its row (Twin's second target), or null. */
+  besideOf(target) {
+    const near = (m) => Math.abs(m.slot - target.slot)
+    return this.sideOf(target)
+      .filter((m) => m !== target)
+      .sort((a, b) => near(a) - near(b) || a.slot - b.slot)[0] ?? null
   }
 
   apply(acts, context) {
@@ -1042,13 +1432,47 @@ export class Match {
     if (amount + soak > 0) for (const aura of to.auras.filter((a) => a.def.lock === 'sleep')) this.unmark(to, aura, 'woke')
     if (to.life <= 0) this.downCheck(to, from)
     if (direct && hostile && !echo && !to.down) {
-      for (const aura of to.auras.filter((a) => a.def.thorns)) this.hurt(to, from, aura.def.thorns, { school: aura.school, echo: true })
+      for (const aura of to.auras.filter((a) => a.def.thorns)) this.hurt(to, from, aura.def.thorns * (aura.power ?? 1), { school: aura.school, echo: true })
       for (const aura of to.auras.filter((a) => a.def.struck && a.charges > 0)) {
         this.apply(aura.def.struck, this.auraContext(aura, to, 1))
         this.spendCharge(to, aura)
       }
     }
     return amount
+  }
+
+  /** A direct hostile hit of `school` sets off a reaction: the bane is used up. Returns it, or null. */
+  react(c, school) {
+    if (!c.direct || !c.from || c.from.team === c.to.team || c.to.down || flagged(c.to, 'immune')) return null
+    const found = reactionOn(c.to, school)
+    if (!found) return null
+    const { reaction, aura } = found
+    if (!reaction.spread) this.unmark(c.to, aura, 'react')
+    c.from.stats.combos++
+    this.riseFlow(c.from)
+    this.emit('react', { from: c.from.id, to: c.to.id, name: reaction.name, hit: reaction.hit, on: reaction.on })
+    return { ...reaction, aura }
+  }
+
+  /** A reaction's rider, once its hit has landed. */
+  ride(react, c, taken) {
+    const { from, to } = c
+    if (react.stall && !to.down) {
+      if (to.chord.keys.length) {
+        this.clearChord(to)
+        this.emit('lapse', { mage: to.id })
+      }
+      to.stagger = Math.max(to.stagger, this.tick + secs(react.stall))
+    }
+    if (react.spread) {
+      const { aura } = react
+      for (const other of this.besides(to)) {
+        this.mark(this.index.get(aura.from) ?? from, other, { ...aura.def, kind: 'bane', time: aura.left / TICK_RATE }, { name: aura.name, school: aura.school, spell: aura.spell, scale: aura.power })
+      }
+    }
+    if (react.burn) this.shiftMana(to, -react.burn)
+    if (react.leech && taken > 0 && !from.down) this.mend(from, from, taken * react.leech)
+    if (react.hush) this.mark(from, to, hush(react.hush, react.name).aura, { school: react.hit })
   }
 
   downCheck(mage, by) {
@@ -1063,7 +1487,13 @@ export class Match {
     mage.cast = null
     mage.queue = null
     mage.auras = []
+    mage.ward = { until: -1, ready: 0 }
+    this.setFlow(mage, 0)
     this.clearChord(mage)
+    // Foes aiming at the fallen move on to the nearest mage still standing in its row.
+    const near = (m) => Math.abs(m.slot - mage.slot)
+    const next = this.sideOf(mage).sort((a, b) => near(a) - near(b))[0]
+    for (const other of this.mages) if (other.aim === mage.id && other.team !== mage.team) other.aim = next?.id ?? other.id
     if (by && by.team !== mage.team) by.stats.kills++
     this.emit('fall', { to: mage.id, by: by?.id ?? null })
   }
@@ -1088,7 +1518,11 @@ export class Match {
     return change
   }
 
-  mark(from, to, def, { name, school, spell = null }) {
+  /**
+   * Apply an aura. `scale` (Empower) strengthens its shield and its own acts;
+   * `stretch` (Extend) lengthens it. Locks from foes diminish.
+   */
+  mark(from, to, def, { name, school, spell = null, scale = 1, stretch = 1 } = {}) {
     if (!to || to.down) return
     const kind = def.kind ?? 'bane'
     if (kind === 'bane' && flagged(to, 'immune') && from !== to) {
@@ -1097,8 +1531,12 @@ export class Match {
     if (kind === 'bane' && def.lock && flagged(to, 'steady')) {
       return this.emit('void', { from: from?.id ?? null, to: to.id, why: 'steady' })
     }
+    let time = secs(def.time * stretch)
+    if (kind === 'bane' && def.lock && from && from.team !== to.team) {
+      time = this.diminish(to, def.lock, time)
+      if (!time) return this.emit('void', { from: from.id, to: to.id, why: 'resist' })
+    }
     const label = def.name ?? name ?? 'Effect'
-    const time = secs(def.time)
     let aura = to.auras.find((a) => a.name === label)
     if (!aura) {
       aura = { name: label, kind, look: def.look ?? kind, school: def.school ?? school, spell, def, pulses: 0 }
@@ -1109,11 +1547,12 @@ export class Match {
       left: time,
       total: time,
       next: TICK_RATE,
-      guard: def.guard ?? 0,
+      guard: Math.round((def.guard ?? 0) * scale),
       charges: def.charges ?? 0,
       store: def.rewind ? to.life : 0,
+      power: scale,
     })
-    if (def.lock === 'stun' || def.lock === 'sleep') {
+    if (knocks(def.lock)) {
       this.stopCast(to, 'break')
       this.clearChord(to)
       to.queue = null
@@ -1121,10 +1560,28 @@ export class Match {
     this.emit('mark', { from: from?.id ?? null, to: to.id, name: label, kind, look: aura.look, school: aura.school, time })
   }
 
+  /**
+   * Diminishing returns: within the fade window each lock from a foe in the
+   * same group lasts half as long, then none land. Just after a stun or sleep
+   * ends, a short grace keeps the next one off. Returns the ticks left, or 0.
+   */
+  diminish(mage, lock, time) {
+    const group = lockGroup(lock)
+    if (group === 'lock' && this.tick < mage.grace) return 0
+    const dr = mage.dr[group]
+    if (this.tick >= dr.until) dr.level = 0
+    if (dr.level >= DIMINISH.length) return 0
+    const left = Math.max(1, Math.round(time * DIMINISH[dr.level]))
+    dr.level++
+    dr.until = this.tick + left + secs(TIMING.fade)
+    return left
+  }
+
   unmark(mage, aura, why) {
     const at = mage.auras.indexOf(aura)
     if (at < 0) return
     mage.auras.splice(at, 1)
+    if (knocks(aura.def.lock) && !mage.auras.some((a) => knocks(a.def.lock))) mage.grace = this.tick + secs(TIMING.grace)
     this.emit('fade', { to: mage.id, name: aura.name, why })
   }
 
@@ -1135,12 +1592,13 @@ export class Match {
 
   // Views out ────────────────────────────────────────────────────────────
 
-  /** Static match facts every client needs once. */
+  /** Static match facts every client needs once. The book's chords change later through `shift` events. */
   setup() {
     return {
       seed: this.seed,
       rules: this.rules,
-      book: this.book,
+      book: this.book.map(({ id, sigil }) => ({ id, sigil: [...sigil] })),
+      wisps: this.wisps,
       fightAt: this.fightAt,
       surgeAt: this.surgeAt,
       tickRate: TICK_RATE,
@@ -1148,45 +1606,90 @@ export class Match {
     }
   }
 
-  /** The changing state, sent to clients every tick. */
-  frame() {
+  /** Diminishing returns level of a lock group right now (0 when fresh). */
+  drOf(mage, group) {
+    return this.tick < mage.dr[group].until ? mage.dr[group].level : 0
+  }
+
+  /**
+   * The changing state, sent to clients every tick. `team` is who it is for
+   * (0, 1, or null for watchers): during the draft, other teams' chords stay hidden.
+   */
+  frame(team = null) {
+    const drafting = this.phase === 'ready'
     return {
       tick: this.tick,
       phase: this.phase,
       winner: this.winner,
-      mages: this.mages.map((m) => ({
-        id: m.id,
-        life: m.life,
-        mana: Math.round(m.mana * 10) / 10,
-        guard: guardOf(m),
-        down: m.down,
-        lock: lockOf(m),
-        auras: m.auras.map((a) => ({ name: a.name, kind: a.kind, look: a.look, school: a.school, left: a.left, total: a.total, charges: a.charges, lock: a.def.lock ?? null })),
-        cast: m.cast && { ...m.cast },
-        queue: m.queue?.spell ?? null,
-        chord: { keys: [...m.chord.keys], cursor: m.chord.cursor },
-        cools: { ...m.cools },
-        stagger: m.stagger,
-        seq: m.seq,
-      })),
+      fightAt: this.fightAt,
+      surgeAt: this.surgeAt,
+      shiftAt: this.shiftAt,
+      mages: this.mages.map((m) => {
+        const open = !drafting || m.team === team
+        return {
+          id: m.id,
+          life: m.life,
+          mana: Math.round(m.mana * 10) / 10,
+          guard: guardOf(m),
+          down: m.down,
+          lock: lockOf(m),
+          auras: m.auras.map((a) => ({ name: a.name, kind: a.kind, look: a.look, school: a.school, left: a.left, total: a.total, charges: a.charges, lock: a.def.lock ?? null })),
+          cast: m.cast && { ...m.cast, metas: [...m.cast.metas] },
+          queue: m.queue?.spell ?? null,
+          chord: { keys: open ? [...m.chord.keys] : [], metas: open ? [...m.chord.metas] : [], cursor: m.aim },
+          cools: { ...m.cools },
+          stagger: m.stagger,
+          ward: this.tick <= m.ward.until,
+          wardReady: m.ward.ready,
+          flow: m.flow,
+          dr: [this.drOf(m, 'lock'), this.drOf(m, 'hush')],
+          grace: this.tick < m.grace,
+          seq: m.seq,
+        }
+      }),
     }
   }
 
-  /** Everything a brain may know when it is mage `id`. Plain data only. */
+  /** The kits of one team, for that team's players only. */
+  kits(team) {
+    return Object.fromEntries(this.mages.filter((m) => m.team === team).map((m) => [m.id, [...m.kit]]))
+  }
+
+  /** The team's live call, or null. */
+  callOf(team) {
+    const call = this.calls[team]
+    return call && call.until > this.tick ? { by: call.by, target: call.target } : null
+  }
+
+  /** Everything a brain may know when it is mage `id`. Plain data only; foes' kits stay hidden. */
   view(id) {
-    const frame = this.frame()
-    const roster = this.setup().roster
+    const me = this.index.get(id)
+    const team = me?.team ?? null
+    const frame = this.frame(team)
     return {
       me: id,
       tick: this.tick,
       phase: this.phase,
+      fightAt: this.fightAt,
       surgeAt: this.surgeAt,
-      book: this.book,
-      mages: frame.mages.map((m, i) => ({
-        ...roster[i],
-        ...m,
-        auras: this.mages[i].auras.map((a) => ({ name: a.name, kind: a.kind, school: a.school, left: a.left, total: a.total, guard: a.guard, charges: a.charges, rules: a.def })),
-      })),
+      book: me ? this.usable(me) : [],
+      pool: this.book,
+      kitSize: this.rules.kit,
+      kits: team === null ? {} : this.kits(team),
+      call: team === null ? null : this.callOf(team),
+      mages: frame.mages.map((m, i) => {
+        const { name, team: side, slot, bot, lifeMax, manaMax } = this.mages[i]
+        return {
+          ...m,
+          name,
+          team: side,
+          slot,
+          bot,
+          lifeMax,
+          manaMax,
+          auras: this.mages[i].auras.map((a) => ({ name: a.name, kind: a.kind, school: a.school, left: a.left, total: a.total, guard: a.guard, charges: a.charges, rules: a.def })),
+        }
+      }),
     }
   }
 
@@ -1205,13 +1708,18 @@ const OPS = {
   harm(act, c) {
     let amount = act.amount * c.scale
     if (act.bonus && meets(act.bonus.when, c.to)) amount *= act.bonus.times
-    this.hurt(c.from, c.to, amount, { school: act.school ?? c.school, direct: c.direct, pierce: act.pierce })
+    const school = act.school ?? c.school
+    const react = this.react(c, school)
+    const taken = this.hurt(c.from, c.to, amount * (react?.times ?? 1), { school, direct: c.direct, pierce: act.pierce || react?.pierce })
+    if (react) this.ride(react, c, taken)
   },
   heal(act, c) {
     this.mend(c.from, c.to, act.amount * c.scale)
   },
   drain(act, c) {
-    const taken = this.hurt(c.from, c.to, act.amount * c.scale, { school: c.school, direct: c.direct })
+    const react = this.react(c, c.school)
+    const taken = this.hurt(c.from, c.to, act.amount * c.scale * (react?.times ?? 1), { school: c.school, direct: c.direct, pierce: react?.pierce })
+    if (react) this.ride(react, c, taken)
     if (taken > 0 && c.from && !c.from.down) this.mend(c.from, c.from, taken)
   },
   mana(act, c) {
@@ -1242,7 +1750,7 @@ const OPS = {
     for (const aura of gone) {
       this.unmark(c.to, aura, 'steal')
       if (c.from && !c.from.down) {
-        this.mark(c.from, c.from, { ...aura.def, kind: aura.kind, time: aura.left / TICK_RATE }, { name: aura.name, school: aura.school, spell: aura.spell })
+        this.mark(c.from, c.from, { ...aura.def, kind: aura.kind, time: aura.left / TICK_RATE }, { name: aura.name, school: aura.school, spell: aura.spell, scale: aura.power })
       }
     }
     this.emit('purge', { from: c.from?.id ?? null, to: c.to.id, count: gone.length, kind: 'boon' })
@@ -1291,6 +1799,7 @@ const OPS = {
     c.to.down = false
     c.to.life = Math.round(c.to.lifeMax * act.share)
     c.to.mana = Math.max(c.to.mana, c.to.manaMax * 0.3)
+    this.clearChord(c.to)
     this.emit('rise', { from: c.from?.id ?? null, to: c.to.id })
   },
   refresh(act, c) {
@@ -1313,7 +1822,7 @@ const OPS = {
     for (const other of this.sideOf(c.to)) {
       if (other === c.to) continue
       for (const aura of banes) {
-        this.mark(this.index.get(aura.from) ?? c.from, other, { ...aura.def, kind: aura.kind, time: aura.left / TICK_RATE }, { name: aura.name, school: aura.school, spell: aura.spell })
+        this.mark(this.index.get(aura.from) ?? c.from, other, { ...aura.def, kind: aura.kind, time: aura.left / TICK_RATE }, { name: aura.name, school: aura.school, spell: aura.spell, scale: aura.power })
       }
     }
   },
@@ -1348,6 +1857,13 @@ export function targetsFor(spell, me, mages) {
 }
 
 const viewFlag = (mage, field) => mage.auras.some((a) => auraRules(a)[field])
+
+/** The share of a foe's lock that would land on a mage now (diminishing returns), 0 for none. */
+function dimShare(mage, lock) {
+  const group = lockGroup(lock)
+  if (group === 'lock' && mage.grace) return 0
+  return DIMINISH[mage.dr?.[group === 'lock' ? 0 : 1] ?? 0] ?? 0
+}
 const viewLock = (mage) => mage.lock ?? lockOf({ auras: mage.auras.map((a) => ({ lock: auraRules(a).lock })) })
 
 function weighActs(acts, c) {
@@ -1363,7 +1879,7 @@ function auraGain(rules, c) {
   if (rules.dealt) gain += (rules.dealt - 1) * 400 * t
   if (rules.pace) gain += (rules.pace - 1) * 300 * t
   if (rules.mended !== undefined) gain += (rules.mended - 1) * 160 * t
-  if (rules.flow) gain += (rules.flow - 1) * 60 * (1 - c.to.mana / c.to.manaMax)
+  if (rules.regen) gain += (rules.regen - 1) * 60 * (1 - c.to.mana / c.to.manaMax)
   if (rules.guard) gain += Math.min(rules.guard, c.to.lifeMax - c.to.life + 120) * (0.35 + danger) * (c.to.guard > 0 ? 0.2 : 1)
   if (rules.immune) gain += danger > 0.6 ? 320 : 10
   if (rules.lock) gain -= viewLock(c.to) ? 0 : 55 * rules.time + (c.to.cast ? 140 : 0)
@@ -1384,6 +1900,8 @@ const WEIGH = {
     if (viewFlag(c.to, 'immune')) return 0
     let amount = act.amount * c.scale
     if (act.bonus && meets(act.bonus.when, c.to)) amount *= act.bonus.times
+    const react = act.tick ? null : reactionOn(c.to, act.school ?? c.school)
+    if (react) amount *= react.reaction.times * 1.15
     if (!act.sure && viewFlag(c.to, 'mirror')) return -amount
     if (!act.sure && viewFlag(c.to, 'evade')) amount *= 0.2
     const finish = amount >= c.to.life + c.to.guard ? 2 : 1
@@ -1408,7 +1926,12 @@ const WEIGH = {
     return c.foe ? Math.min(c.to.mana, act.amount, c.me.manaMax - c.me.mana) * 2.2 : -60
   },
   mark(act, c) {
-    const rules = act.aura
+    let rules = act.aura
+    const share = rules.lock && c.foe ? dimShare(c.to, rules.lock) : 1
+    if (!share) return 0
+    if (share !== 1 || c.stretch || c.scale !== 1) {
+      rules = { ...rules, time: rules.time * share * (c.stretch ?? 1), guard: rules.guard && rules.guard * c.scale }
+    }
     const held = c.to.auras.find((a) => a.name === (rules.name ?? c.name))
     const fresh = held ? (held.left / held.total < 0.3 ? 0.7 : 0.12) : 1
     const holder = c.foe ? -auraGain(rules, c) : auraGain(rules, c)
@@ -1430,7 +1953,7 @@ const WEIGH = {
   interrupt(act, c) {
     if (!c.foe || !c.to.cast) return 0
     const left = c.to.cast.total - c.to.cast.done
-    return left > secs(0.35) ? 140 + SPELL[c.to.cast.spell].tier * 70 : 0
+    return left > secs(0.35) ? 140 + SPELL[c.to.cast.spell].tier * 70 + (c.to.flow ?? 0) * 20 : 0
   },
   chain(act, c) {
     const others = c.view.mages.filter((m) => m.team === c.to.team && !m.down && m.id !== c.to.id).length
@@ -1475,17 +1998,35 @@ const WEIGH = {
   },
 }
 
-/** Score one spell on one target from `me`'s point of view. */
-export function rateSpell(spell, me, target, view) {
+/** The standing mage nearest a target in its row (Twin's second target), from a view. */
+function besideIn(view, target) {
+  const near = (m) => Math.abs(m.slot - target.slot)
+  return view.mages.filter((m) => m.team === target.team && !m.down && m.id !== target.id).sort((a, b) => near(a) - near(b) || a.slot - b.slot)[0] ?? null
+}
+
+/** Score one spell, shaped by `metas`, on one target from `me`'s point of view. */
+export function rateSpell(spell, me, target, view, metas = []) {
+  const power = metas.includes('empower') ? METAS.empower.power : 1
+  const stretch = metas.includes('extend') ? METAS.extend.stretch : 1
   const hits = spell.reach === 'side' ? view.mages.filter((m) => m.team === target.team && !m.down) : [target]
+  const twin = metas.includes('twin') ? besideIn(view, target) : null
+  if (twin) hits.push(twin)
   let value = 0
   for (const to of hits) {
-    const c = { me, to, view, foe: to.team !== me.team, scale: 1, name: spell.name }
+    const c = { me, to, view, foe: to.team !== me.team, scale: power, stretch, name: spell.name }
     value += weighActs(actsFor(spell, me, to), c)
   }
-  value -= spell.cost * (0.6 + (1 - me.mana / me.manaMax) * 1.5)
-  return value / (1 + spell.cast * 0.12 + spell.tier * 0.04)
+  if (value > 0 && view.call?.target === target.id && target.team !== me.team) value *= 1.3
+  const drain = 1 - me.mana / me.manaMax
+  const cost = costOf(spell, metas, me.flow ?? 0)
+  const plain = costOf(spell, [], me.flow ?? 0)
+  // Mana spent on metamagic is mana not spent on the next spell, and each one takes keys to type.
+  value -= plain * (0.6 + drain * 1.5) + (cost - plain) * (3 + drain * 6) + metas.length * 40
+  return value / (1 + castOf(spell, metas) * 0.2 + spell.tier * 0.04)
 }
+
+/** The metamagic a brain weighs for each spell, by how many it may stack. */
+const SHAPES = [[], ['quicken'], ['empower'], ['twin'], ['extend'], ['quicken', 'empower'], ['twin', 'empower'], ['empower', 'extend']]
 
 export class Brain {
   constructor({ skill = 'normal', seed = 1 } = {}) {
@@ -1493,32 +2034,47 @@ export class Brain {
     this.dice = new Dice(seed)
   }
 
-  /** Pick the best { spell, target } for the mage `view.me`, or null to wait. */
+  /** Draft a kit before the fight: spell ids from `view.pool`, best first. */
+  draft(view) {
+    const shared = Object.entries(view.kits)
+      .filter(([id]) => id !== view.me)
+      .flatMap(([, kit]) => kit)
+    return pickKit(this.dice, view.pool, view.kitSize, { noise: 0.15 + this.skill.noise, shared })
+  }
+
+  /** Pick the best { spell, target, metas } for the mage `view.me`, or null to wait. */
   think(view) {
     const me = view.mages.find((m) => m.id === view.me)
-    if (!me || me.down) return null
+    if (!me || (!me.down && viewLock(me) === 'hush')) return null
     const pending = me.cast ? SPELL[me.cast.spell] : null
-    const budget = me.mana - (pending?.cost ?? 0)
+    const budget = me.mana - (pending ? costOf(pending, me.cast.metas ?? [], me.flow) : 0)
+    const shapes = SHAPES.filter((set) => set.length <= this.skill.metas)
     let best = null
     for (const entry of view.book) {
       const spell = SPELL[entry.id]
-      if (spell === pending || (me.cools[spell.id] ?? 0) > view.tick || budget < spell.cost) continue
-      if (viewLock(me) === 'hush') continue
+      if (spell === pending || (me.cools[spell.id] ?? 0) > view.tick) continue
       for (const target of targetsFor(spell, me, view.mages)) {
-        const value = rateSpell(spell, me, target, view) * (1 + this.dice.float(-this.skill.noise, this.skill.noise))
-        if (!best || value > best.value) best = { spell: spell.id, target: target.id, value }
+        // One roll per spell and target, so having more shapes to try does not win by luck.
+        const luck = 1 + this.dice.float(-this.skill.noise, this.skill.noise)
+        for (const metas of spell.kind === 'wisp' ? [[]] : shapes) {
+          if (metaFault(spell, metas) || budget < costOf(spell, metas, me.flow)) continue
+          const value = rateSpell(spell, me, target, view, metas) * luck
+          if (!best || value > best.value) best = { spell: spell.id, target: target.id, metas, value }
+        }
       }
     }
-    return best && best.value > 12 ? { spell: best.spell, target: best.target } : null
+    return best && best.value > 12 ? { spell: best.spell, target: best.target, metas: best.metas } : null
   }
 }
 
 // ─── 10 · Pilot ─────────────────────────────────────────────────────────────
 //
-// A pilot plays a seat like a person would: it asks its brain for a plan,
-// waits a reaction time, then presses the target moves and runes one key at
-// a time with human-like gaps. Bots use exactly the same `press` orders as
-// players, so they follow exactly the same rules.
+// A pilot plays a seat like a person would: it drafts by typing chords, asks
+// its brain for a plan, waits a reaction time, then presses the moves,
+// metamagic and runes one key at a time with human-like gaps. It raises a
+// ward against spells it sees coming, as often and as sharply as its skill
+// allows. Bots use exactly the same `press` orders as players, so they follow
+// exactly the same rules.
 
 export class Pilot {
   constructor({ brain = null, skill = 'normal', seed = 1 } = {}) {
@@ -1528,24 +2084,33 @@ export class Pilot {
     this.plan = null
     this.wait = 0
     this.busy = false
+    this.picks = null
+    this.seen = new WeakSet()
+    this.guardAt = -1
+    this.callAt = 0
+    this.down = false
   }
 
   /** Keys to press this tick for mage `id`. */
   drive(match, id) {
     const me = match.index.get(id)
-    if (!me || match.phase !== 'fight' || me.down) {
+    if (!me || match.phase === 'over') return []
+    if (match.phase === 'ready') return this.draft(match, me)
+    if (this.plan?.draft || me.down !== this.down) {
+      this.down = me.down
       this.plan = null
-      return []
+      this.wait = Math.max(this.wait, match.tick + secs(this.roll('react')))
     }
-    const lock = lockOf(me)
-    if (lock === 'stun' || lock === 'sleep' || match.tick < me.stagger) {
+    const lock = me.down ? null : lockOf(me)
+    if (knocks(lock) || match.tick < me.stagger) {
       this.plan = null
       this.wait = Math.max(this.wait, match.tick + secs(this.roll('react')))
       return []
     }
-    if (this.plan) return this.type(match, me)
-    if (this.busy || match.tick < this.wait) return []
-    if (me.cast && me.cast.total - me.cast.done > secs(this.skill.think[1])) return []
+    const keys = this.parry(match, me) ? ['ward'] : []
+    if (this.plan) return [...keys, ...this.type(match, me)]
+    if (this.busy || match.tick < this.wait) return keys
+    if (me.cast && me.cast.total - me.cast.done > secs(this.skill.think[1])) return keys
     const plan = this.brain.think(match.view(id))
     if (plan && typeof plan.then === 'function') {
       this.busy = true
@@ -1559,43 +2124,120 @@ export class Pilot {
           this.wait = match.tick + secs(1)
         },
       )
-      return []
+      return keys
     }
     this.accept(plan, match, me)
-    return []
+    return keys
   }
 
   roll(field) {
     return this.dice.float(...this.skill[field])
   }
 
+  /** The draft: ask the brain for picks once, then type each pick's chord until the kit is full. */
+  draft(match, me) {
+    if (this.busy) return []
+    if (!this.picks) {
+      const picks = this.brain.draft?.(match.view(me.id)) ?? []
+      if (typeof picks.then === 'function') {
+        this.busy = true
+        const done = (list) => {
+          this.busy = false
+          this.picks = Array.isArray(list) ? [...list] : []
+        }
+        picks.then(done, () => done([]))
+        return []
+      }
+      this.picks = [...picks]
+      this.wait = match.tick + secs(this.roll('think'))
+    }
+    if (this.plan) return this.next(match)
+    if (match.tick < this.wait || me.kit.length >= match.rules.kit) return []
+    const id = this.picks.find((pick) => !me.kit.includes(pick) && match.book.some((entry) => entry.id === pick))
+    if (!id) return []
+    this.picks.splice(this.picks.indexOf(id), 1)
+    this.plan = { draft: true, keys: [...match.book.find((entry) => entry.id === id).sigil], at: match.tick + secs(this.roll('react')) }
+    return []
+  }
+
+  /** True on the tick to raise a ward against a hostile spell this pilot saw coming. */
+  parry(match, me) {
+    if (me.down) return false
+    for (const flight of match.flights) {
+      if (this.seen.has(flight)) continue
+      this.seen.add(flight)
+      const caster = match.index.get(flight.mage)
+      if (!flight.targets.includes(me.id) || caster.team === me.team || SPELL[flight.spell].sure) continue
+      if (flight.land - flight.at < secs(this.skill.react[0]) || this.dice.next() > this.skill.parry) continue
+      // Timing is not perfect: some wards go up a little early or late and miss.
+      const at = flight.land - (this.dice.int(secs(TIMING.ward) + 2) - 1)
+      if (this.guardAt < 0 || at < this.guardAt) this.guardAt = at
+    }
+    if (this.guardAt < 0 || match.tick < this.guardAt) return false
+    this.guardAt = -1
+    return match.tick >= me.ward.ready
+  }
+
   accept(plan, match, me) {
-    const entry = plan && match.book.find((e) => e.id === plan.spell)
+    const entry = plan && match.usable(me).find((e) => e.id === plan.spell)
     if (!entry || !match.index.has(plan.target)) {
       this.wait = match.tick + secs(this.roll('think'))
       return
     }
-    const moves = SPELL[plan.spell].aim === 'self' ? [] : pathTo(match.mages, me.team, me.id, plan.target)
-    const keys = [...(me.chord.keys.length ? ['drop'] : []), ...moves, ...entry.sigil]
-    this.plan = { ...plan, keys, at: match.tick + secs(this.roll('react')) }
+    const metas = (plan.metas ?? []).filter((id) => METAS[id])
+    this.plan = { spell: plan.spell, target: plan.target, metas, sigil: entry.sigil, keys: null, at: match.tick + secs(this.roll('react')) }
+  }
+
+  /** The keys for a plan from where the cursor is now: moves, maybe a call, metamagic, then the runes. */
+  keysFor(match, me, plan) {
+    const spell = SPELL[plan.spell]
+    const aimed = match.index.get(me.aim)
+    const home = spell.aim === 'self' || (spell.aim === 'ally' && plan.target === me.id && aimed?.team !== me.team)
+    const moves = home ? [] : pathTo(match.mages, me.team, me.aim, plan.target, me.id)
+    const call = this.callFor(match, me, plan) ? ['call'] : []
+    return [...(me.chord.keys.length ? ['drop'] : []), ...moves, ...call, ...plan.metas.flatMap((id) => ['meta', METAS[id].rune]), ...plan.sigil]
+  }
+
+  /** Bots that know metamagic also call low foes for their team. */
+  callFor(match, me, plan) {
+    if (!this.skill.metas || me.down || match.tick < this.callAt) return false
+    const target = match.index.get(plan.target)
+    if (target.team === me.team || target.life / target.lifeMax > 0.5 || match.callOf(me.team)?.target === target.id) return false
+    this.callAt = match.tick + secs(8)
+    return true
   }
 
   type(match, me) {
     const plan = this.plan
     const spell = SPELL[plan.spell]
     const target = match.index.get(plan.target)
-    const usable = (me.cools[spell.id] ?? 0) <= match.tick + secs(1) && me.mana + 4 >= spell.cost && target && target.down === (spell.aim === 'fallen')
+    // A reshuffle gives the entry a new chord, so a plan typed from the old one is dropped.
+    const entry = match.usable(me).find((e) => e.id === plan.spell)
+    const usable =
+      entry?.sigil === plan.sigil &&
+      (me.cools[spell.id] ?? 0) <= match.tick + secs(1) &&
+      me.mana + 4 >= costOf(spell, plan.metas, me.flow) &&
+      target &&
+      target.down === (spell.aim === 'fallen')
     if (!usable) {
       this.plan = null
       this.wait = match.tick + secs(0.2)
       return me.chord.keys.length ? ['drop'] : []
     }
     if (match.tick < plan.at) return []
+    plan.keys ??= this.keysFor(match, me, plan)
+    return this.next(match)
+  }
+
+  /** Press the plan's next key once its gap has passed. */
+  next(match) {
+    const plan = this.plan
+    if (match.tick < plan.at) return []
     const key = plan.keys.shift()
     plan.at = match.tick + secs(this.roll('gap'))
     if (!plan.keys.length) {
       this.plan = null
-      this.wait = match.tick + secs(this.roll('think'))
+      this.wait = match.tick + secs(this.roll(plan.draft ? 'gap' : 'think'))
     }
     return [key]
   }
@@ -1679,7 +2321,7 @@ export const WIRE = {
     bench: { team: 'team', slot: 'slot' }, // owner: toggle a bot in a seat
     tune: { rules: 'rules' }, // owner: change match rules
     start: {}, // owner: start the match
-    press: { key: 'key', seq: 'count' }, // one key of a chord
+    press: { key: 'key', seq: 'count' }, // one key: a move, a rune, meta, ward, call or drop
     again: {}, // owner: rematch with a new book
     lobby: {}, // owner: return everyone to the lobby
     leave: {}, // leave the room
@@ -1688,7 +2330,7 @@ export const WIRE = {
     welcome: { you: 'any' }, // your peer id
     room: { room: 'any' }, // lobby state
     begin: { setup: 'any', you: 'any' }, // a match starts; `you` is your mage id
-    frame: { frame: 'any', events: 'any' }, // one tick of state and its events
+    frame: { frame: 'any', events: 'any', kits: 'any' }, // one tick of state, its events and your team's kits
     end: { results: 'any' }, // the match is over
     fault: { text: 'any' }, // something went wrong
   },
