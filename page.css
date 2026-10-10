@@ -600,6 +600,22 @@ body[data-view='lobby'] #lobby {
   color: var(--mute);
 }
 
+.foot-links {
+  display: inline-flex;
+  gap: 16px;
+}
+
+.sound-link {
+  color: var(--dim);
+  font-size: 15px;
+  line-height: 1;
+}
+
+body.muted .when-on,
+body:not(.muted) .when-off {
+  display: none;
+}
+
 .inputs {
   display: inline-flex;
   align-items: center;
@@ -2303,6 +2319,53 @@ body[data-view='result'] #result {
   transform: translate(-50%, 0);
   opacity: 1;
   visibility: visible;
+}
+
+/* While the socket is down the last frame stays on screen, marked as stale. */
+.offline-note {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgba(30, 14, 40, 0.92);
+  border: 1px solid rgba(255, 209, 102, 0.5);
+  color: var(--gold);
+  font-weight: 600;
+  font-size: 13px;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.offline-note::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: blink 1s ease-in-out infinite alternate;
+}
+
+body.offline .offline-note {
+  display: flex;
+}
+
+body.offline #stage {
+  filter: saturate(0.4) brightness(0.8);
+}
+
+@keyframes blink {
+  to {
+    opacity: 0.25;
+  }
+}
+
+.seat.away {
+  opacity: 0.6;
 }
 
 /* ─── Motion ─────────────────────────────────────────────────────────────── */

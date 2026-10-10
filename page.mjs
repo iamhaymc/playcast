@@ -2,7 +2,8 @@
  * page.mjs — the Chordcast page.
  *
  * Renders what the host says is true and turns input into `press` messages.
- * Game rules live in core.mjs; this file only draws, listens and sends.
+ * Game rules live in core.mjs and sound in sound.mjs; this file only draws,
+ * listens and sends.
  *
  *    1  Kit      DOM helpers, glyphs, palettes and textures
  *    2  Link     the message link to the host
@@ -16,7 +17,7 @@
  *   10  Plates   nameplates and floating numbers
  *   11  Hud      clock, banner, book, chord tray, ward and flow
  *   12  Views    home, lobby and results screens
- *   13  Game     client state: messages in, effects out
+ *   13  Game     client state: messages in, effects and sounds out
  *   14  Boot
  */
 
@@ -28,8 +29,9 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js'
 import {
   AIM_TEXT, CODEX, DIMINISH, LAYOUT, METAS, META_OF_RUNE, MOVES, REACTIONS, RULES, RUNES, SPELL, TEAMS, TICK_MS, TICK_RATE, TIMING,
-  costOf, dampenAt, moveCursor, pack, place, reactionOn, readChord, readRunes, walkActs,
+  costOf, dampenAt, moveCursor, pack, patch, place, reactionOn, readChord, readRunes, unpackFrame, walkActs,
 } from '/core.mjs'
+import { Sound } from '/sound.mjs'
 
 // ─── 1 · Kit ────────────────────────────────────────────────────────────────
 
@@ -59,23 +61,25 @@ function make(tag, className = '', html = '') {
   return el
 }
 
-/** localStorage that never throws. */
-const memory = {
+/** Web storage that never throws. */
+const safeStore = (area) => ({
   get(key) {
     try {
-      return localStorage.getItem(key)
+      return globalThis[area].getItem(key)
     } catch {
       return null
     }
   },
   set(key, value) {
     try {
-      localStorage.setItem(key, value)
+      globalThis[area].setItem(key, value)
     } catch {
       /* storage blocked: fine */
     }
   },
-}
+})
+const memory = safeStore('localStorage') // kept across visits
+const session = safeStore('sessionStorage') // this tab only, kept across reloads
 
 const stroke = (d, width = 2.4) => `<path d="${d}" fill="none" stroke="currentColor" stroke-width="${width}" stroke-linecap="round" stroke-linejoin="round"/>`
 
@@ -89,6 +93,8 @@ const GLYPHS = {
   left: stroke('M15.5 5l-7 7 7 7', 3),
   right: stroke('M8.5 5l7 7-7 7', 3),
   close: stroke('M6.5 6.5l11 11M17.5 6.5l-11 11', 2.4),
+  sound: '<path d="M3.5 9.2h3.8L12 5v14l-4.7-4.2H3.5z" fill="currentColor"/>' + stroke('M15.5 9a4.2 4.2 0 0 1 0 6M18.2 6.4a8 8 0 0 1 0 11.2', 2),
+  mute: '<path d="M3.5 9.2h3.8L12 5v14l-4.7-4.2H3.5z" fill="currentColor"/>' + stroke('M16 9.5l5 5M21 9.5l-5 5', 2),
   meta: '<path d="M12 2.5l1.6 5.2 5.2-2.3-2.3 5.2 5.2 1.6-5.2 1.6 2.3 5.2-5.2-2.3L12 21.5l-1.6-5.2-5.2 2.3 2.3-5.2L2.3 12l5.2-1.6-2.3-5.2 5.2 2.3z" fill="currentColor"/>',
   ward: '<path d="M12 2.2l8 3v6.1c0 5-3.4 8.9-8 10.5-4.6-1.6-8-5.5-8-10.5V5.2z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/><path d="M12 6.5v10M8 10.5h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
   call: stroke('M5 21V3.5M5 4h11.5l-2.4 4 2.4 4H5', 2.2),
@@ -437,6 +443,7 @@ class Pads {
       event.preventDefault()
       return this.onCommand('book')
     }
+    if (event.code === 'KeyM' && !event.repeat) return this.onCommand('sound')
     const key = KEY_CODES[event.code]
     if (!key) return
     event.preventDefault()
@@ -3243,9 +3250,9 @@ function renderLobby(room, you, link) {
     list.replaceChildren()
     room.seats[team].forEach((seat, slot) => {
       const me = seat.id === you
-      const item = make('li', `seat ${seat.kind}${me ? ' me' : ''}`)
+      const item = make('li', `seat ${seat.kind}${me ? ' me' : ''}${seat.away ? ' away' : ''}`)
       const label = seat.kind === 'human' ? seat.name : seat.kind === 'bot' ? seat.name : 'Open seat'
-      const note = seat.kind === 'human' ? [me && 'You', seat.id === room.owner && 'Host'].filter(Boolean).join(' · ') || 'Player' : seat.kind === 'bot' ? `Bot · ${room.rules.skill}` : 'Bot if empty'
+      const note = seat.kind === 'human' ? [me && 'You', seat.id === room.owner && 'Host', seat.away && 'Away'].filter(Boolean).join(' · ') || 'Player' : seat.kind === 'bot' ? `Bot · ${room.rules.skill}` : 'Bot if empty'
       item.innerHTML = `<span class="avatar">${seat.kind === 'open' ? '+' : seat.kind === 'bot' ? '⚙' : label[0].toUpperCase()}</span><span class="who"><b></b><small></small></span>`
       $('b', item).textContent = label
       $('small', item).textContent = note
@@ -3308,13 +3315,19 @@ class Game {
     this.stage = new Stage($('#stage'))
     this.plates = new Plates($('#plates'), $('#floats'))
     this.hud = new Hud()
+    this.sound = new Sound({ muted: memory.get('chordcast.sound') === 'off' })
+    document.body.classList.toggle('muted', this.sound.muted)
     this.pads = new Pads({ onKey: (key) => this.press(key), onCommand: (name) => this.command(name), onMode: () => this.refreshLabels() })
     this.you = null
     this.room = null
     this.setup = null
     this.me = null
     this.frame = null
+    this.wire = null // the last frame in wire form, for deltas to patch
     this.frameAt = 0
+    this.token = session.get('chordcast.token') // takes our seat back after a drop or a reload
+    this.offline = false
+    this.overAt = 0 // when the last match ended, to let its sting play before the menu music
     this.pending = []
     this.seq = 0
     this.kits = {}
@@ -3325,6 +3338,8 @@ class Game {
 
     this.link
       .on('welcome', (m) => this.onWelcome(m))
+      .on('back', (m) => this.onBack(m))
+      .on('moved', () => this.onMoved())
       .on('room', (m) => this.onRoom(m))
       .on('begin', (m) => this.onBegin(m))
       .on('frame', (m) => this.onFrame(m))
@@ -3383,6 +3398,9 @@ class Game {
     $('#lobby-button').addEventListener('click', () => this.link.send('lobby'))
     for (const button of $$('[data-action="leave"]')) button.addEventListener('click', () => this.leave())
     for (const button of $$('[data-action="book"]')) button.addEventListener('click', () => this.command('book'))
+    for (const button of $$('[data-action="sound"]')) button.addEventListener('click', () => this.command('sound'))
+    // A soft tick for every button; the sound toggle speaks for itself.
+    document.addEventListener('click', (event) => event.target.closest?.('button:not([data-action="sound"])') && this.sound.play('click'))
     for (const button of $$('[data-open="guide"]')) button.addEventListener('click', () => $('#guide').showModal())
     $('#guide [data-close]').addEventListener('click', () => $('#guide').close())
     $('#guide').addEventListener('click', (event) => event.target === $('#guide') && $('#guide').close())
@@ -3426,10 +3444,28 @@ class Game {
   command(name) {
     if (name === 'book') document.body.classList.toggle('book-closed')
     if (name === 'guide') $('#guide').open ? $('#guide').close() : $('#guide').showModal()
+    if (name === 'sound') this.toggleSound()
+  }
+
+  toggleSound() {
+    const muted = !this.sound.muted
+    this.sound.setMuted(muted)
+    memory.set('chordcast.sound', muted ? 'off' : 'on')
+    document.body.classList.toggle('muted', muted)
+    for (const button of $$('[data-action="sound"]')) button.setAttribute('aria-pressed', String(!muted))
+    toast(muted ? 'Sound off. M turns it back on.' : 'Sound on.')
   }
 
   leave() {
     this.link.send('leave')
+    // Gone on purpose: a reconnect must not ask for the seat back.
+    if (this.offline) this.token = null
+    this.goOnline()
+    this.home()
+  }
+
+  /** Back to the home view with no room. */
+  home() {
     this.room = null
     this.setup = null
     this.frame = null
@@ -3443,26 +3479,68 @@ class Game {
 
   // Messages in ──────────────────────────────────────────────────────────
 
-  onWelcome({ you }) {
+  onWelcome({ you, token }) {
     this.you = you
-    this.sendName()
-    const code = $('#code-input').value
-    if (code.length === 4) this.link.send('join', { code })
+    this.fresh = token
+    // After a drop or a reload, ask for the held seat first; `back` says how it went.
+    if (this.token) return this.link.send('resume', { token: this.token })
+    this.adopt(token)
+    this.greet()
   }
 
+  onBack({ you }) {
+    const dropped = this.offline
+    this.goOnline()
+    if (you) {
+      this.you = you
+      if (dropped) toast('Reconnected.')
+      return
+    }
+    this.adopt(this.fresh)
+    if (this.room) {
+      toast('Your seat was lost.')
+      this.home()
+    }
+    this.greet()
+  }
+
+  /** Another tab took our seat back with a copy of our token. Let it have it, and start fresh here. */
+  onMoved() {
+    this.adopt('')
+    this.goOnline()
+    toast('This seat moved to another tab.')
+    this.home()
+  }
+
+  adopt(token) {
+    this.token = token
+    session.set('chordcast.token', token)
+  }
+
+  greet() {
+    this.sendName()
+    const code = $('#code-input').value
+    if (code.length === 4 && !this.room) this.link.send('join', { code })
+  }
+
+  /** The socket closed. In a room, keep everything on screen: the host holds the seat while we reconnect. */
   onClose() {
-    if (this.room) toast('Connection lost. Reconnecting…')
-    this.room = null
-    this.setup = null
-    this.frame = null
-    this.showDemo(RULES.teams)
-    setView('home')
+    if (!this.room) return
+    if (!this.offline) toast('Connection lost. Reconnecting…')
+    this.offline = true
+    document.body.classList.add('offline')
+  }
+
+  goOnline() {
+    this.offline = false
+    document.body.classList.remove('offline')
   }
 
   onRoom({ room }) {
     $('#match-code').textContent = room.code
     const fresh = room.code !== this.room?.code
     const teamsChanged = String(room.rules.teams) !== String(this.room?.rules.teams)
+    if (!fresh) this.noteDrops(this.room, room)
     this.room = room
     if (room.phase === 'lobby') {
       this.setup = null
@@ -3481,11 +3559,23 @@ class Game {
     }
   }
 
+  /** Say when another player drops (a bot stands in) or comes back. */
+  noteDrops(before, after) {
+    const was = new Map([...before.seats.flat(), ...before.watchers].map((p) => [p.id, p]))
+    for (const person of [...after.seats.flat(), ...after.watchers]) {
+      const old = person.id && person.id !== this.you ? was.get(person.id) : null
+      if (!old || Boolean(old.away) === Boolean(person.away)) continue
+      const seated = after.phase === 'match' && after.seats.flat().includes(person)
+      toast(person.away ? `${person.name} dropped.${seated ? ' A bot stands in.' : ''}` : `${person.name} is back.`)
+    }
+  }
+
   onBegin({ setup, you }) {
     this.setup = setup
     this.me = you
     this.results = null
     this.frame = null
+    this.wire = null
     this.pending = []
     this.kits = {}
     const roster = setup.roster
@@ -3502,12 +3592,17 @@ class Game {
     this.hud.hush()
   }
 
-  onFrame({ frame, events, kits }) {
-    if (!this.setup) return
+  /** One tick from the host: a whole frame, or a delta on the last one. */
+  onFrame({ frame: whole, delta, events, kits }) {
+    if (!this.setup || (!whole && !this.wire)) return
+    this.wire = whole ?? patch(this.wire, delta)
+    const frame = unpackFrame(this.wire)
     this.frame = frame
     this.frameAt = performance.now()
     if (kits) this.kits = kits
     const mine = this.mine()
+    // After a reload our count restarts, but the host remembers the highest press: carry on from there.
+    if (mine && !this.pending.length && this.seq < mine.seq) this.seq = mine.seq
     if (mine) this.pending = this.pending.filter((p) => p.seq > mine.seq)
     const roster = this.setup.roster
     frame.mages.forEach((state, i) => {
@@ -3521,6 +3616,7 @@ class Game {
 
   onEnd({ results }) {
     this.results = results
+    this.overAt = this.frame ? performance.now() : 0
     if (!this.setup) return
     const winner = results.winner
     if (winner !== -1) {
@@ -3544,8 +3640,13 @@ class Game {
     // A hidden tab draws nothing, so effects would pile up and all burst out
     // on return. Only events that change lasting state are applied.
     if (document.hidden && !LASTING_EVENTS.has(event.type)) return
-    const handler = EVENT_VISUALS[event.type]
-    if (handler) handler.call(this, event)
+    EVENT_VISUALS[event.type]?.call(this, event)
+    // Sound must never break the game.
+    try {
+      EVENT_SOUNDS[event.type]?.call(this, event)
+    } catch (error) {
+      console.warn('sound', event.type, error)
+    }
   }
 
   figure(id) {
@@ -3560,10 +3661,55 @@ class Game {
   // Input ────────────────────────────────────────────────────────────────
 
   press(key) {
-    if (!this.me || !this.frame || document.body.dataset.view !== 'match') return
+    if (!this.me || !this.frame || this.offline || document.body.dataset.view !== 'match') return
     const seq = ++this.seq
     this.pending.push({ seq, key })
     this.link.send('press', { key, seq })
+    this.keySound(key)
+  }
+
+  /** Keys sound at once, before the host answers: each rune its own note, so a chord is a tune. */
+  keySound(key) {
+    const drafting = this.frame.phase === 'ready'
+    if (RUNES.includes(key)) this.sound.play('rune', { rune: key, important: true })
+    else if (drafting) return
+    else if (MOVES.includes(key)) this.sound.play('move', { important: true })
+    else if (key === 'meta') this.sound.play('meta', { important: true })
+    else if (key === 'drop') this.sound.play('drop', { important: true })
+    else if (key === 'ward' && this.serverTick() >= (this.mine()?.wardReady ?? Infinity)) this.sound.play('ward', { important: true })
+  }
+
+  /** Where a mage stands, left to right on screen, as a stereo pan. */
+  panOf(id) {
+    const figure = this.figure(id)
+    if (!figure) return 0
+    return clamp(figure.anchor('chest').project(this.stage.camera).x, -1, 1) * 0.7
+  }
+
+  /** How loud a mage's sounds are: yours, your team's, then the rest. */
+  loudness(id) {
+    if (!this.me) return 0.8
+    if (id === this.me) return 1
+    return this.setup?.roster.find((m) => m.id === id)?.team === this.myTeam() ? 0.65 : 0.55
+  }
+
+  buzz(strength, ms) {
+    this.sound.rumble(strength, ms, { touch: inputMode === 'touch' })
+  }
+
+  /** Music follows the view: calm menus, and a fight loop that rises with the surge. */
+  tuneMusic() {
+    const view = document.body.dataset.view
+    const phase = this.frame?.phase
+    // The win or loss sting plays alone before the menu music comes back.
+    if (view === 'result') return this.sound.music(performance.now() - this.overAt < 2600 ? null : 'menu')
+    if (view !== 'match') return this.sound.music('menu')
+    if (!this.frame) return
+    if (phase === 'over') return this.sound.music(null)
+    const tick = this.serverTick()
+    const surge = tick - this.frame.surgeAt
+    this.sound.music('fight')
+    this.sound.intensity(phase === 'ready' ? 0.15 : surge >= 0 ? Math.min(1, 0.8 + surge / (TICK_RATE * 60)) : 0.5)
   }
 
   /** Tapping a spell while drafting types its chord for you. */
@@ -3675,6 +3821,7 @@ class Game {
     this.last = now
     this.pads.poll()
     this.demo()
+    this.tuneMusic()
     if (this.setup && this.frame) this.drawMatch()
     this.stage.band = this.freeBand()
     this.stage.render(dt)
@@ -3713,6 +3860,12 @@ class Game {
     const drafting = frame.phase === 'ready'
     const now = this.stage.time
     this.hud.clock(frame, tick)
+    // A chime as the shift warning appears.
+    const shift = Math.min(frame.shiftAt, frame.surgeAt > tick ? frame.surgeAt : Infinity)
+    if (frame.phase === 'fight' && shift > tick && shift - tick <= 8 * TICK_RATE && this.warned !== shift) {
+      this.warned = shift
+      this.sound.play('warn', { important: true })
+    }
     const mine = this.mine()
     const kit = this.me ? (this.kits[this.me] ?? []) : null
     if (drafting) this.hud.draft(kit, setup.rules.kit)
@@ -3936,6 +4089,92 @@ const EVENT_VISUALS = {
     const title = e.winner === -1 ? 'Draw' : mine === null ? `${TEAMS[e.winner]} wins` : e.winner === mine ? 'Victory' : 'Defeat'
     this.hud.say(title, '', true)
     this.stage.aim(null)
+  },
+}
+
+/** Event type → sound. `this` is the Game. Sounds about you are `important`: never thinned out. */
+const EVENT_SOUNDS = {
+  start() {
+    this.sound.play('gong', { important: true })
+  },
+  cast(e) {
+    this.sound.play('cast', { school: SPELL[e.spell].school, pan: this.panOf(e.mage), gain: this.loudness(e.mage) * 0.8, important: e.mage === this.me })
+  },
+  stop(e) {
+    if (e.why === 'break') this.sound.play('snuff', { pan: this.panOf(e.mage), gain: this.loudness(e.mage), important: e.mage === this.me })
+  },
+  fire(e) {
+    const spell = SPELL[e.spell]
+    const pan = this.panOf(e.mage)
+    this.sound.play('release', { school: spell.school, pan, gain: this.loudness(e.mage), important: e.mage === this.me })
+    // A spell that can be warded, flying at you: a rising cue that ticks as it lands.
+    const caster = this.setup.roster.find((m) => m.id === e.mage)
+    if (this.me && e.targets?.includes(this.me) && caster?.team !== this.myTeam() && !spell.sure) {
+      this.sound.incoming(Math.max(0.05, ((e.land - this.serverTick()) * TICK_MS) / 1000), pan)
+    }
+  },
+  land(e) {
+    const spell = SPELL[e.spell]
+    const caster = this.setup.roster.find((m) => m.id === e.mage)
+    const target = this.setup.roster.find((m) => m.id === e.target)
+    const hostile = caster && target ? caster.team !== target.team : spell.kind === 'offense'
+    const options = { school: spell.school, pan: this.panOf(e.target), gain: Math.max(this.loudness(e.mage), this.loudness(e.target)), important: e.mage === this.me || e.targets?.includes(this.me) }
+    if (hostile) this.sound.play(spell.roles.includes('damage') ? 'impact' : 'bane', { ...options, size: 0.75 + spell.tier * 0.15 })
+    else this.sound.play(spell.roles.includes('heal') || spell.roles.includes('revive') ? 'heal' : 'boon', options)
+  },
+  hit(e) {
+    if (e.to !== this.me || !e.amount || !e.direct) return
+    const share = e.amount / this.setup.roster.find((m) => m.id === e.to).lifeMax
+    this.sound.play('hurt', { size: clamp(0.5 + share * 4, 0.5, 1.5), important: true })
+    this.buzz(clamp(share * 5, 0.2, 1), 90 + share * 400)
+  },
+  void(e) {
+    const pan = this.panOf(e.to)
+    const mine = e.to === this.me || e.from === this.me
+    if (e.why === 'parry') {
+      this.sound.play('parry', { pan, gain: this.loudness(e.to), important: mine })
+      if (e.to === this.me) this.buzz(0.7, 80)
+    } else if (e.why !== 'resist' && e.why !== 'steady') this.sound.play('deflect', { pan, gain: this.loudness(e.to), important: mine })
+  },
+  ward(e) {
+    if (e.mage !== this.me) this.sound.play('ward', { pan: this.panOf(e.mage), gain: 0.5 })
+  },
+  react(e) {
+    this.sound.play('react', { hit: e.hit, on: e.on, pan: this.panOf(e.to), gain: Math.max(this.loudness(e.from), this.loudness(e.to)), important: e.from === this.me })
+    if (e.from === this.me) this.buzz(0.35, 60)
+  },
+  flow(e) {
+    if (e.mage === this.me && e.flow >= TIMING.flow) this.sound.play('flow', { important: true })
+  },
+  shift() {
+    this.sound.play('shift', { important: true })
+  },
+  call() {
+    this.sound.play('call', { important: true })
+  },
+  pick(e) {
+    if (e.mage === this.me) this.sound.play('pick', { on: e.on, important: true })
+  },
+  fizzle(e) {
+    if (e.mage === this.me) this.sound.play('fizzle', { important: true })
+  },
+  fall(e) {
+    this.sound.play('fall', { pan: this.panOf(e.to), gain: this.loudness(e.to), important: true })
+    if (e.to === this.me) this.buzz(1, 450)
+  },
+  rise(e) {
+    this.sound.play('rise', { pan: this.panOf(e.to), gain: this.loudness(e.to), important: true })
+  },
+  save(e) {
+    this.sound.play('save', { pan: this.panOf(e.to), gain: this.loudness(e.to), important: e.to === this.me })
+  },
+  surge(e) {
+    if (e.wave === 1) this.sound.play('surge', { important: true })
+    else this.sound.play('pulse', { gain: 0.6 })
+  },
+  over(e) {
+    const mine = this.myTeam()
+    this.sound.play(e.winner === -1 ? 'draw' : mine === null || e.winner === mine ? 'victory' : 'defeat', { important: true, delay: 0.3 })
   },
 }
 

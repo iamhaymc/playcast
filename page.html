@@ -64,7 +64,10 @@
         </div>
 
         <footer class="hero-foot">
-          <button class="link" data-open="guide">How to play</button>
+          <span class="foot-links">
+            <button class="link" data-open="guide">How to play</button>
+            <button class="link sound-link" data-action="sound" aria-label="Sound" aria-pressed="true" title="Sound (M)"><i data-glyph="sound" class="when-on"></i><i data-glyph="mute" class="when-off"></i></button>
+          </span>
           <span class="inputs"><i data-glyph="keys"></i>Keyboard <i data-glyph="pad"></i>Gamepad <i data-glyph="touch"></i>Touch</span>
         </footer>
       </section>
@@ -149,6 +152,7 @@
           <span id="heal-label" class="heal">Heal 100%</span>
         </div>
         <div class="topbar-side right">
+          <button class="icon-btn" data-action="sound" aria-label="Sound" aria-pressed="true" title="Sound (M)"><i data-glyph="sound" class="when-on"></i><i data-glyph="mute" class="when-off"></i></button>
           <button class="icon-btn" data-action="book" aria-label="Toggle book" title="Book (Tab)"><i data-glyph="book"></i></button>
           <button class="icon-btn" data-open="guide" aria-label="How to play" title="How to play"><i data-glyph="help"></i></button>
           <button class="icon-btn" data-action="leave" aria-label="Leave match" title="Leave"><i data-glyph="close"></i></button>
@@ -263,10 +267,12 @@
           <tr><td>Call <i data-glyph="call"></i></td><td>E</td><td>LT</td><td>Corner of the left pad</td></tr>
           <tr><td>Cancel</td><td>Q or Backspace</td><td>LB</td><td>Center button</td></tr>
           <tr><td>Book</td><td>Tab</td><td>Start</td><td>Book button</td></tr>
+          <tr><td>Sound</td><td>M</td><td></td><td>Speaker button</td></tr>
         </tbody>
       </table>
     </dialog>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <div id="offline" class="offline-note" role="status">Reconnecting…</div>
   </body>
 </html>

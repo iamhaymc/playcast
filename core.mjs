@@ -2309,7 +2309,9 @@ const CHECKS = {
   count: (v) => (Number.isInteger(v) && v >= 0 ? v : null),
   rules: (v) => (v && typeof v === 'object' ? tidyRules(v) : null),
   skill: (v) => (SKILLS[v] ? v : null),
+  token: (v) => (typeof v === 'string' && /^[\w-]{16,64}$/.test(v) ? v : null),
   any: (v) => (v === undefined ? null : v),
+  maybe: (v) => v ?? undefined, // optional: may be left out
 }
 
 export const WIRE = {
@@ -2325,12 +2327,15 @@ export const WIRE = {
     again: {}, // owner: rematch with a new book
     lobby: {}, // owner: return everyone to the lobby
     leave: {}, // leave the room
+    resume: { token: 'token' }, // after a reconnect: take back the seat held for this token
   },
   host: {
-    welcome: { you: 'any' }, // your peer id
+    welcome: { you: 'any', token: 'any' }, // your peer id, and the token that takes your seat back after a drop
+    back: { you: 'any' }, // answer to resume: your old peer id, or null if nothing was held
+    moved: {}, // your seat was taken back on another connection (another tab): don't resume it
     room: { room: 'any' }, // lobby state
     begin: { setup: 'any', you: 'any' }, // a match starts; `you` is your mage id
-    frame: { frame: 'any', events: 'any', kits: 'any' }, // one tick of state, its events and your team's kits
+    frame: { frame: 'maybe', delta: 'maybe', events: 'any', kits: 'maybe' }, // one tick: a whole frame or a delta, its events, and your team's kits when they changed
     end: { results: 'any' }, // the match is over
     fault: { text: 'any' }, // something went wrong
   },
@@ -2354,7 +2359,81 @@ export function unpack(text, side = 'peer') {
   for (const [field, check] of Object.entries(shape)) {
     const value = CHECKS[check](message[field])
     if (value === null) return null
-    out[field] = value
+    if (value !== undefined) out[field] = value
   }
+  return out
+}
+
+// Frames ─────────────────────────────────────────────────────────────────
+//
+// The host sends a whole frame once, then only what changed: diff() against
+// the last frame sent, patch() on the page. packFrame() first swaps each
+// aura's countdown (`left`, falling every tick) for the tick it ends, which
+// holds still, so a quiet tick costs a few bytes. Keys starting with `$` are
+// reserved for deltas.
+
+const isPlain = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+
+/** The wire form of a frame: aura countdowns become end ticks. */
+export function packFrame(frame) {
+  return {
+    ...frame,
+    mages: frame.mages.map((m) => ({ ...m, auras: m.auras.map(({ left, ...aura }) => ({ ...aura, end: frame.tick + left })) })),
+  }
+}
+
+/** A frame back from its wire form. */
+export function unpackFrame(wire) {
+  return {
+    ...wire,
+    mages: wire.mages.map((m) => ({ ...m, auras: m.auras.map(({ end, ...aura }) => ({ ...aura, left: end - wire.tick })) })),
+  }
+}
+
+/**
+ * What changed from `prev` to `next`, or undefined if nothing did. Objects
+ * list their changed keys (and `$gone` for removed ones), arrays of the same
+ * length their changed indexes; anything else is replaced whole.
+ */
+export function diff(prev, next) {
+  if (prev === next) return undefined
+  if (Array.isArray(prev) && Array.isArray(next) && prev.length === next.length) {
+    const out = {}
+    next.forEach((value, i) => {
+      const change = diff(prev[i], value)
+      if (change !== undefined) out[i] = change
+    })
+    return Object.keys(out).length ? out : undefined
+  }
+  if (isPlain(prev) && isPlain(next)) {
+    const out = {}
+    const gone = Object.keys(prev).filter((key) => prev[key] !== undefined && next[key] === undefined)
+    for (const key of Object.keys(next)) {
+      if (next[key] === undefined) continue
+      const change = diff(prev[key], next[key])
+      if (change !== undefined) out[key] = change
+    }
+    if (gone.length) out.$gone = gone
+    return Object.keys(out).length ? out : undefined
+  }
+  if (isPlain(next) && Array.isArray(prev)) return { $set: next }
+  if (next === undefined) return null
+  return next
+}
+
+/** Apply a delta from diff() to `prev`. Returns a new value; `prev` is left as it was. */
+export function patch(prev, change) {
+  if (change === undefined) return prev
+  if (!isPlain(change)) return change
+  if ('$set' in change) return change.$set
+  if (Array.isArray(prev)) {
+    const out = [...prev]
+    for (const [key, value] of Object.entries(change)) out[key] = patch(prev[key], value)
+    return out
+  }
+  if (!isPlain(prev)) return change
+  const out = { ...prev }
+  for (const [key, value] of Object.entries(change)) if (key !== '$gone') out[key] = patch(prev[key], value)
+  for (const key of change.$gone ?? []) delete out[key]
   return out
 }

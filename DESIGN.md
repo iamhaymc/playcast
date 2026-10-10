@@ -66,7 +66,7 @@ The whole game uses twelve keys. Every input mode maps onto them.
 | `call` | Call your aim for the team | E | LT | Corner of the left pad |
 | `drop` | Clear the chord, then the queue, then the cast | Q or Backspace | LB | Center button |
 
-The rune pad is a diamond in the same layout everywhere: star on top, wave left, flame right, leaf bottom. Tab (keyboard) or Start (gamepad) toggles the book; Back (gamepad) opens the guide.
+The rune pad is a diamond in the same layout everywhere: star on top, wave left, flame right, leaf bottom. Tab (keyboard) or Start (gamepad) toggles the book; Back (gamepad) opens the guide; M (keyboard) turns sound on or off.
 
 ### Chords
 
@@ -240,6 +240,7 @@ Every 45 seconds of fight, and when the surge begins, the rift rewrites the chor
 | `page.html` | The page structure: views, HUD, pads and the guide. |
 | `page.css` | All styles. |
 | `page.mjs` | The client: 3D stage, particles, HUD, input and the link to the host. |
+| `sound.mjs` | Sound: synthesized effects, music and haptics. No files to load. |
 | `test.mjs` | Unit, host and browser tests. |
 
 The game is built around messages. Nothing reaches the simulation except `press` orders, and nothing leaves it except events and frames.
@@ -250,7 +251,7 @@ The game is built around messages. Nothing reaches the simulation except `press`
                                   │      Arena.step(): pilots press keys,
                                   │      Match.advance() runs one tick
                                   │                    │
- browser ◄── frame {frame, events, kits} ◄── host ◄── flush() + frame(team) + kits(team)
+ browser ◄── frame {delta, events, kits?} ◄── host ◄── flush() + frame(team) + kits(team)
 ```
 
 - **One authority.** The host runs every match. Clients only send keys and draw what they receive, so every player sees the same game.
@@ -259,6 +260,7 @@ The game is built around messages. Nothing reaches the simulation except `press`
 - **Bots are players.** Bots press the same keys through the same `press` orders, so they obey the same rules, timeouts and fizzles.
 - **Shared code.** The page imports `core.mjs` too, for spell data, text, layout, cursor and chord rules, so the HUD always matches the host.
 - **Private by team.** Kits, draft chords, picks and calls belong to one team. The match marks private events with `only: team`, and the host sends each team its own copy of every frame.
+- **Deltas.** Each peer gets one whole frame, then only what changed since the last one (see [Frames](#frames)).
 
 ---
 
@@ -279,7 +281,7 @@ The game is built around messages. Nothing reaches the simulation except `press`
 | 9 | Brain | `Brain`, `rateSpell`, `targetsFor`, and the `WEIGH` act weights |
 | 10 | Pilot | `Pilot`: drafts, turns plans into timed key presses, raises wards |
 | 11 | Arena | `Arena`, `botRoster`, `simulate` |
-| 12 | Wire | `WIRE`, `pack`, `unpack`, `CODE_LETTERS` |
+| 12 | Wire | `WIRE`, `pack`, `unpack`, `CODE_LETTERS`, and frame deltas: `packFrame`, `unpackFrame`, `diff`, `patch` |
 
 ### Match API
 
@@ -502,31 +504,53 @@ Peer → host:
 | `again` | | host | Rematch with a new book |
 | `lobby` | | host | Return everyone to the lobby |
 | `leave` | | anyone | Leave the room |
+| `resume` | `token` | anyone | After a reconnect or a reload: take back the seat held for this token |
 
 Host → peer:
 
 | Type | Body | When |
 |---|---|---|
-| `welcome` | `you` | On connect: your peer id |
-| `room` | `room` | Lobby state changed: code, owner, phase, rules, seats, watchers |
-| `begin` | `setup, you` | A match starts; `you` is your mage id or `null` when watching |
-| `frame` | `frame, events, kits` | Every tick: your team's copy, with its kits and private events (watchers get the public copy) |
+| `welcome` | `you, token` | On connect: your peer id, and the token that takes your seat back after a drop |
+| `back` | `you` | Answer to `resume`: your old peer id, or `null` if nothing was held |
+| `moved` | | Your seat was taken back on another connection (a copied tab); stop resuming it |
+| `room` | `room` | Lobby state changed: code, owner, phase, rules, seats (with `away` for dropped players), watchers |
+| `begin` | `setup, you` | A match starts (or you are back in one); `you` is your mage id or `null` when watching |
+| `frame` | `frame` or `delta`, `events`, `kits?` | Every tick: your team's copy, with its private events (watchers get the public copy). `kits` only when they changed |
 | `end` | `results` | The match is over |
 | `fault` | `text` | A request failed |
+
+### Frames
+
+A frame is the whole changing state, so sending it every tick costs about 2 KB in 1 vs 1 and 9 KB in 8 vs 8. Instead, a peer gets one whole `frame` when it starts watching (a match begins, it joins mid-match, it comes back from a drop), then a `delta` each tick:
+
+- `packFrame` swaps each aura's countdown (`left`, which falls every tick) for the tick it ends (`end`), which holds still. `unpackFrame` turns it back.
+- `diff(prev, next)` lists only what changed: objects by key (removed keys in `$gone`), same-length arrays by index, anything else replaced whole. `patch(prev, delta)` applies it without touching `prev`. Keys starting with `$` are reserved.
+- The WebSocket compresses messages (`permessage-deflate`, 4 KB window).
+
+`patch(prev, diff(prev, next))` rebuilds `next` exactly; a test checks this on every tick of whole matches. Measured on bot matches, per client:
+
+| Teams | Whole frames | Deltas, compressed |
+|---|---|---|
+| 1 vs 1 | 38 KB/s | 0.7 KB/s |
+| 4 vs 4 | 102 KB/s | 1.8 KB/s |
+| 8 vs 8 | 181 KB/s | 2.9 KB/s |
 
 ---
 
 ## 6. Host
 
-- **Routes.** `/` and the five page files, `/lib/three/...` (from `node_modules/three/build` and `examples` only), `/health`, and the WebSocket at `/wire`.
+- **Routes.** `/` and the six page files, `/lib/three/...` (from `node_modules/three/build` and `examples` only), `/health`, and the WebSocket at `/wire`.
 - **Codes.** Four letters from 20 consonants, so codes never spell words.
 - **Rooms.** A room has rules, two rows of seats (`open`, `human` or `bot`), peers and a phase: `lobby`, `match` or `after`. The first peer is the host; if they leave, the next peer takes over.
 - **Seats.** New peers sit on the team with fewer people. Peers without a seat watch. Shrinking a team turns extra players into watchers.
-- **The loop.** Every 25ms the room runs every tick that is due (catching up at most 10 ticks) and sends one frame with all their events: one copy per team (its kits, draft chords and private events) and a public copy for watchers.
+- **The loop.** Every 25ms the room runs every tick that is due (catching up at most 10 ticks) and sends one frame with all their events: one copy per team (its kits, draft chords and private events) and a public copy for watchers. Peers that have the last frame get a delta; the rest get the whole frame.
 - **Leaving mid-match.** A bot pilot takes over the mage, so the match is never broken.
+- **Dropping and coming back.** Every peer gets a token in `welcome`. When a socket closes while its peer is in a room, the seat and mage are held for 60 seconds with a bot playing for it; the room says the player is `away`, and if they owned it, ownership passes to someone present. A `resume` with the token on a new socket (the page sends it after a reconnect, and after a reload, since the token lives in `sessionStorage`) takes the seat back: the bot steps aside and a whole frame catches the page up. If the host had not noticed the old socket die, the new one takes over and the old one is told `moved`. After the hold, the player leaves as if they had pressed Leave.
+- **Dead connections.** The host pings every socket every 15 seconds; one that misses two pings in a row (30–45 seconds of silence) is closed, which starts its hold. Two, because a page whose main thread is busy stops reading its socket, and its browser stops answering pings until it catches up.
+- **Faults stay small.** A malformed request path is a 400. A message that throws gets a `fault` back. A match that throws is stopped, its players get a `fault` and return to the lobby, and every other room plays on.
 - **Limits.** 60 messages per second per peer, 4KB per message, 500 rooms.
 
-Start it with `npm start`, or import it: `const host = await openHost({ port: 0 })` returns `{ port, url, hall, close }`.
+Start it with `npm start`, or import it: `const host = await openHost({ port: 0 })` returns `{ port, url, hall, close }`. Options: `quiet` (no logs), `hold` (ms a dropped seat is held) and `beat` (ms between pings).
 
 ---
 
@@ -548,7 +572,7 @@ Start it with `npm start`, or import it: `const host = await openHost({ port: 0 
 | 10 | Plates | Nameplates and floating numbers |
 | 11 | Hud | Clock, banner, book (draft and kit), chord tray, ward and flow status, wisp book |
 | 12 | Views | Lobby and result rendering, toasts |
-| 13 | Game | Client state: messages in, visuals out |
+| 13 | Game | Client state: messages in, visuals and sounds out; music by view; resume after a drop |
 | 14 | Boot | Starts the game; `window.chordcast` is the game object |
 
 ### Rendering
@@ -660,7 +684,23 @@ The HUD is laid out symmetrically around the arena:
 
 ### Local echo
 
-Each press carries a `seq`. Frames report the last `seq` the host processed. The page replays unconfirmed presses on top of the host's chord with the same core rules (`moveCursor` with the snap home, `readChord`, `readRunes` against the book or the wisp book), so the tray and cursor respond at once and never disagree with the host for long.
+Each press carries a `seq`. Frames report the last `seq` the host processed. The page replays unconfirmed presses on top of the host's chord with the same core rules (`moveCursor` with the snap home, `readChord`, `readRunes` against the book or the wisp book), so the tray and cursor respond at once and never disagree with the host for long. After a reload the page's count restarts, so it carries on from the host's last `seq`.
+
+### Connection
+
+The page keeps the token from `welcome` in `sessionStorage`. When the socket drops mid-room, the last frame stays on screen, greyed, under a "Reconnecting…" note, and keys are ignored. On reconnect (and on a reload) the page sends `resume` before anything else; `back` with an id means it is home again, and `begin` and a whole frame follow. `back` with `null` means the seat is gone: the page shows the home view. Other players see a toast when someone drops ("a bot stands in") or comes back, and the lobby marks them Away.
+
+### Sound
+
+`sound.mjs` synthesizes everything with the Web Audio API, so there are no files to load. Nothing plays until the first click, tap or key, as browsers require. Muted (the speaker in the top bar, the link on the home card, or M), the audio is suspended entirely, and the choice is remembered. A hidden tab goes quiet.
+
+- **Keys.** Each rune has its own note (star highest, leaf lowest, from D minor pentatonic), so every chord is a short tune you can learn by ear. Moves tick, meta sparkles, clear drops. Keys sound at once, before the host answers.
+- **Spells.** Each school has a cast, a release and an impact voice: fire whooshes and crackles, frost rings like glass, storm buzzes and cracks, nature plucks and thocks, shadow growls and booms, holy rings bells, arcane wobbles. Friendly spells land as a rising chime (healing) or a shimmer (boons); harmful ones that do no damage land as a dark dissonance. Sounds are panned by where the mage stands on screen and are louder for you than for your team, and louder for your team than for foes.
+- **Incoming.** A wardable spell flying at you rises in pitch over its flight and ticks as it lands, panned toward its caster: ward on the tick.
+- **Moments.** Parry clang, reaction chord, flow arpeggio, fizzle buzz, the shift warning chime and the rift's swirl, falls, revives, death ward bells, the gong at the start, the surge, and a fanfare or lament at the end.
+- **Music.** A four-bar loop in D minor from a small step sequencer: slow pads and a sparse arpeggio under the menus; in the fight, bass, drums and pads that grow with intensity (draft 0.15, fight 0.5, surge 0.8 rising to 1), adding faster hats and a sixteenth arpeggio. The end sting plays alone before the menu music returns.
+- **Mixing.** Effects and music have their own buses into a compressor, with a little synthesized room reverb. Sounds about other mages are dropped when more than 72 voices sound or the same sound just played; sounds about you always play.
+- **Haptics.** Gamepads rumble and phones (when playing by touch) vibrate on big hits to you, your parries and reactions, and your fall.
 
 ---
 
@@ -670,9 +710,9 @@ Each press carries a `seq`. Frames report the last `seq` the host processed. The
 
 | Group | Covers |
 |---|---|
-| Core | Spell list shape and size; rule clamping; book balance, chord lengths, prefix-free chords and seeding; rune and chord reading; cursor paths for both sides and the snap home; a full cast; every fizzle reason; stuns and drop; reflect, dodge and never-miss; every spell in the codex cast and landed; chord speed; each metamagic and its cost; wards, rests and never-miss; diminishing returns and grace; reactions; flow; sticky aim; calls; the draft, private kits and the early start; rift shifts; wisps; determinism; bots finishing 1v1 to 8v8; bots using every mechanic; hard beating easy; async brains; wire validation; this document listing every spell |
-| Host | Hosting, bad codes, joining by code, tuning, bots filling seats, shared books, kits and picks kept from foes, presses echoed by `seq`, leaving mid-match, match end |
-| Views | A Playwright run through every screen, saved to `shots/` |
+| Core | Frame deltas rebuilding every tick of whole matches exactly, at a fraction of the size; spell list shape and size; rule clamping; book balance, chord lengths, prefix-free chords and seeding; rune and chord reading; cursor paths for both sides and the snap home; a full cast; every fizzle reason; stuns and drop; reflect, dodge and never-miss; every spell in the codex cast and landed; chord speed; each metamagic and its cost; wards, rests and never-miss; diminishing returns and grace; reactions; flow; sticky aim; calls; the draft, private kits and the early start; rift shifts; wisps; determinism; bots finishing 1v1 to 8v8; bots using every mechanic; hard beating easy; async brains; wire validation; this document listing every spell |
+| Host | Hosting, bad codes, joining by code, tuning, bots filling seats, shared books, kits and picks kept from foes, presses echoed by `seq`, leaving mid-match, match end; one whole frame then deltas, compressed; malformed paths and a match that throws; dropping, resuming, taking over a live seat and a hold running out; a connection that stops answering pings |
+| Views | A Playwright run through every screen, saved to `shots/`; sound starting, muting and unmuting; a reload mid-match taking the seat back |
 
 Screenshots in `shots/`:
 
@@ -708,7 +748,9 @@ The browser test uses software WebGL, so it keeps at most two pages open and fre
 
 **Add a status look.** Add a row to `STATUS_LOOK` in `page.mjs`, with a `tint` and a `mark` if it should read at a glance. For a mesh, toggle it in `Figure.update`.
 
-**Add a school.** Add it to `SCHOOLS` (core); `SCHOOL_LOOK`, `HEADS`, `FLOURISH` and `SIGILS` (page); and a `--school` color (CSS).
+**Add a school.** Add it to `SCHOOLS` (core); `SCHOOL_LOOK`, `HEADS`, `FLOURISH` and `SIGILS` (page); `SCHOOL_VOICES` (sound); and a `--school` color (CSS).
+
+**Add a sound.** Add a voice to `VOICES` in `sound.mjs` (built from `tone`, `hiss`, `bell` and `pluck`) and play it from a row in `EVENT_SOUNDS` in `page.mjs`.
 
 **Add a flight.** Add its seconds to `FLIGHTS` (core) and a branch in `Flight.update` (page).
 
