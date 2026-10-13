@@ -1,0 +1,693 @@
+/**
+ * host.mjs — the Chordcast host.
+ *
+ * Serves the page and its modules over HTTP and runs every room over one
+ * WebSocket endpoint (/wire). The host is the single source of truth: it
+ * advances each match in fixed ticks and sends the same frames to everyone,
+ * so all players always see the same game. A player whose connection drops
+ * keeps their seat for a while, with a bot standing in, and takes it back
+ * with the token they were given on arrival. Public rooms are listed for
+ * anyone browsing, and a quick match seats strangers together, filling the
+ * seats still open with bots when its wait runs out.
+ *
+ *   1  Files   static files for the page
+ *   2  Peers   one socket per browser tab
+ *   3  Rooms   seats, rules and the match loop
+ *   4  Hall    every room, found by code
+ *   5  Boot    openHost() and the command line entry
+ */
+
+import http from 'node:http'
+import crypto from 'node:crypto'
+import fs from 'node:fs/promises'
+import path from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { WebSocketServer } from 'ws'
+import { Arena, Match, Pilot, CODE_LETTERS, QUICK, RULES, TICK_MS, diff, hashText, pack, packFrame, pickGarb, tidyGarb, tidyRules, unpack } from './core.mjs'
+
+const ROOT = path.dirname(fileURLToPath(import.meta.url))
+
+// ─── 1 · Files ──────────────────────────────────────────────────────────────
+
+const PAGES = { '/': 'page.html', '/page.html': 'page.html', '/page.css': 'page.css', '/page.mjs': 'page.mjs', '/core.mjs': 'core.mjs', '/sound.mjs': 'sound.mjs' }
+const LIBS = { '/lib/three/': path.join(ROOT, '..', 'node_modules', 'three') }
+const TYPES = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml' }
+
+/** Map a URL path to a file on disk, or null. Never leaves the allowed folders. */
+function findFile(urlPath) {
+  if (PAGES[urlPath]) return path.join(ROOT, PAGES[urlPath])
+  for (const [prefix, base] of Object.entries(LIBS)) {
+    if (!urlPath.startsWith(prefix)) continue
+    const file = path.normalize(path.join(base, urlPath.slice(prefix.length)))
+    const inside = ['build', 'examples'].some((dir) => file.startsWith(path.join(base, dir) + path.sep))
+    return inside ? file : null
+  }
+  return null
+}
+
+/** Serve one request. Never throws: a malformed path is a 400, a missing file a 404. */
+async function serveFile(request, response) {
+  let urlPath
+  try {
+    urlPath = decodeURIComponent(new URL(request.url, 'http://host').pathname)
+  } catch {
+    return response.writeHead(400, { 'content-type': 'text/plain' }).end('Bad request')
+  }
+  if (urlPath === '/health') return response.writeHead(200, { 'content-type': 'text/plain' }).end('ok')
+  const file = findFile(urlPath)
+  try {
+    if (!file) throw new Error('not found')
+    const body = await fs.readFile(file)
+    response.writeHead(200, { 'content-type': `${TYPES[path.extname(file)] ?? 'application/octet-stream'}; charset=utf-8`, 'cache-control': 'no-cache' })
+    response.end(body)
+  } catch {
+    if (!response.headersSent) response.writeHead(404, { 'content-type': 'text/plain' })
+    response.end('Not found')
+  }
+}
+
+// ─── 2 · Peers ──────────────────────────────────────────────────────────────
+
+const RATE_LIMIT = 60 // messages per second per peer
+
+class Peer {
+  constructor(socket, id) {
+    this.socket = socket
+    this.id = id
+    this.token = crypto.randomBytes(16).toString('base64url') // takes this peer back after a drop
+    this.name = 'Mage'
+    this.garb = tidyGarb() // hat, robe and staff, picked in the lobby
+    this.room = null
+    this.mage = null
+    this.away = false // the socket dropped; the seat is held until `timer` runs out
+    this.timer = null
+    this.synced = false // has the last frame, so deltas apply
+    this.window = { start: Date.now(), count: 0 }
+  }
+  send(type, body) {
+    if (this.socket.readyState === this.socket.OPEN) this.socket.send(pack(type, body))
+  }
+  sendRaw(text) {
+    if (this.socket.readyState === this.socket.OPEN) this.socket.send(text)
+  }
+  /** False when this peer is sending too fast. */
+  allow() {
+    const now = Date.now()
+    if (now - this.window.start > 1000) this.window = { start: now, count: 0 }
+    return ++this.window.count <= RATE_LIMIT
+  }
+}
+
+// ─── 3 · Rooms ──────────────────────────────────────────────────────────────
+
+const BOT_NAMES = ['Ash', 'Brin', 'Cael', 'Dara', 'Esk', 'Fen', 'Grim', 'Hale', 'Ivo', 'Juno', 'Kip', 'Lark', 'Mira', 'Nox', 'Orin', 'Pell', 'Quill', 'Rook', 'Sable', 'Tam', 'Una', 'Vex', 'Wren', 'Yara']
+
+const OPEN = Object.freeze({ kind: 'open' })
+const BOT = Object.freeze({ kind: 'bot' })
+
+class Room {
+  constructor(hall, code, rules) {
+    this.hall = hall
+    this.code = code
+    this.rules = tidyRules(rules)
+    this.seats = [[], []]
+    this.peers = new Set()
+    this.owner = null
+    this.phase = 'lobby' // lobby | match | after
+    this.match = null
+    this.arena = null
+    this.results = null
+    this.timer = null
+    this.round = 0
+    this.listed = false // shown to everyone who browses
+    this.quick = false // opened by a quick match: it starts itself when its wait runs out
+    this.startAt = 0 // when a quick room starts itself (ms), 0 when it does not
+    this.clock = null
+    this.fitSeats()
+  }
+
+  // Seats ────────────────────────────────────────────────────────────────
+
+  /** Resize both teams to the rules. Humans beyond the new size become watchers. */
+  fitSeats() {
+    this.seats = this.seats.map((team, t) => {
+      const size = this.rules.teams[t]
+      for (const seat of team.slice(size)) if (seat.kind === 'human') seat.peer.mage = null
+      return Array.from({ length: size }, (_, slot) => team[slot] ?? OPEN)
+    })
+    for (const peer of this.peers) if (!this.seatOf(peer)) this.sitAnywhere(peer)
+  }
+
+  seatOf(peer) {
+    for (const [team, seats] of this.seats.entries()) {
+      const slot = seats.findIndex((seat) => seat.kind === 'human' && seat.peer === peer)
+      if (slot >= 0) return { team, slot }
+    }
+    return null
+  }
+
+  /** Sit in the first open seat, on the team with fewer people. */
+  sitAnywhere(peer) {
+    const filled = this.seats.map((team) => team.filter((seat) => seat.kind === 'human').length)
+    const order = filled[1] < filled[0] ? [1, 0] : [0, 1]
+    for (const team of order) {
+      const slot = this.seats[team].findIndex((seat) => seat.kind === 'open')
+      if (slot < 0) continue
+      this.seats[team][slot] = { kind: 'human', peer }
+      return
+    }
+  }
+
+  vacate(peer) {
+    const seat = this.seatOf(peer)
+    if (seat) this.seats[seat.team][seat.slot] = OPEN
+  }
+
+  // People ───────────────────────────────────────────────────────────────
+
+  enter(peer) {
+    this.hall.browsers.delete(peer)
+    this.peers.add(peer)
+    peer.room = this
+    peer.synced = false
+    this.owner ??= peer
+    if (this.phase === 'lobby') this.sitAnywhere(peer)
+    // A quick room full of people has nobody left to wait for.
+    if (this.startAt && !this.seats.flat().some((seat) => seat.kind === 'open')) this.startIn(QUICK_FULL)
+    this.share()
+    if (this.phase !== 'lobby' && this.match) {
+      peer.send('begin', { setup: this.match.setup(), you: null })
+      if (this.phase === 'after') peer.send('end', { results: this.results })
+    }
+  }
+
+  exit(peer) {
+    if (!this.peers.delete(peer)) return
+    if (peer.mage && this.arena && !this.arena.pilots.has(peer.mage)) this.arena.seat(peer.mage, this.makePilot(peer.mage))
+    this.vacate(peer)
+    clearTimeout(peer.timer)
+    peer.room = null
+    peer.mage = null
+    peer.away = false
+    if (this.owner === peer) this.owner = this.present()[0] ?? [...this.peers][0] ?? null
+    if (!this.peers.size) return this.close()
+    this.share()
+  }
+
+  /** Peers whose sockets are up. */
+  present() {
+    return [...this.peers].filter((peer) => !peer.away)
+  }
+
+  /** A peer's socket dropped: hold its seat and mage, a bot playing for it, until it comes back or the hold runs out. */
+  drop(peer) {
+    peer.away = true
+    if (peer.mage && this.arena && this.phase === 'match') this.arena.seat(peer.mage, this.makePilot(peer.mage))
+    if (this.owner === peer) this.owner = this.present()[0] ?? peer
+    this.share()
+  }
+
+  /** A dropped peer is back: it takes its mage from the bot and catches up with a whole frame. */
+  rejoin(peer) {
+    peer.away = false
+    peer.synced = false
+    if (peer.mage && this.arena) this.arena.free(peer.mage)
+    this.owner ??= peer
+    this.share()
+    if (this.phase !== 'lobby' && this.match) {
+      peer.send('begin', { setup: this.match.setup(), you: peer.mage })
+      if (this.phase === 'after') peer.send('end', { results: this.results })
+    }
+  }
+
+  close() {
+    clearInterval(this.timer)
+    clearTimeout(this.clock)
+    this.timer = null
+    this.startAt = 0
+    this.hall.rooms.delete(this.code)
+    if (this.listed) this.hall.touch()
+  }
+
+  /** A quick room starts itself in `ms`, or sooner if it was already due. */
+  startIn(ms) {
+    const at = Date.now() + ms
+    if (this.startAt && this.startAt <= at) return
+    clearTimeout(this.clock)
+    this.startAt = at
+    this.clock = setTimeout(() => this.phase === 'lobby' && this.begin(), ms)
+    this.clock.unref?.()
+  }
+
+  // Lobby actions ────────────────────────────────────────────────────────
+
+  seat(peer, team, slot) {
+    if (this.phase !== 'lobby' || this.seats[team]?.[slot]?.kind !== 'open') return
+    this.vacate(peer)
+    this.seats[team][slot] = { kind: 'human', peer }
+    this.share()
+  }
+
+  bench(peer, team, slot) {
+    const seat = this.seats[team]?.[slot]
+    if (peer !== this.owner || this.phase !== 'lobby' || this.startAt || !seat || seat.kind === 'human') return
+    this.seats[team][slot] = seat.kind === 'bot' ? OPEN : BOT
+    this.share()
+  }
+
+  tune(peer, rules) {
+    if (peer !== this.owner || this.phase !== 'lobby' || this.startAt) return
+    this.rules = tidyRules(rules)
+    this.fitSeats()
+    this.share()
+  }
+
+  /** Lobby state for every peer. */
+  share() {
+    const seats = this.seats.map((team, t) =>
+      team.map((seat, slot) => {
+        if (seat.kind === 'human') return { kind: 'human', id: seat.peer.id, name: seat.peer.name, garb: seat.peer.garb, away: seat.peer.away }
+        if (seat.kind === 'bot') return { kind: 'bot', name: this.botName(t, slot), garb: this.botGarb(t, slot) }
+        return { kind: 'open', name: null }
+      }),
+    )
+    const seated = new Set(seats.flat().map((seat) => seat.id))
+    const watchers = [...this.peers].filter((peer) => !seated.has(peer.id)).map((peer) => ({ id: peer.id, name: peer.name, away: peer.away }))
+    // A quick room's countdown goes out as the time left, so the page needs no shared clock.
+    const wait = this.startAt ? Math.max(0, this.startAt - Date.now()) : null
+    const room = { code: this.code, owner: this.owner?.id ?? null, phase: this.phase, rules: this.rules, seats, watchers, listed: this.listed, quick: this.quick, wait }
+    for (const peer of this.peers) peer.send('room', { room })
+    if (this.listed) this.hall.touch()
+  }
+
+  /** Show the room to everyone who browses, or hide it. */
+  list(peer, on) {
+    if (peer !== this.owner || on === this.listed) return
+    this.listed = on
+    this.hall.touch()
+    this.share()
+  }
+
+  /** One line in the public list. */
+  summary() {
+    const seats = this.seats.flat()
+    const wait = this.startAt ? Math.max(0, this.startAt - Date.now()) : null
+    return {
+      code: this.code,
+      host: this.owner?.name ?? '',
+      phase: this.phase,
+      quick: this.quick,
+      teams: this.rules.teams,
+      skill: this.rules.skill,
+      people: seats.filter((seat) => seat.kind === 'human').length,
+      open: this.phase === 'lobby' ? seats.filter((seat) => seat.kind === 'open').length : 0,
+      wait,
+    }
+  }
+
+  botName(team, slot) {
+    return BOT_NAMES[hashText(`${this.code}:${this.round}:${team}:${slot}`) % BOT_NAMES.length]
+  }
+
+  /** Each bot dresses its own way, seeded like its name. */
+  botGarb(team, slot) {
+    return pickGarb(hashText(`${this.code}:${this.round}:${team}:${slot}:garb`))
+  }
+
+  // The match ────────────────────────────────────────────────────────────
+
+  makePilot(mageId) {
+    return new Pilot({ skill: this.rules.skill, seed: hashText(`${this.match.seed}:${mageId}`) })
+  }
+
+  start(peer) {
+    if (peer !== this.owner || this.phase === 'match') return
+    this.begin()
+  }
+
+  /** Start the match: open seats become bots. A quick room's wait ends here too. */
+  begin() {
+    clearInterval(this.timer)
+    clearTimeout(this.clock)
+    this.startAt = 0
+    // Bots play under the names and garb the lobby showed; the next round deals new ones.
+    const roster = this.seats.flatMap((team, t) =>
+      team.map((seat, slot) => {
+        const human = seat.kind === 'human'
+        const garb = human ? seat.peer.garb : this.botGarb(t, slot)
+        return { id: `t${t}s${slot}`, team: t, slot, bot: !human, name: human ? seat.peer.name : this.botName(t, slot), garb, peer: human ? seat.peer : null }
+      }),
+    )
+    this.round++
+    this.match = new Match({ seed: (Date.now() ^ (Math.random() * 0x7fffffff)) >>> 0, rules: this.rules, roster })
+    this.arena = new Arena(this.match)
+    for (const peer of this.peers) {
+      peer.mage = null
+      peer.synced = false
+    }
+    for (const entry of roster) {
+      if (entry.peer) entry.peer.mage = entry.id
+      if (!entry.peer || entry.peer.away) this.arena.seat(entry.id, this.makePilot(entry.id))
+    }
+    this.sent = new Map()
+    this.phase = 'match'
+    this.results = null
+    this.share()
+    const setup = this.match.setup()
+    for (const peer of this.peers) peer.send('begin', { setup, you: peer.mage })
+    this.due = performance.now()
+    this.timer = setInterval(() => this.loop(), TICK_MS / 2)
+  }
+
+  /** One turn of the room's timer. A bug in the match stops that match, never the host. */
+  loop() {
+    try {
+      this.step()
+    } catch (error) {
+      this.abort(error)
+    }
+  }
+
+  /**
+   * Advance whole ticks that are due, then send one frame with all their
+   * events. Each team gets its own copy: its kits, its draft chords and its
+   * private events (picks, calls). Watchers see only what is public. Peers
+   * that have the last frame get a delta; the rest get the whole frame.
+   */
+  step() {
+    const now = performance.now()
+    if (now - this.due > TICK_MS * 10) this.due = now - TICK_MS * 10
+    const events = []
+    while (this.due <= now && this.match.phase !== 'over') {
+      events.push(...this.arena.step())
+      this.due += TICK_MS
+    }
+    if (!events.length && this.lastTick === this.match.tick) return
+    this.lastTick = this.match.tick
+    const texts = new Map()
+    for (const team of [0, 1, null]) {
+      const seen = events.filter((event) => event.only === undefined || event.only === team)
+      const kits = team === null ? {} : this.match.kits(team)
+      const wire = packFrame(this.match.frame(team))
+      const last = this.sent.get(team)
+      const kitsText = JSON.stringify(kits)
+      const newKits = kitsText !== last?.kitsText
+      this.sent.set(team, { wire, kitsText })
+      let whole = null
+      texts.set(team, {
+        delta: pack('frame', { delta: diff(last?.wire, wire) ?? {}, events: seen, kits: newKits ? kits : undefined }),
+        whole: () => (whole ??= pack('frame', { frame: wire, events: seen, kits })),
+      })
+    }
+    for (const peer of this.peers) {
+      if (peer.away) continue
+      const text = texts.get(this.teamOf(peer))
+      peer.sendRaw(peer.synced ? text.delta : text.whole())
+      peer.synced = true
+    }
+    if (this.match.phase === 'over') this.finish()
+  }
+
+  /** Stop a match that hit an error and send everyone back to the lobby. */
+  abort(error) {
+    this.hall.report(`Room ${this.code}: the match stopped on an error.`, error)
+    clearInterval(this.timer)
+    this.timer = null
+    this.phase = 'lobby'
+    this.quick = false
+    this.match = null
+    this.arena = null
+    for (const peer of this.peers) {
+      peer.mage = null
+      peer.send('fault', { text: 'The match hit an error and was stopped.' })
+    }
+    for (const peer of this.peers) if (!this.seatOf(peer)) this.sitAnywhere(peer)
+    this.share()
+  }
+
+  /** The team a peer plays on in the current match, or null when watching. */
+  teamOf(peer) {
+    return (peer.mage && this.match?.index.get(peer.mage)?.team) ?? null
+  }
+
+  finish() {
+    clearInterval(this.timer)
+    this.timer = null
+    this.phase = 'after'
+    this.quick = false // from now on the owner runs the room, as in any other
+    this.results = this.match.results()
+    for (const peer of this.peers) peer.send('end', { results: this.results })
+    this.share()
+  }
+
+  press(peer, key, seq) {
+    if (this.phase === 'match' && peer.mage) this.match.receive({ type: 'press', mage: peer.mage, key, seq })
+  }
+
+  backToLobby(peer) {
+    if (peer !== this.owner || this.phase !== 'after') return
+    this.phase = 'lobby'
+    this.match = null
+    this.arena = null
+    for (const watcher of this.peers) if (!this.seatOf(watcher)) this.sitAnywhere(watcher)
+    this.share()
+  }
+}
+
+// ─── 4 · Hall ───────────────────────────────────────────────────────────────
+
+const MAX_ROOMS = 500
+
+const LIST_MOST = 40 // public rooms sent to a browser
+const LIST_DELAY = 250 // ms to gather changes before the list goes out again
+
+class Hall {
+  constructor({ hold, quiet, wait }) {
+    this.rooms = new Map()
+    this.tokens = new Map() // token → peer, for every peer that can still come back
+    this.browsers = new Set() // peers following the public list
+    this.count = 0
+    this.hold = hold // ms a dropped peer's seat is held
+    this.wait = wait // ms a quick room waits for players
+    this.quiet = quiet
+    this.listTimer = null
+  }
+
+  /** The public rooms: quick rooms filling up first, then lobbies with open seats, then the rest. */
+  listing() {
+    const rank = (room) => (room.phase !== 'lobby' ? 2 : room.open > 0 ? (room.quick ? 0 : 1) : 2)
+    return [...this.rooms.values()]
+      .filter((room) => room.listed && room.peers.size)
+      .map((room) => room.summary())
+      .sort((a, b) => rank(a) - rank(b) || b.people - a.people || a.code.localeCompare(b.code))
+      .slice(0, LIST_MOST)
+  }
+
+  /** A public room changed: send the list again soon, once for every change in the meantime. */
+  touch() {
+    if (!this.browsers.size || this.listTimer) return
+    this.listTimer = setTimeout(() => {
+      this.listTimer = null
+      this.sendList()
+    }, LIST_DELAY)
+    this.listTimer.unref?.()
+  }
+
+  sendList(peers = this.browsers) {
+    const text = pack('rooms', { rooms: this.listing() })
+    for (const peer of peers) peer.sendRaw(text)
+  }
+
+  /**
+   * Quick match: join the public quick room of this size that has the most
+   * people and a seat open, or open one that waits for players and then
+   * starts itself, bots taking the seats still open.
+   */
+  seek(peer, size) {
+    const fits = (room) => room.startAt && room.phase === 'lobby' && room.rules.teams.every((team) => team === size) && room.seats.flat().some((seat) => seat.kind === 'open')
+    const humans = (room) => room.seats.flat().filter((seat) => seat.kind === 'human').length
+    const found = [...this.rooms.values()].filter(fits).sort((a, b) => humans(b) - humans(a))[0]
+    if (found) return found.enter(peer)
+    const room = this.open({ ...RULES, teams: [size, size] })
+    if (!room) return peer.send('fault', { text: 'The host is full. Try again soon.' })
+    room.listed = true
+    room.quick = true
+    room.startIn(this.wait)
+    room.enter(peer)
+  }
+
+  report(text, error) {
+    if (!this.quiet) console.error(text, error)
+  }
+
+  newCode() {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const code = Array.from({ length: 4 }, () => CODE_LETTERS[Math.floor(Math.random() * CODE_LETTERS.length)]).join('')
+      if (!this.rooms.has(code)) return code
+    }
+    return null
+  }
+
+  open(rules) {
+    const code = this.rooms.size < MAX_ROOMS ? this.newCode() : null
+    if (!code) return null
+    const room = new Room(this, code, rules ?? RULES)
+    this.rooms.set(code, room)
+    return room
+  }
+
+  welcome(socket) {
+    let peer = new Peer(socket, `p${(++this.count).toString(36)}`)
+    this.tokens.set(peer.token, peer)
+    peer.send('welcome', { you: peer.id, token: peer.token })
+    socket.missed = 0 // pings in a row with no answer
+    socket.on('pong', () => (socket.missed = 0))
+    socket.on('message', (data) => {
+      if (!peer.allow()) return
+      const message = unpack(String(data), 'peer')
+      if (!message) return
+      try {
+        if (message.type === 'resume') peer = this.resume(peer, message.token)
+        else this.route(peer, message)
+      } catch (error) {
+        this.report(`Peer ${peer.id}: a ${message.type} message failed.`, error)
+        peer.send('fault', { text: 'That did not work. Try again.' })
+      }
+    })
+    // A socket replaced by a resume closes late; only the peer's current socket counts.
+    socket.on('close', () => peer.socket === socket && this.lose(peer))
+    socket.on('error', () => socket.terminate())
+  }
+
+  /** A peer's socket closed. In a room, its seat is held for a while; otherwise it is gone. */
+  lose(peer) {
+    this.browsers.delete(peer)
+    if (!peer.room || this.closed) return this.tokens.delete(peer.token)
+    peer.room.drop(peer)
+    clearTimeout(peer.timer)
+    peer.timer = setTimeout(() => {
+      this.tokens.delete(peer.token)
+      peer.room?.exit(peer)
+    }, this.hold)
+    peer.timer.unref()
+  }
+
+  /**
+   * A new socket asks for the seat held for `token`. The held peer takes the
+   * socket over (closing its old one if the host had not noticed the drop yet)
+   * and the fresh peer is discarded. Returns whichever peer now owns the socket.
+   */
+  resume(fresh, token) {
+    const held = this.tokens.get(token)
+    if (!held || held === fresh || !held.room) {
+      fresh.send('back', { you: null })
+      return fresh
+    }
+    fresh.room?.exit(fresh)
+    this.tokens.delete(fresh.token)
+    clearTimeout(held.timer)
+    const stale = held.socket
+    held.socket = fresh.socket
+    // If the old socket still works (another tab with a copy of the token), say so, so it stops asking.
+    if (stale !== fresh.socket) {
+      if (stale.readyState === stale.OPEN) stale.send(pack('moved'))
+      stale.close()
+    }
+    held.send('back', { you: held.id })
+    held.room.rejoin(held)
+    return held
+  }
+
+  /** Route one checked message from a peer to its handler. */
+  route(peer, message) {
+    const room = peer.room
+    switch (message.type) {
+      case 'hello':
+        peer.name = message.name
+        if (message.garb) peer.garb = message.garb
+        return room?.share()
+      case 'open': {
+        room?.exit(peer)
+        const fresh = this.open(message.rules)
+        return fresh ? fresh.enter(peer) : peer.send('fault', { text: 'The host is full. Try again soon.' })
+      }
+      case 'join': {
+        const target = this.rooms.get(message.code)
+        if (!target) return peer.send('fault', { text: `No match with code ${message.code}.` })
+        if (target === room) return room.share()
+        room?.exit(peer)
+        return target.enter(peer)
+      }
+      case 'leave':
+        return room?.exit(peer)
+      case 'seat':
+        return room?.seat(peer, message.team, message.slot)
+      case 'bench':
+        return room?.bench(peer, message.team, message.slot)
+      case 'tune':
+        return room?.tune(peer, message.rules)
+      case 'start':
+      case 'again':
+        return room?.start(peer)
+      case 'lobby':
+        return room?.backToLobby(peer)
+      case 'press':
+        return room?.press(peer, message.key, message.seq)
+      case 'browse':
+        if (!message.on) return this.browsers.delete(peer)
+        this.browsers.add(peer)
+        return this.sendList([peer])
+      case 'list':
+        return room?.list(peer, message.on)
+      case 'seek':
+        room?.exit(peer)
+        return this.seek(peer, message.size)
+    }
+  }
+}
+
+// ─── 5 · Boot ───────────────────────────────────────────────────────────────
+
+const HOLD_MS = 60000 // a dropped player's seat is held this long
+const BEAT_MS = 15000 // time between pings; two missed in a row close the socket
+const QUICK_FULL = 1500 // a quick room full of people starts this soon
+
+/** Start the host. Resolves to { port, url, hall, close() }. */
+export async function openHost({ port = Number(process.env.PORT) || 8080, quiet = false, hold = HOLD_MS, beat = BEAT_MS, wait = QUICK.wait * 1000 } = {}) {
+  const hall = new Hall({ hold, quiet, wait })
+  const server = http.createServer(serveFile)
+  // Frames are JSON that repeats itself, so compression pays. A small window keeps memory per socket low.
+  const deflate = { threshold: 128, serverMaxWindowBits: 12, zlibDeflateOptions: { level: 6, memLevel: 6 } }
+  const wire = new WebSocketServer({ server, path: '/wire', maxPayload: 4096, perMessageDeflate: deflate })
+  wire.on('connection', (socket) => hall.welcome(socket))
+  // A dead connection sends no close, so ping everyone, and close one that misses two pings in a row
+  // (its seat is then held). Two, because a busy page (compiling shaders on a slow phone) answers late.
+  const beating = setInterval(() => {
+    for (const socket of wire.clients) {
+      if (socket.missed >= 2) {
+        socket.terminate()
+        continue
+      }
+      socket.missed++
+      socket.ping()
+    }
+  }, beat)
+  await new Promise((resolve) => server.listen(port, resolve))
+  const actual = server.address().port
+  const url = `http://localhost:${actual}`
+  if (!quiet) console.log(`Chordcast is live at ${url}`)
+  const close = () =>
+    new Promise((resolve) => {
+      clearInterval(beating)
+      clearTimeout(hall.listTimer)
+      hall.closed = true
+      for (const peer of hall.tokens.values()) clearTimeout(peer.timer)
+      for (const room of hall.rooms.values()) room.close()
+      for (const socket of wire.clients) socket.terminate()
+      wire.close()
+      server.close(resolve)
+    })
+  return { port: actual, url, hall, close }
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) openHost()

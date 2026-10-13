@@ -1,8 +1,15 @@
-# Chordcast
+<table>
+<tbody>
+<tr>
+<td><img src="./data/_brand/logo_2.svg" width="64px"/></td>
+<td><h1 style="color:#234;">PLAYCAST</h1></td>
+</tr>
+</tbody>
+</table>
 
 Real-time arena magic duels where every action is a chord of keys. A few moves pick the target, a run of runes picks the spell, and it fires on the last rune: the faster you type it, the faster it casts. Each match deals a fresh book with fresh chords. You draft your kit from it, then learn its chords while you fight, as the rift keeps rewriting some of them.
 
-![A 2 vs 2 fight](shots/08-battle.png)
+![A 2 vs 2 fight](test/shots/08-battle.png)
 
 - **151 spells** drawn from tabletop and MMO classics: Fireball, Polymorph, Counterspell, Lifebloom, Living Bomb, Death Ward and more.
 - **Draft, then fight.** Each player drafts a private kit of 8 from a 16-spell book by typing the chords.
@@ -29,7 +36,7 @@ Needs Node 20 or newer.
 ```sh
 npm install
 npm start        # http://localhost:8080 (set PORT to change)
-npm test         # engine, host and browser tests; refreshes shots/
+npm test         # engine, host and browser tests; refreshes test/shots/
 ```
 
 The browser test uses Playwright's Chromium. If it is not installed yet, run `npx playwright install chromium` once.
@@ -60,10 +67,10 @@ Every keyboard key can be rebound in the settings (the gear). New? Start with **
 
 | File | Role |
 |---|---|
-| `core.mjs` | Portable engine: rules, spells, match, bots, messages |
-| `host.mjs` | Web server: pages, rooms, codes, the tick loop |
-| `page.html` `page.css` `page.mjs` | The client: 3D stage, particles, HUD, input |
-| `sound.mjs` | Synthesized sound effects, music and haptics |
-| `test.mjs` | Tests |
+| `app/core.mjs` | Portable engine: rules, spells, match, bots, messages |
+| `app/host.mjs` | Web server: pages, rooms, codes, the tick loop |
+| `app/page.html` `app/page.css` `app/page.mjs` | The client: 3D stage, particles, HUD, input |
+| `app/sound.mjs` | Synthesized sound effects, music and haptics |
+| `test/test.mjs` | Tests |
 
 See [DESIGN.md](DESIGN.md) for the full design and reference.

@@ -1,4 +1,5 @@
-# Chordcast design
+# ⏬ PLAYCAST — Design
+
 
 A complete overview and reference. For setup, see [README.md](README.md).
 
@@ -284,13 +285,13 @@ A first visit from a system that asks for less motion starts with screen shake o
 
 | File | Role |
 |---|---|
-| `core.mjs` | The portable engine: rules, spells, books, the match simulation, bots and the wire protocol. No DOM, no Node APIs. |
-| `host.mjs` | The web server: static files, WebSocket rooms, codes, seats and the authoritative tick loop. |
-| `page.html` | The page structure: views, HUD, pads and the guide. |
-| `page.css` | All styles. |
-| `page.mjs` | The client: 3D stage, particles, HUD, input and the link to the host. |
-| `sound.mjs` | Sound: synthesized effects, music and haptics. No files to load. |
-| `test.mjs` | Unit, host and browser tests. |
+| `app/core.mjs` | The portable engine: rules, spells, books, the match simulation, bots and the wire protocol. No DOM, no Node APIs. |
+| `app/host.mjs` | The web server: static files, WebSocket rooms, codes, seats and the authoritative tick loop. |
+| `app/page.html` | The page structure: views, HUD, pads and the guide. |
+| `app/page.css` | All styles. |
+| `app/page.mjs` | The client: 3D stage, particles, HUD, input and the link to the host. |
+| `app/sound.mjs` | Sound: synthesized effects, music and haptics. No files to load. |
+| `test/test.mjs` | Unit, host and browser tests. |
 
 The game is built around messages. Nothing reaches the simulation except `press` orders, and nothing leaves it except events and frames.
 
@@ -802,15 +803,15 @@ The page keeps the token from `welcome` in `sessionStorage`. When the socket dro
 
 ## 8. Tests
 
-`npm test` runs `test.mjs` with Node's test runner.
+`npm test` runs `test/test.mjs` with Node's test runner.
 
 | Group | Covers |
 |---|---|
 | Core | Frame deltas rebuilding every tick of whole matches exactly, at a fraction of the size; spell list shape and size; rule clamping; book balance, chord lengths, prefix-free chords and seeding; rune and chord reading; cursor paths for both sides and the snap home; a full cast; every fizzle reason; stuns and drop; reflect, dodge and never-miss; every spell in the codex cast and landed; chord speed; each metamagic and its cost; wards, rests and never-miss; diminishing returns and grace; reactions; flow; sticky aim; calls; the draft, private kits and the early start; rift shifts; wisps; determinism; bots finishing 1v1 to 8v8; bots using every mechanic; hard beating easy; async brains; wire validation; garb tidied, seeded and worn into the match; auras naming the spell that put them there; this document listing every spell; the tutorial step by step (the draft waits, each step's check, skipping) and to the end of its duel; practice (chosen kits, dummies that never fall, no clock, free mana, the ward drill, new chords, the cap on chosen books) |
 | Host | Hosting, bad codes, joining by code, tuning, garb in the lobby and the match (bots keep the name and garb the lobby showed), bots filling seats, shared books, kits and picks kept from foes, presses echoed by `seq`, leaving mid-match, match end; one whole frame then deltas, compressed; malformed paths and a match that throws; dropping, resuming, taking over a live seat and a hold running out; a connection that stops answering pings; public rooms listed and hidden, and quick matches seating people together, starting when full, and filling with bots when the wait runs out |
-| Views | A Playwright run through every screen, saved to `shots/`; picking garb in the lobby and wearing it into the match; aura details on hover; focus and particle budgets in 2 vs 2 and 8 vs 8; sound starting, muting and unmuting; a reload mid-match taking the seat back; settings reaching the sound, quality, palette and keys (a key bound twice swaps) and resetting; the tutorial's coach from the draft to its duel and its results; a practice room with a chosen kit counting casts; a quick match counting down and joined from the public list |
+| Views | A Playwright run through every screen, saved to `test/shots/`; picking garb in the lobby and wearing it into the match; aura details on hover; focus and particle budgets in 2 vs 2 and 8 vs 8; sound starting, muting and unmuting; a reload mid-match taking the seat back; settings reaching the sound, quality, palette and keys (a key bound twice swaps) and resetting; the tutorial's coach from the draft to its duel and its results; a practice room with a chosen kit counting casts; a quick match counting down and joined from the public list |
 
-Screenshots in `shots/`:
+Screenshots in `test/shots/`:
 
 | File | View |
 |---|---|
